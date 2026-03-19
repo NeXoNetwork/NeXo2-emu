@@ -30,6 +30,7 @@ cd NeXo2
 mkdir build && cd build
 cmake ..
 make
+```
 
 ⚖️ Aviso Legal
 NeXo2 no está afiliado a Nintendo. El proyecto no incluye ni incluirá archivos propietarios (firmware, keys, juegos). El usuario es responsable de obtener sus propios archivos de manera legal.

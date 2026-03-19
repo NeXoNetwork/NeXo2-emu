@@ -2,7 +2,6 @@
 
 **NeXo2** es un proyecto experimental de emulación para la sucesora de la Nintendo Switch. Este proyecto ha sido creado con fines estrictamente **educativos** para aprender sobre desarrollo de sistemas, arquitectura de hardware y emulación de bajo nivel.
 
----
 
 ## 🎯 Objetivos
 * **Aprendizaje:** Explorar el desarrollo en C++ y la arquitectura ARM.

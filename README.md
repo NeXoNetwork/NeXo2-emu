@@ -15,9 +15,9 @@ NeXo 2 es un proyecto de investigación de bajo nivel dedicado al estudio y aná
 | :--- | :--- |
 | SoC | Nvidia T239 (Custom Ampere) |
 | CPU | 8x ARM Cortex-A78C |
-| GPU | 1536 CUDA Cores |
+| GPU | GA10B (1536 CUDA Cores) |
 | API Gráfica | Vulkan 1.3 / NVN2 |
-| Arquitectura | ARMv8.2-A / ARMv9 (Research) |
+| Arquitectura | ARMv8 (Research) |
 
 ## Estado del Desarrollo
 

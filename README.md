@@ -17,7 +17,7 @@ NeXo 2 es un proyecto de investigación de bajo nivel dedicado al estudio y aná
 | CPU | 8x ARM Cortex-A78C |
 | GPU | GA10B (1536 CUDA Cores) |
 | API Gráfica | Vulkan 1.3 / NVN2 |
-| Arquitectura | ARMv8 (Research) |
+| Arquitectura | ARMv8.2-A | ARM Cortex-A78 (Research) |
 
 ## Estado del Desarrollo
 

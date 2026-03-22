@@ -31,30 +31,52 @@
 
 ---
 
+## 📂 Estructura del Proyecto / Project Structure
+
+```text
+NeXo2/
+├── .github/              # CI/CD & GitHub Templates
+├── docs/                 # Documentación técnica y especificaciones
+├── externals/            # Librerías externas (Dynarmic, SDL2, glad, etc.)
+├── src/                  # Código fuente principal (Source code)
+│   ├── common/           # Utilidades, Logger y tipos de datos globales
+│   ├── core/             # El "corazón" del emulador
+│   │   ├── arm64/        # Intérprete y lógica de CPU
+│   │   ├── memory/       # Gestión de Memoria Virtual (VMM)
+│   │   └── hle/          # Emulación de Alto Nivel (Kernel & Services)
+│   ├── video_core/       # Implementación de Vulkan y Renderer
+│   ├── input_common/     # Gestión de controles y periféricos
+│   └── nexo_ui/          # Interfaz de usuario (Frontend)
+├── tests/                # Pruebas unitarias para la CPU y Memoria
+├── CMakeLists.txt        # Configuración principal de compilación
+└── README.md             # Este archivo
+
+### Bloque 3: Hoja de Ruta (Roadmap)
+```markdown
 ## 🗺️ Hoja de Ruta / Roadmap (2026)
 
 ### 🚀 Fase 1: Infraestructura Base (Core) - [0%]
-- [ ] **[ES/EN] Logging System:** Logger thread-safe C++20 (colors/fmt).
-- [ ] **[ES/EN] Memory Manager:** Virtual memory & paging (4KB/64KB).
-- [ ] **[ES/EN] VFS (File System):** NCA/HFS2 binary header parsing.
-- [ ] **[ES/EN] Arg Parser:** CLI flags (`--debug`, `--cpu-trace`).
+- [ ] **[ES/EN] Logging System:** Implementar un logger thread-safe en C++20 con soporte de colores. / Implement a thread-safe C++20 logger with color support.
+- [ ] **[ES/EN] Memory Manager:** Clase `Memory` con soporte para paginación básica (4KB/64KB). / `Memory` class with basic paging support (4KB/64KB).
+- [ ] **[ES/EN] VFS (Virtual File System):** Cargador de archivos para parsear cabeceras NCA/HFS2. / File loader for parsing NCA/HFS2 headers.
+- [ ] **[ES/EN] Arg Parser:** Sistema de flags por consola (`--debug`, `--cpu-trace`). / CLI flags system (`--debug`, `--cpu-trace`).
 
-### 🧠 Fase 2: CPU Research (ARM64) - [0%]
-- [ ] **[ES/EN] Registers:** Data structures for `X0-X30`, `SP`, `PC`, `NZCV`.
-- [ ] **[ES/EN] Instruction Decoder:** ARMv8.2-A base instruction decoding.
-- [ ] **[ES/EN] Interpreter:** Basic Fetch-Decode-Execute loop (PoC).
-- [ ] **[ES/EN] JIT Integration:** Dynarmic/Native JIT engine skeleton.
+### 🧠 Fase 2: Investigación de CPU (ARM64) - [0%]
+- [ ] **[ES/EN] Registers State:** Estructura de datos para registros `X0-X30`, `SP`, `PC` y `NZCV`. / Data structure for `X0-X30`, `SP`, `PC`, and `NZCV` registers.
+- [ ] **[ES/EN] Instruction Decoder:** Desensamblador básico para instrucciones ARMv8.2-A. / Basic instruction decoder for ARMv8.2-A.
+- [ ] **[ES/EN] Interpreter Loop:** Ciclo Fetch-Decode-Execute para pruebas de concepto (PoC). / Basic Fetch-Decode-Execute cycle for Proof of Concept (PoC).
+- [ ] **[ES/EN] JIT Integration:** Esqueleto de integración para `Dynarmic` o motor JIT nativo. / Integration skeleton for `Dynarmic` or a native JIT engine.
 
-### 🖼️ Fase 3: Graphics (Vulkan) - [0%]
-- [ ] **[ES/EN] Vulkan 1.3 Instance:** Validation layers & Physical Device selection.
-- [ ] **[ES/EN] Windowing:** SDL2/GLFW integration for render window.
-- [ ] **[ES/EN] Memory Mapping:** Emulator RAM to Vulkan Memory (VMA).
-- [ ] **[ES/EN] Shader Research:** Ampere microcode analysis (SPIR-V).
+### 🖼️ Fase 3: Subsistema Gráfico (Vulkan) - [0%]
+- [ ] **[ES/EN] Vulkan 1.3 Instance:** Inicialización de capas de validación y selección de GPU física. / Validation layers initialization and physical GPU selection.
+- [ ] **[ES/EN] Windowing System:** Integración con SDL2/GLFW para la ventana de renderizado. / SDL2/GLFW integration for the render window.
+- [ ] **[ES/EN] Memory Mapping:** Mapeo de memoria del emulador a objetos de Vulkan (VMA). / Emulator memory mapping to Vulkan objects (VMA).
+- [ ] **[ES/EN] Shader Research:** Análisis del microcódigo Ampere para traducción a SPIR-V. / Ampere microcode analysis for SPIR-V translation.
 
-### 📂 Fase 4: Kernel & Services (HLE) - [0%]
-- [ ] **[ES/EN] Syscall Dispatcher:** Interrupt table for system call interception.
-- [ ] **[ES/EN] Service Manager:** `nn::*` service registration (FS, Time, HID).
-- [ ] **[ES/EN] Thread Manager:** Basic scheduling for multi-core simulation.
+### 📂 Fase 4: Kernel & Servicios (HLE) - [0%]
+- [ ] **[ES/EN] Syscall Dispatcher:** Tabla de interrupciones para capturar llamadas al sistema. / Interrupt table for system call interception.
+- [ ] **[ES/EN] Service Manager:** Arquitectura para registrar servicios `nn::*` (FS, Time, HID). / Architecture to register `nn::*` services (FS, Time, HID).
+- [ ] **[ES/EN] Thread Manager:** Planificación de hilos para simular entorno multinúcleo. / Basic scheduling for multi-core simulation.
 
 ---
 

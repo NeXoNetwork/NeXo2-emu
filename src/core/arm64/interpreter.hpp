@@ -1,28 +1,26 @@
-#pragma once
-#include "cpu_state.hpp"
-#include "../memory/memory.hpp"
+#ifndef INTERPRETER_HPP
+#define INTERPRETER_HPP
 
-namespace NeXo2::Core {
+#include <cstdint>
+#include <vector>
+#include <array>
 
 class Interpreter {
 public:
-    // Constructor: Necesita una referencia a la memoria para funcionar
-    explicit Interpreter(Memory& mem) : m_memory(mem) {
-        m_state.Reset();
-    }
+    Interpreter();
+    ~Interpreter();
 
-    // Ejecuta un ciclo: Leer -> Ejecutar -> Avanzar
-    void Step();
-    
-    // Decodifica la instrucción binaria
-    void Execute(uint32_t instr);
+    void Reset();
+    void Step(); // Ejecuta una instrucción
 
-    // Acceso al estado para el Main
-    CPUState& GetState() { return m_state; }
+    // Getters para ImGui
+    uint64_t GetPC() const { return pc; }
+    uint64_t GetX(int index) const { return (index < 31) ? x[index] : 0; }
 
 private:
-    CPUState m_state;   // El estado de los registros
-    Memory& m_memory;   // La referencia a la RAM
+    std::array<uint64_t, 31> x; // Registros X0-X30
+    uint64_t pc;                // Program Counter
+    uint64_t sp;                // Stack Pointer
 };
 
-} // namespace NeXo2::Core
+#endif

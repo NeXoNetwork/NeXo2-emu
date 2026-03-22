@@ -1,36 +1,35 @@
 #pragma once
 #include <vector>
 #include <cstdint>
-#include <cstring>
-
-namespace NeXo2::Core {
+#include <iostream>
 
 class Memory {
 public:
+    // 12 GB de RAM = 12LL * 1024 * 1024 * 1024
+    static const uint64_t RAM_SIZE = 12LL * 1024 * 1024 * 1024; 
+
     Memory() {
-        m_data.resize(0x10000, 0); // 64KB de RAM para pruebas
+        // Reservamos los 12GB de forma contigua
+        ram.resize(RAM_SIZE, 0);
+        std::cout << "Memoria NeXo 2: 12GB RAM inicializada." << std::endl;
     }
 
-    template <typename T>
-    T Read(uint64_t address) {
-        T value;
-        if (address + sizeof(T) <= m_data.size()) {
-            std::memcpy(&value, &m_data[address], sizeof(T));
-        } else {
-            value = 0;
-        }
-        return value;
+    // Leer 8, 16, 32, 64 bits
+    template<typename T>
+    T Read(uint64_t addr) {
+        if (addr + sizeof(T) > RAM_SIZE) return 0;
+        return *reinterpret_cast<T*>(&ram[addr]);
     }
 
-    template <typename T>
-    void Write(uint64_t address, T value) {
-        if (address + sizeof(T) <= m_data.size()) {
-            std::memcpy(&m_data[address], &value, sizeof(T));
-        }
+    // Escribir
+    template<typename T>
+    void Write(uint64_t addr, T value) {
+        if (addr + sizeof(T) > RAM_SIZE) return;
+        *reinterpret_cast<T*>(&ram[addr]) = value;
     }
+
+    bool IsReady() const { return !ram.empty(); }
 
 private:
-    std::vector<uint8_t> m_data;
+    std::vector<uint8_t> ram;
 };
-
-} // namespace NeXo2::Core

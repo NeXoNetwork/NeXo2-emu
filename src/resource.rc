@@ -1,0 +1,2 @@
+// ID del icono principal. El número 101 es un estándar común.
+IDI_ICON1               ICON                    "assets/icon.ico"

@@ -51,8 +51,10 @@ NeXo2/
 ├── CMakeLists.txt        # Configuración principal de compilación
 └── README.md             # Este archivo
 
-### Bloque 3: Hoja de Ruta (Roadmap)
 ```markdown
+
+### Bloque 3: Hoja de Ruta (Roadmap)
+
 ## 🗺️ Hoja de Ruta / Roadmap (2026)
 
 ### 🚀 Fase 1: Infraestructura Base (Core) - [0%]

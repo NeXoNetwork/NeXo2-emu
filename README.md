@@ -53,8 +53,6 @@ NeXo2/
 
 ```
 
-### Bloque 3: Hoja de Ruta (Roadmap)
-
 ## 🗺️ Hoja de Ruta / Roadmap (2026)
 
 ### 🚀 Fase 1: Infraestructura Base (Core) - [0%]

@@ -1,2 +1,2 @@
-// ID del icono principal. El número 101 es un estándar común.
-IDI_ICON1               ICON                    "assets/icon.ico"
+// El ID 101 es el estándar para el icono principal del EXE
+101 ICON "assets/icon.ico"

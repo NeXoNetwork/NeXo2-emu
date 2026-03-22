@@ -5,7 +5,7 @@
 
 // Includes del núcleo
 #include "arm64/interpreter.hpp"
-#include "core/memory/memory.hpp" // Se encuentra gracias a target_include_directories
+#include "core/memory/memory.hpp"
 
 #include <iostream>
 
@@ -16,7 +16,7 @@ int main(int argc, char* argv[]) {
     SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
     
     // Carga de Logo
-    SDL_Surface* logoSurface = SDL_LoadBMP("assets/logo.bmp");
+    SDL_Surface* logoSurface = SDL_LoadBMP("assets/icon.ico");
     SDL_Texture* logoTexture = nullptr;
     if (logoSurface) {
         logoTexture = SDL_CreateTextureFromSurface(renderer, logoSurface);

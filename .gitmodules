@@ -1,3 +1,12 @@
 [submodule "externals/ballistic"]
 	path = externals/ballistic
 	url = https://github.com/pound-emu/ballistic
+[submodule "externals/SDL"]
+	path = externals/SDL
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "externals/imgui"]
+	path = externals/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "externals/glad"]
+	path = externals/glad
+	url = https://github.com/Dav1dde/glad.git

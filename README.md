@@ -51,7 +51,7 @@ NeXo2/
 ├── CMakeLists.txt        # Configuración principal de compilación
 └── README.md             # Este archivo
 
-```markdown
+```
 
 ### Bloque 3: Hoja de Ruta (Roadmap)
 

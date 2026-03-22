@@ -1,111 +1,129 @@
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_image.h>
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
+#include <iostream>
+#include <vector>
+#include <string>
 
-#include "core/memory/memory.hpp"
-#include "core/arm64/interpreter.hpp"
+// --- Configuración de NeXo 2 ---
+const int WINDOW_WIDTH = 1280;
+const int WINDOW_HEIGHT = 720;
 
-using namespace NeXo2::Core;
+// Función para intentar cargar el logo en diferentes rutas relativas
+SDL_Texture* LoadLogo(SDL_Renderer* renderer) {
+    // Lista de rutas posibles (desde build/ o desde la raíz)
+    std::vector<std::string> paths = {
+        "assets/logo.png",
+        "../assets/logo.png",
+        "../../assets/logo.png"
+    };
 
-// Estructura para el reporte de salud del emulador
-struct EmulatorStatus {
-    bool memory_ok = false;
-    bool cpu_reset_ok = false;
-    bool add_opcode_ok = false;
-    bool mov_opcode_ok = false;
-};
+    SDL_Surface* surface = nullptr;
+    for (const auto& path : paths) {
+        surface = IMG_Load(path.c_str());
+        if (surface) {
+            std::cout << "[INFO] Logo cargado desde: " << path << std::endl;
+            break;
+        }
+    }
+
+    if (!surface) {
+        std::cerr << "[ERROR] No se pudo encontrar assets/logo.png en ninguna ruta." << std::endl;
+        return nullptr;
+    }
+
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+    SDL_DestroySurface(surface);
+    return texture;
+}
 
 int main(int argc, char* argv[]) {
-    // --- 1. SETUP DEL EMULADOR ---
-    Memory ram;
-    Interpreter cpu(ram);
-    EmulatorStatus status;
+    // 1. Inicializar SDL
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
+        std::cerr << "Error SDL_Init: " << SDL_GetError() << std::endl;
+        return -1;
+    }
 
-    // --- 2. BATERÍA DE TESTS PREVIOS ---
-    // Test 1: Reset
-    cpu.GetState().Reset();
-    if (cpu.GetState().pc == 0 && cpu.GetState().x[0] == 0) status.cpu_reset_ok = true;
+    // 2. Inicializar SDL_image para cargar el PNG
+    if (!(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG)) {
+        std::cerr << "Error IMG_Init: " << IMG_GetError() << std::endl;
+        return -1;
+    }
 
-    // Test 2: Memory & MOV
-    ram.Write<uint32_t>(0, 0x52800141); // MOV X1, #10
-    cpu.Step(); // Ejecuta MOV
-    if (cpu.GetState().x[1] == 10) status.mov_opcode_ok = true;
+    // 3. Crear Ventana y Renderer
+    SDL_Window* window = SDL_CreateWindow("NeXo 2 Emulator | NX", WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_RESIZABLE);
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL, SDL_RENDERER_ACCELERATED);
 
-    // Test 3: ADD
-    cpu.GetState().x[2] = 20;
-    ram.Write<uint32_t>(4, 0x8b020020); // ADD X0, X1, X2 (10 + 20)
-    cpu.Step(); // Ejecuta ADD
-    if (cpu.GetState().x[0] == 30) status.add_opcode_ok = true;
-    
-    status.memory_ok = true; // Si llegamos aquí sin crash, la memoria funciona
+    if (!window || !renderer) {
+        std::cerr << "Error al crear ventana/renderer: " << SDL_GetError() << std::endl;
+        return -1;
+    }
 
-    // --- 3. SETUP GRÁFICO ---
-    SDL_Init(SDL_INIT_VIDEO);
-    SDL_Window* window = SDL_CreateWindow("NeXo 2 - System Integrity Check", 1024, 768, 0);
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
-
+    // 4. Configurar ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    ImGui::StyleColorsDark();
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
-    bool quit = false;
-    while (!quit) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            ImGui_ImplSDL3_ProcessEvent(&e);
-            if (e.type == SDL_EVENT_QUIT) quit = true;
+    // 5. Cargar el Logo de NeXo
+    SDL_Texture* logoTexture = LoadLogo(renderer);
+
+    // Bucle Principal
+    bool running = true;
+    while (running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            ImGui_ImplSDL3_ProcessEvent(&event);
+            if (event.type == SDL_EVENT_QUIT) running = false;
         }
 
+        // Iniciar Frame de ImGui
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        // --- VENTANA DE REPORTE ---
-        ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(500, 400), ImGuiCond_Always);
-        ImGui::Begin("NeXo 2 Status Report", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-
-        ImGui::Text("Verificando componentes core...");
+        // Ventana de Estado (GUI)
+        ImGui::Begin("NX 2 - Dashboard");
+        ImGui::Text("Emulador NeXo 2 v0.1");
         ImGui::Separator();
-
-        // Función auxiliar para dibujar los OK/FAIL
-        auto DrawStatus = [](const char* label, bool ok) {
-            ImGui::Text("%s:", label); ImGui::SameLine(300);
-            if (ok) ImGui::TextColored(ImVec4(0, 1, 0, 1), "[ OK ]");
-            else    ImGui::TextColored(ImVec4(1, 0, 0, 1), "[ FAIL ]");
-        };
-
-        DrawStatus("Memory Subsystem (R/W)", status.memory_ok);
-        DrawStatus("CPU Register Reset", status.cpu_reset_ok);
-        DrawStatus("Instruction: MOV (Immediate)", status.mov_opcode_ok);
-        DrawStatus("Instruction: ADD (Register)", status.add_opcode_ok);
-
-        ImGui::Separator();
+        ImGui::Text("Status: Running");
+        ImGui::Text("Logo: %s", logoTexture ? "Loaded" : "Missing");
         
-        if (status.add_opcode_ok && status.mov_opcode_ok) {
-            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "SYSTEM READY FOR NEXT INSTRUCTION SET.");
+        if (ImGui::Button("Reset CPU")) {
+            // Aquí irá la lógica de reset
         }
-
-        if (ImGui::Button("Cerrar y continuar", ImVec2(-1, 40))) quit = true;
-
         ImGui::End();
 
-        // Renderizado
-        ImGui::Render();
-        SDL_SetRenderDrawColor(renderer, 20, 25, 30, 255);
+        // --- RENDERIZADO ---
+        SDL_SetRenderDrawColor(renderer, 15, 15, 15, 255); // Fondo casi negro
         SDL_RenderClear(renderer);
-        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
+
+        // Dibujar el Logo si existe
+        if (logoTexture) {
+            float scale = 0.5f; // Ajusta el tamaño del logo aquí
+            int w, h;
+            SDL_QueryTexture(logoTexture, NULL, NULL, &w, &h);
+            SDL_FRect destRect = { 20.0f, 20.0f, w * scale, h * scale };
+            SDL_RenderTexture(renderer, logoTexture, NULL, &destRect);
+        }
+
+        ImGui::Render();
+        ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData());
         SDL_RenderPresent(renderer);
     }
 
-    // Cleanup
+    // Limpieza
+    SDL_DestroyTexture(logoTexture);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    IMG_Quit();
     SDL_Quit();
 
     return 0;

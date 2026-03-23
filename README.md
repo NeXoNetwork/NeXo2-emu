@@ -1,4 +1,4 @@
-# NeXo 2 | Emulation Research Laboratory
+# NeXo 2 | Emulator of Nintendo Switch 2
 
 NeXo 2 is an open-source research project focused on the study and analysis of the Nintendo Switch 2 (T239) hardware architecture. The project aims to document system components and experiment with low-level compatibility layers using C++20.
 

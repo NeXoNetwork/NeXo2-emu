@@ -30,6 +30,9 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ## Development Roadmap (2026)
 
+## Current Fhase:
+  ·Phase 0: Research
+
 ### Phase 1: Core Infrastructure
 - [ ] **Logging Framework:** Implementation of a high-performance, thread-safe logging system.
 - [ ] **Memory Management Unit:** Development of a VMM with support for 4KB and 64KB page granularity.

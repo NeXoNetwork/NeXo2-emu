@@ -13,16 +13,27 @@ using NeXo2::Core::BallisticJit;
 using NeXo2::Core::Interpreter;
 using NeXo2::Core::Memory;
 
-// Pequeno programa ARM64 de ejemplo (3x MOVZ) para probar el front-end del JIT.
-// Alineado a 16 bytes porque bal_memory_init_flat lo exige.
+// Programa ARM64 de ejemplo que se carga en memoria en 0x80000000:
+//   MOVZ X0, #0x1234
+//   MOVZ X1, #0x0001
+//   ADD  X2, X0, #0x10   (X2 = X0 + 0x10 = 0x1244)
+//   NOP
+static const uint32_t g_program[] = {
+    0xD2824680u, 0xD2800021u, 0x91004002u, 0xD503201Fu,
+};
+static constexpr uint64_t PROG_BASE = 0x80000000ull;
+
+// Demo para el JIT (3x MOVZ), alineado a 16 bytes.
 alignas(16) static const uint32_t g_demo_program[] = {
-    0xD2824680u, // MOVZ X0, #0x1234
-    0xD2800841u, // MOVZ X1, #0x0042
-    0xD29FE002u, // MOVZ X2, #0xFF00, LSL #16
+    0xD2824680u, 0xD2800841u, 0xD29FE002u,
 };
 
+static void LoadProgram(Memory& mem) {
+    for (unsigned i = 0; i < sizeof(g_program) / sizeof(g_program[0]); ++i)
+        mem.Write<uint32_t>(PROG_BASE + i * 4, g_program[i]);
+}
+
 int main(int, char**) {
-    // SDL3: SDL_Init devuelve true en exito (ya NO se compara con < 0).
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         SDL_Log("Error inicializando SDL: %s", SDL_GetError());
         return -1;
@@ -31,18 +42,17 @@ int main(int, char**) {
     SDL_Window* window = SDL_CreateWindow("NeXo 2 | 0.0.0.1", 1280, 720, SDL_WINDOW_RESIZABLE);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
 
-    // Logo: cargamos un BMP de verdad (un .ico no lo carga SDL_LoadBMP).
     SDL_Texture* logoTexture = nullptr;
     if (SDL_Surface* logoSurface = SDL_LoadBMP("assets/logo.bmp")) {
         logoTexture = SDL_CreateTextureFromSurface(renderer, logoSurface);
         SDL_DestroySurface(logoSurface);
     }
 
-    // Nucleo del emulador.
-    Memory       mem;        // memoria por paginas (bajo demanda, no 12 GB de golpe)
-    Interpreter  cpu(mem);   // CPU ARM64 (interprete esqueleto)
-    BallisticJit jit;        // motor JIT (front-end IR; aun sin backend)
-    int lastIrCount = -1;    // resultado de la ultima traduccion de prueba
+    Memory       mem;
+    LoadProgram(mem);        // el programa vive en memoria antes de ejecutar
+    Interpreter  cpu(mem);   // PC arranca en 0x80000000
+    BallisticJit jit;
+    int lastIrCount = -1;
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -76,15 +86,19 @@ int main(int, char**) {
 
         ImGui::Separator();
         const auto& st = cpu.GetState();
-        ImGui::Text("PC = 0x%016llX", (unsigned long long)st.pc);
-        ImGui::Text("SP = 0x%016llX", (unsigned long long)st.sp);
+        const uint32_t curr = mem.Read<uint32_t>(st.pc);
+        ImGui::Text("PC = 0x%016llX   ->   instr 0x%08X", (unsigned long long)st.pc, curr);
         ImGui::Text("X0 = 0x%016llX", (unsigned long long)st.x[0]);
+        ImGui::Text("X1 = 0x%016llX", (unsigned long long)st.x[1]);
+        ImGui::Text("X2 = 0x%016llX", (unsigned long long)st.x[2]);
         ImGui::Text("Paginas RAM activas: %zu (%.2f MB)",
                     mem.AllocatedPages(), mem.AllocatedBytes() / (1024.0 * 1024.0));
 
         if (ImGui::Button("Step CPU")) cpu.Step();
         ImGui::SameLine();
         if (ImGui::Button("Reset CPU")) cpu.Reset();
+        ImGui::SameLine();
+        if (ImGui::Button("Run (4 instr)")) { for (int i = 0; i < 4; ++i) cpu.Step(); }
 
         ImGui::Separator();
         ImGui::Text("Ballistic JIT (traduce ARM64 -> IR; sin ejecucion todavia)");
@@ -93,10 +107,8 @@ int main(int, char**) {
             lastIrCount = jit.TranslateFlat(g_demo_program, n);
         }
         ImGui::SameLine();
-        if (lastIrCount >= 0)
-            ImGui::Text("IR generada: %d instrucciones", lastIrCount);
-        else
-            ImGui::TextDisabled("(sin traducir aun)");
+        if (lastIrCount >= 0) ImGui::Text("IR generada: %d instrucciones", lastIrCount);
+        else                  ImGui::TextDisabled("(sin traducir aun)");
 
         if (logoTexture) {
             ImGui::Separator();

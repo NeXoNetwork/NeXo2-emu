@@ -3,29 +3,34 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
-// Includes del núcleo
 #include "arm64/interpreter.hpp"
 #include "core/memory/memory.hpp"
 
-#include <iostream>
+#include <cstdint>
 
-int main(int argc, char* argv[]) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) return -1;
+using NeXo2::Core::Interpreter;
+using NeXo2::Core::Memory;
+
+int main(int, char**) {
+    // SDL3: SDL_Init devuelve true en exito (ya NO se compara con < 0).
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+        SDL_Log("Error inicializando SDL: %s", SDL_GetError());
+        return -1;
+    }
 
     SDL_Window* window = SDL_CreateWindow("NeXo 2 | 0.0.0.1", 1280, 720, SDL_WINDOW_RESIZABLE);
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, NULL);
-    
-    // Carga de Logo
-    SDL_Surface* logoSurface = SDL_LoadBMP("assets/icon.ico");
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
+
+    // Logo: cargamos un BMP de verdad (un .ico no lo carga SDL_LoadBMP).
     SDL_Texture* logoTexture = nullptr;
-    if (logoSurface) {
+    if (SDL_Surface* logoSurface = SDL_LoadBMP("assets/logo.bmp")) {
         logoTexture = SDL_CreateTextureFromSurface(renderer, logoSurface);
         SDL_DestroySurface(logoSurface);
     }
 
-    // Inicializar Componentes
-    Interpreter cpu;
-    Memory mem; // Aquí se reservan los 12GB de RAM
+    // Nucleo del emulador.
+    Memory      mem;        // memoria por paginas (bajo demanda, no 12 GB de golpe)
+    Interpreter cpu(mem);   // CPU ARM64 con acceso a esa memoria
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -45,21 +50,33 @@ int main(int argc, char* argv[]) {
         ImGui::NewFrame();
 
         ImGui::Begin("NeXo 2 Diagnostics");
-        
+
         auto Tick = [](const char* label, bool ok) {
             ImGui::TextColored(ok ? ImVec4(0,1,0,1) : ImVec4(1,0,0,1), ok ? "[OK]" : "[XX]");
             ImGui::SameLine(); ImGui::Text("%s", label);
         };
 
         Tick("ARM64 Interpreter", true);
-        Tick("Memory (12GB RAM)", mem.IsReady());
+        Tick("Memory (paged VMM)", mem.IsReady());
         Tick("SDL3 Graphics Driver", true);
         Tick("Vulkan Core", false);
-        
+
+        ImGui::Separator();
+        const auto& st = cpu.GetState();
+        ImGui::Text("PC = 0x%016llX", (unsigned long long)st.pc);
+        ImGui::Text("SP = 0x%016llX", (unsigned long long)st.sp);
+        ImGui::Text("X0 = 0x%016llX", (unsigned long long)st.x[0]);
+        ImGui::Text("Paginas RAM activas: %zu (%.2f MB)",
+                    mem.AllocatedPages(), mem.AllocatedBytes() / (1024.0 * 1024.0));
+
+        if (ImGui::Button("Step CPU")) cpu.Step();
+        ImGui::SameLine();
+        if (ImGui::Button("Reset CPU")) cpu.Reset();
+
         if (logoTexture) {
             ImGui::Separator();
             ImGui::Text("Engine Logo:");
-            ImGui::Image((ImTextureID)logoTexture, ImVec2(150, 75));
+            ImGui::Image((ImTextureID)(intptr_t)logoTexture, ImVec2(150, 75));
         }
 
         ImGui::End();
@@ -75,6 +92,8 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;
 }

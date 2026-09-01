@@ -1,26 +1,29 @@
-#ifndef INTERPRETER_HPP
-#define INTERPRETER_HPP
+#pragma once
+#include "common/types.hpp"
+#include "cpu_state.hpp"
+#include "memory.hpp"
 
-#include <cstdint>
-#include <vector>
-#include <array>
+namespace NeXo2::Core {
 
+// Intérprete de la CPU ARM64 (Cortex-A78C).
+// De momento sólo realiza el ciclo Fetch/Decode/Execute a nivel esqueleto.
 class Interpreter {
 public:
-    Interpreter();
-    ~Interpreter();
+    explicit Interpreter(Memory& memory) : m_memory(memory) {
+        Reset();
+    }
 
     void Reset();
     void Step(); // Ejecuta una instrucción
 
-    // Getters para ImGui
-    uint64_t GetPC() const { return pc; }
-    uint64_t GetX(int index) const { return (index < 31) ? x[index] : 0; }
+    CPUState&       GetState()       { return m_state; }
+    const CPUState& GetState() const { return m_state; }
 
 private:
-    std::array<uint64_t, 31> x; // Registros X0-X30
-    uint64_t pc;                // Program Counter
-    uint64_t sp;                // Stack Pointer
+    void Execute(u32 instr);
+
+    CPUState m_state;
+    Memory&  m_memory;
 };
 
-#endif
+} // namespace NeXo2::Core

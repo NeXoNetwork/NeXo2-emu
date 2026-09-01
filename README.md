@@ -26,7 +26,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 * `src/core/memory/`: Virtual Memory Manager (VMM).
 * `src/core/hle/`: High-Level Emulation (Kernel and OS Services).
 * `src/video_core/`: Vulkan implementation and hardware renderer.
-* `externals/`: Third-party dependencies (Dynarmic, SDL3, etc.).
+* `externals/`: Third-party dependencies (ballistic, SDL3, etc.).
 
 ## Development Roadmap (2026)
 
@@ -43,7 +43,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 - [ ] **State Management:** Implementation of the ARM64 register set (X0-X30, SP, PC, and PSTATE).
 - [ ] **Instruction Decoder:** Development of a disassembler for the ARMv8.2-A instruction set.
 - [ ] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
-- [ ] **JIT Integration:** Design of the execution engine backend for Dynarmic integration.
+- [ ] **JIT Integration:** Design of the execution engine backend for ballistic integration.
 
 ### Phase 3: Graphics Subsystem (Vulkan)
 - [ ] **Vulkan Backend:** Initialization of the Vulkan 1.3 instance and physical device selection.

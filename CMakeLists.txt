@@ -31,7 +31,14 @@ set(IMGUI_SOURCES
 # 3. SDL3
 add_subdirectory("${EXT_DIR}/SDL" EXCLUDE_FROM_ALL)
 
-# 3b. Ballistic (JIT ARM64 -> IR).
+# 3b. Reaplica parches de compatibilidad MSVC al submodulo ballistic (idempotente).
+#     Se ejecuta en cada configuracion, asi que sobrevive a 'git submodule update'.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tools/apply_ballistic_patches.py"
+)
+
+# 3c. Ballistic (JIT ARM64 -> IR).
 #     OJO: necesita Python 3 para generar las tablas del decoder al compilar.
 #     Desactivamos sus tests para acelerar el build.
 set(BALLISTIC_ENABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)

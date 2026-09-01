@@ -12,6 +12,7 @@ set(IMGUI_DIR "${EXT_DIR}/imgui")
 set(SOURCES
     "${SRC_DIR}/main.cpp"
     "${SRC_DIR}/core/arm64/interpreter.cpp"
+    "${SRC_DIR}/core/arm64/jit_ballistic.cpp"
     "${SRC_DIR}/core/memory/memory.hpp"
     "${SRC_DIR}/resource.rc" # <--- Esto pone el icono al .exe
 )
@@ -30,20 +31,28 @@ set(IMGUI_SOURCES
 # 3. SDL3
 add_subdirectory("${EXT_DIR}/SDL" EXCLUDE_FROM_ALL)
 
+# 3b. Ballistic (JIT ARM64 -> IR).
+#     OJO: necesita Python 3 para generar las tablas del decoder al compilar.
+#     Desactivamos sus tests para acelerar el build.
+set(BALLISTIC_ENABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory("${EXT_DIR}/ballistic" EXCLUDE_FROM_ALL)
+
 add_executable(${PROJECT_NAME} ${SOURCES} ${IMGUI_SOURCES})
 
-# 4. RUTAS DE INCLUSIÓN (AQUÍ ESTÁ EL TRUCO)
-target_include_directories(${PROJECT_NAME} PRIVATE 
+# 4. RUTAS DE INCLUSIÓN
+target_include_directories(${PROJECT_NAME} PRIVATE
     "${SRC_DIR}"
     "${SRC_DIR}/core"
     "${SRC_DIR}/core/arm64"
-    "${SRC_DIR}/core/memory"   # <--- Añadimos esta ruta específica
+    "${SRC_DIR}/core/memory"
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends"
     "${EXT_DIR}/SDL/include"
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE SDL3-shared)
+# Ballistic expone sus cabeceras (include/) de forma PUBLIC, asi que al
+# enlazarlo ya podemos hacer #include "bal_engine.h" sin añadir rutas a mano.
+target_link_libraries(${PROJECT_NAME} PRIVATE SDL3-shared Ballistic)
 
 # 5. Copia de DLL y Assets
 if(WIN32)

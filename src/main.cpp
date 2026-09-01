@@ -4,12 +4,22 @@
 #include "imgui_impl_sdlrenderer3.h"
 
 #include "arm64/interpreter.hpp"
+#include "arm64/jit_ballistic.hpp"
 #include "core/memory/memory.hpp"
 
 #include <cstdint>
 
+using NeXo2::Core::BallisticJit;
 using NeXo2::Core::Interpreter;
 using NeXo2::Core::Memory;
+
+// Pequeno programa ARM64 de ejemplo (3x MOVZ) para probar el front-end del JIT.
+// Alineado a 16 bytes porque bal_memory_init_flat lo exige.
+alignas(16) static const uint32_t g_demo_program[] = {
+    0xD2824680u, // MOVZ X0, #0x1234
+    0xD2800841u, // MOVZ X1, #0x0042
+    0xD29FE002u, // MOVZ X2, #0xFF00, LSL #16
+};
 
 int main(int, char**) {
     // SDL3: SDL_Init devuelve true en exito (ya NO se compara con < 0).
@@ -29,8 +39,10 @@ int main(int, char**) {
     }
 
     // Nucleo del emulador.
-    Memory      mem;        // memoria por paginas (bajo demanda, no 12 GB de golpe)
-    Interpreter cpu(mem);   // CPU ARM64 con acceso a esa memoria
+    Memory       mem;        // memoria por paginas (bajo demanda, no 12 GB de golpe)
+    Interpreter  cpu(mem);   // CPU ARM64 (interprete esqueleto)
+    BallisticJit jit;        // motor JIT (front-end IR; aun sin backend)
+    int lastIrCount = -1;    // resultado de la ultima traduccion de prueba
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -58,6 +70,7 @@ int main(int, char**) {
 
         Tick("ARM64 Interpreter", true);
         Tick("Memory (paged VMM)", mem.IsReady());
+        Tick("JIT: Ballistic (IR front-end)", jit.IsReady());
         Tick("SDL3 Graphics Driver", true);
         Tick("Vulkan Core", false);
 
@@ -72,6 +85,18 @@ int main(int, char**) {
         if (ImGui::Button("Step CPU")) cpu.Step();
         ImGui::SameLine();
         if (ImGui::Button("Reset CPU")) cpu.Reset();
+
+        ImGui::Separator();
+        ImGui::Text("Ballistic JIT (traduce ARM64 -> IR; sin ejecucion todavia)");
+        if (ImGui::Button("Traducir demo (3x MOVZ)")) {
+            const std::size_t n = sizeof(g_demo_program) / sizeof(g_demo_program[0]);
+            lastIrCount = jit.TranslateFlat(g_demo_program, n);
+        }
+        ImGui::SameLine();
+        if (lastIrCount >= 0)
+            ImGui::Text("IR generada: %d instrucciones", lastIrCount);
+        else
+            ImGui::TextDisabled("(sin traducir aun)");
 
         if (logoTexture) {
             ImGui::Separator();

@@ -1,36 +1,41 @@
-# Especificaciones Técnicas del Objetivo (Target Hardware)
+# Target Hardware Specifications
 
-Este documento detalla las especificaciones técnicas estimadas para la plataforma Nintendo Switch 2 (SoC Nvidia T239), que sirven como base para el desarrollo del laboratorio NeXo 2.
+This document details the estimated technical specifications for the Nintendo
+Switch 2 platform (Nvidia T239 SoC), which serve as the baseline for the
+development of the NeXo 2 lab.
 
-## 1. Unidad de Procesamiento Central (CPU)
-* **Arquitectura:** 8x núcleos ARM Cortex-A78C (Personalizados).
-* **ISA:** ARMv8.2-A / ARMv9 (64-bit exclusivo). No hay soporte nativo para AArch32.
-* **Frecuencia (Clock):** * Modo Docked: ~1.7 GHz (Pico).
-    * Modo Portátil: ~1.1 GHz.
-* **Caché:** 4MB L3 Compartido / 256KB L2 por núcleo.
+## 1. Central Processing Unit (CPU)
+* **Architecture:** 8x ARM Cortex-A78C cores (customized).
+* **ISA:** ARMv8.2-A / ARMv9 (64-bit only). No native AArch32 support.
+* **Clock:**
+    * Docked mode: ~1.7 GHz (peak).
+    * Handheld mode: ~1.1 GHz.
+* **Cache:** 4 MB shared L3 / 256 KB L2 per core.
 
-## 2. Unidad de Procesamiento Gráfico (GPU)
-* **Arquitectura:** Nvidia Ampere (Serie RTX 30 Custom).
-* **Configuración:** 12 Streaming Multiprocessors (SM).
-* **Núcleos CUDA:** 1,536 Cores.
-* **Núcleos Tensor:** 48 (Soporte nativo DLSS 3.1/3.5).
-* **Núcleos RT:** 12 (Soporte Ray Tracing).
-* **Ancho de Banda Teórico:** 0.6 - 4.0 TFLOPS (Dependiendo del perfil energético).
+## 2. Graphics Processing Unit (GPU)
+* **Architecture:** Nvidia Ampere (custom RTX 30 series).
+* **Configuration:** 12 Streaming Multiprocessors (SM).
+* **CUDA Cores:** 1,536 cores.
+* **Tensor Cores:** 48 (native DLSS 3.1/3.5 support).
+* **RT Cores:** 12 (ray tracing support).
+* **Theoretical Bandwidth:** 0.6 - 4.0 TFLOPS (depending on the power profile).
 
-## 3. Memoria (RAM)
-* **Tipo:** 12 GB LPDDR5X.
-* **Bus de Memoria:** 128-bit.
-* **Velocidad de Transferencia:** 7500 MT/s.
-* **Ancho de Banda Total:** 102 GB/s.
-* **Distribución Sugerida:** * 9 GB disponibles para aplicaciones.
-    * 3 GB reservados para Horizon OS (Next).
+## 3. Memory (RAM)
+* **Type:** 12 GB LPDDR5X.
+* **Memory Bus:** 128-bit.
+* **Transfer Rate:** 7500 MT/s.
+* **Total Bandwidth:** 102 GB/s.
+* **Suggested Split:**
+    * 9 GB available for applications.
+    * 3 GB reserved for Horizon OS (Next).
 
-## 4. Almacenamiento y Entrada/Salida
-* **Interno:** 256 GB UFS 3.1 (Velocidad de lectura ~2100 MB/s).
-* **Externo:** Ranura MicroSD Express (Soporte SD 7.1).
-* **Salida de Video:** HDMI 2.1 con soporte para 4K HDR y VRR.
+## 4. Storage and I/O
+* **Internal:** 256 GB UFS 3.1 (read speed ~2100 MB/s).
+* **External:** MicroSD Express slot (SD 7.1 support).
+* **Video Output:** HDMI 2.1 with 4K HDR and VRR support.
 
-## 5. Notas para el Desarrollo (Emulación)
-* **Prioridad JIT:** Implementar decodificadores específicos para el set de instrucciones Cortex-A78C.
-* **Prioridad Vulkan:** Mapear extensiones de Ampere (como el Conservative Rasterization o el Variable Rate Shading) directamente a través de Vulkan 1.3.
-* **Audio:** DSP basado en ARM para procesamiento de audio espacial.
+## 5. Development Notes (Emulation)
+* **JIT priority:** Implement decoders specific to the Cortex-A78C instruction set.
+* **Vulkan priority:** Map Ampere extensions (such as Conservative Rasterization
+  or Variable Rate Shading) directly through Vulkan 1.3.
+* **Audio:** ARM-based DSP for spatial audio processing.

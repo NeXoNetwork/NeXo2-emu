@@ -1,22 +1,23 @@
-# Guía de Compilación - NeXo 2
+# Build Guide - NeXo 2
 
-Instrucciones para compilar el emulador utilizando el conjunto de herramientas MSVC v143.
+Instructions to build the emulator using the MSVC v143 toolset.
 
-## 1. Requisitos
-* Visual Studio 2022/2026 con C++ Desktop Development.
-* Herramientas de compilación MSVC v143 instaladas.
-* CMake 3.25 o superior.
+## 1. Requirements
+* Visual Studio 2022/2026 with the "Desktop development with C++" workload.
+* MSVC v143 build tools installed.
+* CMake 3.25 or higher.
+* Python 3 (required by the Ballistic submodule to generate its ARM64 decoder tables at build time).
 
-## 2. Estructura de archivos
+## 2. File Structure
 * `src/main.cpp`
 * `src/core/memory/memory.hpp`
 * `src/core/arm64/`
-* `externals/` (SDL3 e ImGui)
+* `externals/` (SDL3, ImGui and Ballistic)
 * `assets/` (logo.bmp, icon.ico)
 
-## 3. Comandos de Compilación (CMD)
+## 3. Build Commands (CMD)
 
-Ejecutar en la raíz del proyecto:
+Run from the project root:
 
 ```cmd
 if exist build rd /s /q build
@@ -24,4 +25,4 @@ mkdir build
 cd build
 cmake .. -G "Visual Studio 17 2022" -T v143 -A x64
 cmake --build . --config Release
-
+```

@@ -13,3 +13,10 @@ Suggested first services to stub for a booting app: `sm` (service manager),
 `fsp-srv` (filesystem), `hid` (input), `vi`/`nvdrv` (display/GPU), `settings`,
 `time`, `pm`. Check the Services API page for the current list. Note the Switch 2
 may add new services on top of this shared base.
+
+## Notes in this folder
+
+| File | Content |
+| :--- | :--- |
+| [hipc.md](hipc.md) | IPC message layout, CMIF, domains, TIPC |
+| [services.md](services.md) | Main services and stub order |

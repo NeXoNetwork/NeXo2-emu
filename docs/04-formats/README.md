@@ -16,3 +16,10 @@ minor changes). **NeXo Phase 1 (VFS) and the executable loader.**
 
 > Tip for NeXo: an **NRO homebrew** is the simplest realistic first load target —
 > open format, no encryption, self-contained — once the CPU can execute.
+
+## Notes in this folder
+
+| File | Content |
+| :--- | :--- |
+| [nso.md](nso.md) | NSO header and flags |
+| [nro.md](nro.md) | NRO header and ASET assets |

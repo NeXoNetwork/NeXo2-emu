@@ -18,12 +18,12 @@ development of the NeXo 2 lab.
 * **CUDA Cores:** 1,536 cores.
 * **Tensor Cores:** 48 (native DLSS 3.1/3.5 support).
 * **RT Cores:** 12 (ray tracing support).
-* **Theoretical Bandwidth:** 0.6 - 4.0 TFLOPS (depending on the power profile).
+* **Theoretical compute:** 0.6 - 4.0 TFLOPS (depending on the power profile).
 
 ## 3. Memory (RAM)
 * **Type:** 12 GB LPDDR5X.
 * **Memory Bus:** 128-bit.
-* **Transfer Rate:** 7500 MT/s.
+* **Transfer Rate:** 7500 MT/s. *(Check: 102 GB/s on a 128-bit bus is ~6400 MT/s, which matches Switchbrew's LPDDR5X-3200. See [t239-soc.md](t239-soc.md).)*
 * **Total Bandwidth:** 102 GB/s.
 * **Suggested Split:**
     * 9 GB available for applications.

@@ -26,6 +26,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 * `src/core/memory/`: Virtual Memory Manager (VMM).
 * `src/core/hle/`: High-Level Emulation (Kernel and OS Services).
 * `src/video_core/`: Vulkan implementation and hardware renderer.
+* `docs/`: Hardware and OS documentation — start at [docs/README.md](docs/README.md).
 * `externals/`: Third-party dependencies (ballistic, SDL3, etc.).
 
 ## Development Roadmap (2026)

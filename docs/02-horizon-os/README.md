@@ -12,3 +12,10 @@ heart of the CPU side and HLE. **Highest priority for NeXo Phase 2 and Phase 4.*
 | [Memory layout](https://switchbrew.org/wiki/Memory_layout) | Virtual address space, regions, page sizes. | Your VMM (page granularity, mappings). |
 | [Cryptosystem](https://switchbrew.org/wiki/Cryptosystem) | Keys, AES, keyslots. | Decrypting containers (later). |
 | [Error codes](https://switchbrew.org/wiki/Error_codes) | Result codes / exception model. | Correct HLE return values. |
+
+## Notes in this folder
+
+| File | Content |
+| :--- | :--- |
+| [svc.md](svc.md) | Syscall ABI, SVC table, result codes |
+| [memory-layout.md](memory-layout.md) | Process/kernel address space, carveouts |

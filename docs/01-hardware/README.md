@@ -10,4 +10,13 @@ target-hardware model and the future `video_core` aim at.
 | [Joy-Con 2](https://switchbrew.org/wiki/Joy-Con_2) | The new controllers (input emulation, later). |
 | [Switch 2: Product Information](https://switchbrew.org/wiki/Switch_2:_Product_Information) | Model / serial data. |
 
-See also the local `docs/HARDWARE_TARGET.md` for the estimated specs NeXo uses.
+## Notes in this folder
+
+| File | Content |
+| :--- | :--- |
+| [target-specs.md](target-specs.md) | Specs NeXo uses as its baseline |
+| [t239-soc.md](t239-soc.md) | T239: CPU, caches, GPU, RAM, PAC, memory encryption |
+| [board-and-dock.md](board-and-dock.md) | Board components and dock chips |
+| [fuses.md](fuses.md) | Fuse block layout and MMIO mirrors |
+| [flash-filesystem.md](flash-filesystem.md) | UFS LUN layout (boot chain) |
+| [joy-con-2.md](joy-con-2.md) | Joy-Con 2 hardware and safe mode |

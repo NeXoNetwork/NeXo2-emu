@@ -19,6 +19,9 @@ out on purpose.
 | [02-horizon-os.md](02-horizon-os.md) | Kernel, SVC, memory layout, crypto (shared OS base) | Phase 2 (CPU), Phase 4 (HLE) |
 | [03-services-ipc.md](03-services-ipc.md) | Services API, HIPC (shared OS base) | Phase 4 (HLE services) |
 | [04-filesystem-formats.md](04-filesystem-formats.md) | NCA / NSO / NRO containers (shared) | Phase 1 (VFS), loaders |
+| [05-switch2-hardware-details.md](05-switch2-hardware-details.md) | T239, board, fuses, flash, Joy-Con 2, compat mode (collected notes) | Target hardware, tick rate, PAC |
+| [06-horizon-technical-notes.md](06-horizon-technical-notes.md) | SVC, memory layout, HIPC, NSO/NRO, services (collected notes) | Phase 2, 4 |
+| [07-external-resources.md](07-external-resources.md) | ARM TRMs, NVIDIA, Vulkan, Ballistic, community | All |
 
 ## Why the OS pages count as "Switch 2"
 

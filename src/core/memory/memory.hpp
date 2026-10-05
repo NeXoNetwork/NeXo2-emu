@@ -6,7 +6,7 @@
 #include <map>
 #include <memory>
 #include <string>
-#include <unordered_map>
+#include <vector>
 #include "common/types.hpp"
 
 namespace NeXo2::Core {
@@ -56,7 +56,21 @@ public:
     // Borra todo (paginas y zonas). Se usa al cargar un programa nuevo.
     void Clear() {
         m_pages.clear();
+        for (auto& l2 : m_table) l2.reset();
         m_regions.clear();
+        ++m_generation;
+    }
+
+    // Cambia cada vez que se borran las paginas: quien guarde punteros a paginas
+    // (la cache de instrucciones de la CPU) sabe asi que ya no valen.
+    u64 Generation() const { return m_generation; }
+
+    // Puntero a los 4 KB de la pagina que contiene 'addr', o nullptr si no existe.
+    // Valido hasta el siguiente Clear().
+    u8* PagePointer(VAddr addr) {
+        if (addr >= ADDRESS_SPACE) return nullptr;
+        Page* page = FindPage(addr / PAGE_SIZE);
+        return page ? page->data() : nullptr;
     }
 
     // ---------------------------------------------------------------------
@@ -117,15 +131,28 @@ public:
     size_t AllocatedPages() const { return m_pages.size(); }
     u64    AllocatedBytes() const { return static_cast<u64>(m_pages.size()) * PAGE_SIZE; }
 
+    // Lectura/escritura de un valor. Camino rapido: el valor cabe entero en una pagina
+    // (casi siempre). Si cruza el borde entre dos paginas, va por ReadBytes/WriteBytes.
     template <typename T>
     T Read(VAddr addr) {
         T value{};
+        const u64 offset = addr & (PAGE_SIZE - 1);
+        if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
+            if (const Page* page = FindPage(addr / PAGE_SIZE))
+                std::memcpy(&value, page->data() + offset, sizeof(T));
+            return value;
+        }
         ReadBytes(addr, &value, sizeof(T));
         return value;
     }
 
     template <typename T>
     void Write(VAddr addr, T value) {
+        const u64 offset = addr & (PAGE_SIZE - 1);
+        if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
+            std::memcpy(GetOrCreatePage(addr / PAGE_SIZE)->data() + offset, &value, sizeof(T));
+            return;
+        }
         WriteBytes(addr, &value, sizeof(T));
     }
 
@@ -162,18 +189,35 @@ public:
 private:
     using Page = std::array<u8, PAGE_SIZE>;
 
-    Page* FindPage(u64 index) {
-        auto it = m_pages.find(index);
-        return it == m_pages.end() ? nullptr : it->second.get();
+    // Tabla de paginas de dos niveles (como la de una CPU real):
+    //   nivel 1: un hueco por cada 2 MB  (12 GB / 2 MB = 6144 huecos)
+    //   nivel 2: 512 punteros a paginas de 4 KB, creado solo si hace falta
+    // Buscar una pagina son dos accesos a array, mucho mas rapido que un unordered_map.
+    static constexpr u64 L2_BITS = 9;                       // 512 paginas = 2 MB
+    static constexpr u64 L2_SIZE = 1ull << L2_BITS;
+    static constexpr u64 L1_SIZE = (ADDRESS_SPACE / PAGE_SIZE) >> L2_BITS;
+    using L2Table = std::array<Page*, L2_SIZE>;
+
+    Page* FindPage(u64 index) const {
+        const L2Table* l2 = m_table[index >> L2_BITS].get();
+        return l2 ? (*l2)[index & (L2_SIZE - 1)] : nullptr;
     }
 
     Page* GetOrCreatePage(u64 index) {
-        auto& slot = m_pages[index];
-        if (!slot) slot = std::make_unique<Page>(); // página nueva inicializada a 0
-        return slot.get();
+        auto& l2 = m_table[index >> L2_BITS];
+        if (!l2) l2 = std::make_unique<L2Table>(); // todos los punteros a nullptr
+        Page*& slot = (*l2)[index & (L2_SIZE - 1)];
+        if (!slot) {
+            auto page = std::make_unique<Page>(); // página nueva inicializada a 0
+            slot = page.get();
+            m_pages.push_back(std::move(page));
+        }
+        return slot;
     }
 
-    std::unordered_map<u64, std::unique_ptr<Page>> m_pages;
+    std::vector<std::unique_ptr<Page>> m_pages;                      // duenas de las paginas
+    std::array<std::unique_ptr<L2Table>, L1_SIZE> m_table{};
+    u64 m_generation = 0;
     std::map<VAddr, MemoryRegion> m_regions; // ordenadas por direccion
 };
 

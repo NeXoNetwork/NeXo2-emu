@@ -57,6 +57,28 @@ static void LoadDemo(System& sys) {
 static bool g_emuRunning = false;
 static unsigned long long g_runInstructions = 0;   // instrucciones desde que se pulso Run
 
+// Medidor de velocidad: cada segundo calcula instrucciones/s e imagenes/s
+struct SpeedMeter {
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    unsigned long long last_instructions = 0;
+    unsigned long long last_frames = 0;
+    double mips = 0.0;   // millones de instrucciones por segundo
+    double fps = 0.0;    // imagenes que el programa presenta por segundo
+
+    void Update(unsigned long long instructions, unsigned long long frames, bool running) {
+        const auto now = std::chrono::steady_clock::now();
+        const double secs = std::chrono::duration<double>(now - last).count();
+        if (!running) { last = now; last_instructions = instructions; last_frames = frames; mips = fps = 0.0; return; }
+        if (secs < 1.0) return;
+        if (instructions >= last_instructions && frames >= last_frames) {
+            mips = double(instructions - last_instructions) / secs / 1e6;
+            fps  = double(frames - last_frames) / secs;
+        }
+        last = now; last_instructions = instructions; last_frames = frames;
+    }
+};
+static SpeedMeter g_speed;
+
 static void SetRunning(System& sys, bool run) {
     if (run == g_emuRunning) return;
     auto& cpu = sys.GetCpu();
@@ -427,6 +449,7 @@ int main(int argc, char** argv) {
         //  Ventana 3: Pantalla de la consola (lo que el programa manda a vi)
         // =====================================================================
         const auto& frame = kernel.GetDisplay().Frame();
+        g_speed.Update(cpu.GetInstructionCount(), frame.count, g_emuRunning);
         if (frame.count == 0) shownFrame = ~0ull;   // programa nuevo: la siguiente imagen se muestra seguro
         if (frame.count != shownFrame && frame.count > 0 && screenTexture &&
             frame.width == NeXo2::HLE::Display::WIDTH && frame.height == NeXo2::HLE::Display::HEIGHT) {
@@ -439,6 +462,10 @@ int main(int argc, char** argv) {
         if (frame.count > 0 && screenTexture) {
             ImGui::Text("Imagenes: %llu   Mando: %s", (unsigned long long)frame.count,
                         g_gamepad ? SDL_GetGamepadName(g_gamepad) : "teclado");
+            if (g_emuRunning) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1, 1), "   %.1f img/s   %.0f M instr/s", g_speed.fps, g_speed.mips);
+            }
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
             if (ImGui::IsItemHovered())

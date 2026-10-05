@@ -45,6 +45,14 @@ target_include_directories(nexo2_core PUBLIC
     "${SRC_DIR}/core/memory"
 )
 
+# Velocidad: en Release, optimizacion entre archivos (LTO, /GL + /LTCG en MSVC).
+# Deja que el compilador meta en linea funciones de un .cpp dentro de otro.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT NEXO2_IPO_OK OUTPUT NEXO2_IPO_MSG LANGUAGES CXX)
+if(NEXO2_IPO_OK)
+    set_property(TARGET nexo2_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+
 # 1b. Fuentes del ejecutable (interfaz, JIT, icono)
 set(SOURCES
     "${SRC_DIR}/main.cpp"
@@ -81,6 +89,9 @@ set(BALLISTIC_ENABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${EXT_DIR}/ballistic" EXCLUDE_FROM_ALL)
 
 add_executable(${PROJECT_NAME} ${SOURCES} ${IMGUI_SOURCES})
+if(NEXO2_IPO_OK)
+    set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
 
 # 4. RUTAS DE INCLUSIÓN
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -119,6 +130,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/simd_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/display_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/input_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/memory_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
     # Carpeta con hello.nro y demas archivos de prueba

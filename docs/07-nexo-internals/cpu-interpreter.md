@@ -80,3 +80,36 @@ expected values come from real ARM behaviour (NaN, saturation, rounding...) and 
 3. Write a small program in `tests/programs/` that uses it and ends in `brk #0`.
 4. Run `python tools/asm2cpp.py` (needs LLVM) to regenerate the header.
 5. Add a `TEST(...)` in `tests/cpu_tests.cpp` checking the result, and run the tests.
+
+## Performance
+
+Measured with NX-FixCheat (libnx console homebrew), g++ -O2, one x86-64 core:
+
+| Version | Guest instructions / s |
+| :--- | :--- |
+| First working version | ~42 M |
+| Two-level page table + code page cache + inlined helpers | ~95 M |
+
+What made the difference (profiled with valgrind/callgrind):
+
+1. **Memory lookups.** Every access used to search a `std::unordered_map` of pages (~30 % of
+   the time). `Memory` now has a two-level page table like a real MMU: level 1 has one slot
+   per 2 MB, level 2 has 512 pointers to 4 KB pages (created on demand). `Read<T>`/`Write<T>`
+   have a fast path for values that do not cross a page border.
+2. **Instruction fetch.** `Interpreter::Run` keeps a pointer to the current code page; while
+   the PC stays inside it, fetching is a plain array read. The pointer is requested again on
+   every `Run()` call, because `Memory::Clear()` (loading another program) only happens
+   between calls.
+3. **Inlining.** `X`, `SetX`, `AddWithCarry`, `ShiftReg`, `ConditionHolds`, `Execute`... are
+   defined `inline` in `interpreter.hpp`, so the compiler puts them inside each instruction
+   handler instead of calling a function per register read.
+4. **Small handlers.** `ExecDataProcReg` only dispatches; each family (logical, add/sub,
+   CSEL, 2-source, 3-source...) has its own small function.
+
+Release builds also enable link-time optimisation (`INTERPROCEDURAL_OPTIMIZATION_RELEASE`
+in `CMakeLists.txt`). The "Pantalla" window shows the live speed (frames/s and M instr/s).
+
+The remaining cost is decoding every instruction every time it runs. The next big step is
+a cache of decoded instructions (or blocks), and after that the JIT. A typical libnx
+console homebrew needs ~15-20 M instructions per frame, so full speed (60 frames/s)
+needs over 1 000 M instructions/s: only a JIT gets there.

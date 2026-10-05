@@ -144,6 +144,12 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
 void Kernel::HandleSvc(u32 imm, CPUState& s) {
     switch (imm) {
         case 0x01: SvcSetHeapSize(s);       return;
+        case 0x02: SvcSetMemoryPermission(s); return;
+        case 0x03: // SetMemoryAttribute(addr, size, mask, valor): bloqueo de permisos / sin cache.
+                   // No cambia nada en NeXo (no emulamos caches ni bloqueos): solo comprobamos alineacion.
+            SetResult(s, (s.x[0] % Core::Memory::PAGE_SIZE || s.x[1] % Core::Memory::PAGE_SIZE)
+                             ? Result::InvalidAddress : Result::Success);
+            return;
         case 0x06: SvcQueryMemory(s);       return;
         case 0x07: SvcExitProcess(s);       return;
         case 0x0B: SvcSleepThread(s);       return;
@@ -189,6 +195,22 @@ void Kernel::SvcSetHeapSize(CPUState& s) {
     m_heapSize = size;
     SetResult(s, Result::Success);
     s.x[1] = Layout::HEAP_REGION_BASE;
+}
+
+// svcSetMemoryPermission(addr = X0, size = X1, permisos = W2)
+// libnx lo usa al arrancar para dejar de solo lectura la zona que acaba de recolocar (RELRO).
+void Kernel::SvcSetMemoryPermission(CPUState& s) {
+    const u64 addr = s.x[0], size = s.x[1];
+    const u32 perm = static_cast<u32>(s.x[2]);
+    if (addr % Core::Memory::PAGE_SIZE || size % Core::Memory::PAGE_SIZE || size == 0) {
+        SetResult(s, Result::InvalidAddress);
+        return;
+    }
+    if (perm != 0 && perm != 1 && perm != 3) { SetResult(s, 0xD801); return; } // InvalidNewMemoryPermission
+    const Core::MemoryRegion r = m_memory.QueryRegion(addr);
+    if (r.state == MemoryState::Free || addr + size > r.End()) { SetResult(s, Result::InvalidState); return; }
+    m_memory.MapRegion(addr, size, r.state, static_cast<MemoryPermission>(perm), r.name);
+    SetResult(s, Result::Success);
 }
 
 // svcQueryMemory(MemoryInfo* out = X0, addr = X2) -> W0 = resultado, W1 = PageInfo

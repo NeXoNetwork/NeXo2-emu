@@ -62,3 +62,12 @@ Only needed if you change `tests/programs/`. Requires LLVM (`winget install LLVM
 python tools/asm2cpp.py     :: tests/programs/*.S and *.c  -> tests/generated/test_programs.hpp
 python tools/make_nro.py    :: tests/programs/nro_*/       -> tests/generated/*.nro (hello, ipc, libnx_init)
 ```
+
+The SIMD/FP reference values are generated on Linux/WSL with QEMU (`apt install qemu-user
+gcc-aarch64-linux-gnu clang lld llvm`):
+
+```bash
+python3 tools/gen_simd_tests.py   # tests/programs/simd/*.S -> tests/generated/simd_tests.hpp
+```
+
+Third-party homebrew used for manual testing goes in `tests/homebrew/` (ignored by git).

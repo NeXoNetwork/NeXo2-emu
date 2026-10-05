@@ -98,6 +98,7 @@ public:
 private:
     // Cada SVC lee sus argumentos de X0..X7 y deja el resultado en W0 (+ salidas en X1...).
     void SvcSetHeapSize(Core::CPUState& s);
+    void SvcSetMemoryPermission(Core::CPUState& s);
     void SvcQueryMemory(Core::CPUState& s);
     void SvcExitProcess(Core::CPUState& s);
     void SvcSleepThread(Core::CPUState& s);

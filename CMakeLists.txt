@@ -18,6 +18,9 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/arm64/interpreter_dp_reg.cpp"
     "${SRC_DIR}/core/arm64/interpreter_branch.cpp"
     "${SRC_DIR}/core/arm64/interpreter_ldst.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_simd_ldst.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_fp.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_simd.cpp"
     "${SRC_DIR}/core/loader/nro.cpp"
     "${SRC_DIR}/core/hle/kernel.cpp"
     "${SRC_DIR}/core/hle/ipc.cpp"
@@ -109,6 +112,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/loader_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/ipc_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/services_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/simd_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
     # Carpeta con hello.nro y demas archivos de prueba

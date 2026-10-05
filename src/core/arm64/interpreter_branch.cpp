@@ -10,6 +10,24 @@ namespace NeXo2::Core {
 
 using namespace NeXo2::Common;
 
+// Codigos de registro de sistema = bits 19..5 de MRS/MSR (o0:op1:CRn:CRm:op2).
+namespace SysReg {
+    constexpr u32 NZCV        = 0x5A10; // S3_3_C4_C2_0
+    constexpr u32 FPCR        = 0x5A20; // S3_3_C4_C4_0
+    constexpr u32 FPSR        = 0x5A21; // S3_3_C4_C4_1
+    constexpr u32 TPIDR_EL0   = 0x5E82; // S3_3_C13_C0_2
+    constexpr u32 TPIDRRO_EL0 = 0x5E83; // S3_3_C13_C0_3
+    constexpr u32 CNTFRQ_EL0  = 0x5F00; // S3_3_C14_C0_0
+    constexpr u32 CNTPCT_EL0  = 0x5F01; // S3_3_C14_C0_1
+    constexpr u32 CNTVCT_EL0  = 0x5F02; // S3_3_C14_C0_2
+    constexpr u32 CTR_EL0     = 0x5801; // S3_3_C0_C0_1: tamanos de linea de cache
+    constexpr u32 DCZID_EL0   = 0x5807; // S3_3_C0_C0_7: bloque de "dc zva"
+}
+
+// Lineas de cache de 64 bytes (como el Cortex-A78C): IminLine = DminLine = 4 (2^4 palabras)
+constexpr u64 CTR_EL0_VALUE   = 0x8444C004;
+constexpr u64 DC_ZVA_BLOCK    = 64;      // DCZID_EL0 = 4 -> 2^4 palabras de 4 bytes
+
 bool Interpreter::ExecBranchSystem(u32 instr) {
     const u64 pc = m_state.pc;
 
@@ -92,6 +110,20 @@ bool Interpreter::ExecBranchSystem(u32 instr) {
     }
 
     // ------------------------------------------------------------------
+    // SYS: mantenimiento de cache (dc cvac, dc civac, ic ivau...). Sin caches
+    // emuladas son NOP, salvo "dc zva", que pone a cero un bloque de 64 bytes
+    // (memset la usa para limpiar memoria rapido).
+    // ------------------------------------------------------------------
+    if ((instr & 0xFFF80000u) == 0xD5080000u) {
+        if ((instr & 0xFFFFFFE0u) == 0xD50B7420u) {                      // DC ZVA, Xt
+            const u64 addr = X(Bits(instr, 0, 5)) & ~(DC_ZVA_BLOCK - 1);
+            static const u8 zeros[DC_ZVA_BLOCK] = {};
+            m_memory.WriteBytes(addr, zeros, DC_ZVA_BLOCK);
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------
     // MRS / MSR: leer/escribir registros de sistema
     // ------------------------------------------------------------------
     if ((instr & 0xFFD00000u) == 0xD5100000u) return ExecSystemRegister(instr);
@@ -118,17 +150,6 @@ bool Interpreter::ExecBranchSystem(u32 instr) {
     return false;
 }
 
-// Codigos de registro de sistema = bits 19..5 de MRS/MSR (o0:op1:CRn:CRm:op2).
-namespace SysReg {
-    constexpr u32 NZCV        = 0x5A10; // S3_3_C4_C2_0
-    constexpr u32 FPCR        = 0x5A20; // S3_3_C4_C4_0
-    constexpr u32 FPSR        = 0x5A21; // S3_3_C4_C4_1
-    constexpr u32 TPIDR_EL0   = 0x5E82; // S3_3_C13_C0_2
-    constexpr u32 TPIDRRO_EL0 = 0x5E83; // S3_3_C13_C0_3
-    constexpr u32 CNTFRQ_EL0  = 0x5F00; // S3_3_C14_C0_0
-    constexpr u32 CNTPCT_EL0  = 0x5F01; // S3_3_C14_C0_1
-    constexpr u32 CNTVCT_EL0  = 0x5F02; // S3_3_C14_C0_2
-}
 
 bool Interpreter::ExecSystemRegister(u32 instr) {
     const bool is_read = Bit(instr, 21);   // 1 = MRS (leer), 0 = MSR (escribir)
@@ -147,6 +168,8 @@ bool Interpreter::ExecSystemRegister(u32 instr) {
             // Provisional: 1 instruccion = 1 tick. Mas adelante se ligara al reloj real.
             case SysReg::CNTPCT_EL0:
             case SysReg::CNTVCT_EL0:  value = m_instructionCount;  break;
+            case SysReg::CTR_EL0:     value = CTR_EL0_VALUE;       break;
+            case SysReg::DCZID_EL0:   value = 4;                   break;
             default: return false;
         }
         SetX(rt, value);

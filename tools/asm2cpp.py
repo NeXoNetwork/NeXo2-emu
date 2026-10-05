@@ -42,9 +42,18 @@ def run(cmd):
 
 
 def build(source: pathlib.Path, tmp: pathlib.Path):
+    flags = TARGET + (C_FLAGS if source.suffix == ".c" else [])
+    # Los .c con "_simd" en el nombre pueden usar registros SIMD / coma flotante
+    if source.suffix == ".c" and "_simd" in source.stem:
+        flags = [f for f in flags if f != "-mgeneral-regs-only"]
+    return build_preprocessed(source, tmp, flags)
+
+
+def build_preprocessed(source: pathlib.Path, tmp: pathlib.Path, flags):
     obj = tmp / (source.stem + ".o")
     elf = tmp / (source.stem + ".elf")
-    flags = TARGET + (C_FLAGS if source.suffix == ".c" else [])
+    if source.suffix == ".S" and not any(f.startswith("--target") for f in flags):
+        flags = TARGET + list(flags)
     run(["clang", *flags, "-c", str(source), "-o", str(obj)])
     # Enlazamos en la direccion 0: el codigo es relativo al PC y se puede cargar en cualquier sitio.
     run(["ld.lld", "-e", "0", "-Ttext=0", "--no-relax", str(obj), "-o", str(elf)])

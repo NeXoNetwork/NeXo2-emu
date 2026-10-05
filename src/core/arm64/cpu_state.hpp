@@ -1,13 +1,36 @@
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <array>
 
 namespace NeXo2::Core {
+
+// Registro vectorial de 128 bits (v0..v31). Segun la instruccion se ve como:
+//   q0 (128 bits), d0 (64), s0 (32), h0 (16), b0 (8)  -> siempre los bits bajos
+//   v0.16b, v0.8h, v0.4s, v0.2d                      -> "carriles" (lanes) del mismo tamano
+struct alignas(16) V128 {
+    uint64_t lo = 0; // bits 0..63
+    uint64_t hi = 0; // bits 64..127
+
+    // Lee/escribe el carril 'index' de 'bytes' bytes (1, 2, 4 u 8)
+    uint64_t Get(unsigned index, unsigned bytes) const {
+        uint64_t value = 0;
+        std::memcpy(&value, reinterpret_cast<const uint8_t*>(this) + index * bytes, bytes);
+        return value;
+    }
+    void Set(unsigned index, unsigned bytes, uint64_t value) {
+        std::memcpy(reinterpret_cast<uint8_t*>(this) + index * bytes, &value, bytes);
+    }
+    bool operator==(const V128& o) const { return lo == o.lo && hi == o.hi; }
+};
 
 // Estado visible de un nucleo ARM64 (lo que un programa puede leer/escribir).
 struct CPUState {
     // 31 Registros de propósito general (X0-X30). X30 = LR (direccion de retorno).
     std::array<uint64_t, 31> x;
+
+    // 32 registros SIMD / coma flotante (v0-v31)
+    std::array<V128, 32> v;
 
     uint64_t pc; // Program Counter (Instrucción actual)
     uint64_t sp; // Stack Pointer (Puntero de pila)
@@ -28,6 +51,7 @@ struct CPUState {
     // Inicializa todo a cero
     void Reset() {
         x.fill(0);
+        v.fill(V128{});
         pc = 0;
         sp = 0;
         flags = { false, false, false, false };

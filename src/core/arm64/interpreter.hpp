@@ -17,6 +17,9 @@ namespace NeXo2::Core {
 //   interpreter_dp_reg.cpp   -> procesado de datos con registros (ADD, CSEL, MUL, UDIV...)
 //   interpreter_branch.cpp   -> saltos y sistema (B, BL, RET, CBZ, SVC, MRS...)
 //   interpreter_ldst.cpp     -> lecturas/escrituras en memoria (LDR, STR, LDP, STP...)
+//   interpreter_simd_ldst.cpp -> lecturas/escrituras de registros SIMD (ldr q0, stp q0, ld1...)
+//   interpreter_fp.cpp       -> coma flotante escalar (fadd d0, fcmp, scvtf, fmov...)
+//   interpreter_simd.cpp     -> SIMD vectorial (dup, movi, cmeq, addp, ext, uzp1...)
 class Interpreter {
 public:
     // Frecuencia del contador del sistema en Switch 2 (ver
@@ -65,6 +68,14 @@ private:
     bool ExecLoadStore(u32 instr);
 
     bool ExecSystemRegister(u32 instr);
+    bool ExecSimdLoadStore(u32 instr);
+    bool ExecSimdFp(u32 instr);        // reparte entre coma flotante y SIMD vectorial
+    bool ExecFloatingPoint(u32 instr);
+    bool ExecSimdVector(u32 instr);
+
+    // Registros SIMD: escribir un escalar (s0, d0...) pone a cero el resto del registro
+    V128& Vreg(unsigned n) { return m_state.v[n & 31]; }
+    void  SetVScalar(unsigned n, u64 value, unsigned bytes);
     bool ExecLoadStorePair(u32 instr);
     bool ExecLoadStoreExclusive(u32 instr);
 

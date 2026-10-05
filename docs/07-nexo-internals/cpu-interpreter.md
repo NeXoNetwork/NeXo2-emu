@@ -9,12 +9,15 @@ check that both give the same results.
 
 | File | Role |
 | :--- | :--- |
-| `src/core/arm64/cpu_state.hpp` | Registers: X0-X30, SP, PC, NZCV, TPIDR_EL0, TPIDRRO_EL0, FPCR/FPSR |
+| `src/core/arm64/cpu_state.hpp` | Registers: X0-X30, V0-V31 (128-bit), SP, PC, NZCV, TPIDR_EL0, TPIDRRO_EL0, FPCR/FPSR |
 | `src/core/arm64/interpreter.hpp/.cpp` | Main loop (`Step`, `Run`, `Halt`), top-level decode, flags, conditions, shifts, extends |
 | `interpreter_dp_imm.cpp` | Data processing, immediate |
 | `interpreter_dp_reg.cpp` | Data processing, register |
 | `interpreter_branch.cpp` | Branches, exceptions, system |
 | `interpreter_ldst.cpp` | Loads and stores |
+| `interpreter_simd_ldst.cpp` | SIMD/FP loads and stores (`ldr q0`, `stp q0, q1`, `ld1`/`st1`) |
+| `interpreter_fp.cpp` | Scalar floating point (`fadd d0`, `fcmp`, `scvtf`, `fmov`...) and SIMD/FP routing |
+| `interpreter_simd.cpp` | Vector SIMD / NEON (`dup`, `movi`, `cmeq`, `addp`, `ext`, `uzp1`, `tbl`...) and scalar SIMD |
 | `src/common/bit_utils.hpp` | `Bits`, `SignExtend`, `RotateRight`, `DecodeBitMasks`, 128-bit multiply high |
 
 The split follows the "Top-level encodings" table of the Arm Architecture
@@ -26,8 +29,13 @@ Reference Manual: bits 28..25 of every instruction select the group.
 | :--- | :--- |
 | Immediate | ADR, ADRP, ADD/ADDS/SUB/SUBS (CMP, CMN, MOV sp), AND/ORR/EOR/ANDS (TST), MOVZ/MOVN/MOVK, SBFM/BFM/UBFM (LSL, LSR, ASR, UBFX, SBFX, BFI, BFXIL, UXTB/H, SXTB/H/W), EXTR (ROR) |
 | Register | AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS (MOV, MVN), ADD/SUB shifted and extended, ADC/SBC, CCMP/CCMN, CSEL/CSINC/CSINV/CSNEG (CSET, CINC, CNEG), UDIV/SDIV, LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV32/REV/CLZ/CLS, MADD/MSUB (MUL), SMADDL/UMADDL, SMULH/UMULH |
-| Branch / system | B, BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET, RETAA/RETAB, SVC, BRK, NOP and all HINTs (PACIASP/AUTIASP/BTI), DMB/DSB/ISB/CLREX, MRS/MSR (NZCV, FPCR, FPSR, TPIDR_EL0, TPIDRRO_EL0, CNTFRQ_EL0, CNTPCT_EL0, CNTVCT_EL0) |
+| Branch / system | B, BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET, RETAA/RETAB, SVC, BRK, NOP and all HINTs (PACIASP/AUTIASP/BTI), DMB/DSB/ISB/CLREX, MRS/MSR (NZCV, FPCR, FPSR, TPIDR_EL0, TPIDRRO_EL0, CNTFRQ_EL0, CNTPCT_EL0, CNTVCT_EL0, CTR_EL0, DCZID_EL0), cache maintenance (NOP) and DC ZVA (zeroes 64 bytes) |
 | Load / store | LDR/STR (B, H, W, X; unsigned offset, pre/post-index, unscaled, register offset), LDRSB/LDRSH/LDRSW, LDR literal, PRFM, LDP/STP/LDPSW/LDNP/STNP, LDXR/STXR/LDAXR/STLXR, LDAR/STLR, CAS, LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN, SWP |
+
+| SIMD/FP loads/stores | LDR/STR b/h/s/d/q (all addressing modes), LDUR/STUR, LDR literal, LDP/STP s/d/q, LD1/ST1 (1-4 registers, single lane) |
+| Scalar FP | FMOV (reg, imm, general<->FP, V.D[1]), FABS, FNEG, FSQRT, FCVT, FRINT*, FADD, FSUB, FMUL, FDIV, FNMUL, FMAX/FMIN(NM), FMADD/FMSUB/FNMADD/FNMSUB, FCMP/FCMPE, FCCMP, FCSEL, SCVTF/UCVTF, FCVT{N,P,M,Z,A}{S,U} |
+| Vector SIMD | DUP, INS/MOV, UMOV/SMOV, MOVI/MVNI/ORR/BIC imm, FMOV imm, AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF, ADD/SUB/MUL/MLA/MLS, CMEQ/CMGT/CMGE/CMHI/CMHS/CMTST (+ vs #0), S/U MAX/MIN (+ pairwise), ADDP, USHL/SSHL, ABS/NEG/NOT/CNT/RBIT/REV, XTN, ADDV/UMAXV/UMINV/SMAXV/SMINV/UADDLV/SADDLV, SHL/USHR/SSHR/USRA/SSRA/SHRN/USHLL/SSHLL, UZP/ZIP/TRN, EXT, TBL/TBX, vector FADD/FSUB/FMUL/FDIV/FMLA/FMLS/FMAX/FMIN/FADDP/FCMxx/FABS/FNEG/FSQRT/SCVTF/UCVTF/FCVTZS/FCVTZU |
+| Scalar SIMD | CMxx d #0, ADD/SUB/CMEQ/CMGT... d, SHL/USHR/SSHR d, ADDP d, DUP (`mov d0, v1.d[1]`), SCVTF/UCVTF/FCVTZS/FCVTZU on s/d |
 
 ### Switch 2 specific behaviour
 
@@ -40,8 +48,8 @@ Reference Manual: bits 28..25 of every instruction select the group.
 
 ### Not implemented yet
 
-- SIMD / floating point (`q0`, `d0`, `fadd`, `ld1`...). This is the biggest gap:
-  real games and the SDK use it everywhere, even `memcpy`.
+- Rarer SIMD: LD2/LD3/LD4, LD1R, "by element" forms (`fmul v0.4s, v1.4s, v2.s[1]`), widening/narrowing
+  arithmetic (UADDL, SQXTN...), half precision, crypto (AES/SHA). FPCR rounding modes and FPSR flags.
 - LDXP/STXP, CASP, LDAPR, CRC32, other system registers.
 - Exceptions: an unknown instruction just stops the CPU (`IsHalted()`), with the
   PC left on the instruction that failed.
@@ -56,6 +64,13 @@ program into memory, runs it until `brk #0` and checks registers and memory.
   Results are compared with the same function run on the PC.
 - `tests/generated/test_programs.hpp`: machine code of all the above, made by
   `tools/asm2cpp.py`. It is committed, so you don't need LLVM to build.
+
+## Differential tests (SIMD/FP)
+
+`tests/programs/simd/*.S` are run on a reference ARM64 (QEMU) by `tools/gen_simd_tests.py`, which
+stores **every** register at the end (x0-x28, NZCV, v0-v31) in `tests/generated/simd_tests.hpp`.
+`tests/simd_tests.cpp` runs the same code in NeXo and compares register by register, so the
+expected values come from real ARM behaviour (NaN, saturation, rounding...) and not from us.
 
 ## How to add a new instruction
 

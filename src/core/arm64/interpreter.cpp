@@ -73,7 +73,7 @@ bool Interpreter::Execute(u32 instr) {
     if ((op0 & 0b1110) == 0b1010) return ExecBranchSystem(instr);  // 101x
     if ((op0 & 0b0101) == 0b0100) return ExecLoadStore(instr);     // x1x0
     if ((op0 & 0b0111) == 0b0101) return ExecDataProcReg(instr);   // x101
-    // x111 = SIMD / coma flotante: pendiente.
+    if ((op0 & 0b0111) == 0b0111) return ExecSimdFp(instr);        // x111
     return false;
 }
 
@@ -186,6 +186,12 @@ u64 Interpreter::ExtendReg(unsigned reg, unsigned option, unsigned shift, bool s
     }
     v <<= shift;
     return sf ? v : (v & 0xFFFFFFFFu);
+}
+
+void Interpreter::SetVScalar(unsigned n, u64 value, unsigned bytes) {
+    V128& v = Vreg(n);
+    v = V128{};
+    v.Set(0, bytes, value);
 }
 
 // ============================================================================

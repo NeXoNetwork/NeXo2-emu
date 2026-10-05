@@ -46,7 +46,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ### Phase 2: CPU Emulation (ARM64)
 - [x] **State Management:** Implementation of the ARM64 register set (X0-X30, SP, PC, and PSTATE).
-- [~] **Instruction Decoder:** Integer subset of ARMv8.2-A done (data processing, branches, loads/stores, atomics, system registers). SIMD/FP pending. See [docs/07-nexo-internals/cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md).
+- [~] **Instruction Decoder:** Integer, scalar FP and the common SIMD/NEON subset of ARMv8.2-A done, checked bit-for-bit against a reference ARM (QEMU). Rarer SIMD forms pending. See [docs/07-nexo-internals/cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md).
 - [x] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
 - [x] **CPU Tests:** `nexo2_tests` runs hand-written ARM64 programs and clang-compiled C code.
 - [~] **JIT Integration:** Ballistic front-end (ARM64 -> IR) wired in; no backend yet.

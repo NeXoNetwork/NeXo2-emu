@@ -1,7 +1,7 @@
 // Lecturas y escrituras en memoria (bit 27 = 1, bit 25 = 0).
 // Instrucciones: LDR/STR (todas sus formas), LDRB/LDRH/LDRSB/LDRSH/LDRSW, LDUR/STUR,
 // LDP/STP/LDPSW, LDR (literal), LDXR/STXR, LDAR/STLR, CAS, LDADD/SWP y demas atomicos.
-// Los registros SIMD (q0, d0...) todavia no estan implementados.
+// Las versiones con registros SIMD (q0, d0...) estan en interpreter_simd_ldst.cpp.
 #include "interpreter.hpp"
 #include "common/bit_utils.hpp"
 
@@ -25,7 +25,7 @@ u64 ExtendLoaded(u64 raw, unsigned size_bytes, u32 opc, bool& sf_out) {
 
 bool Interpreter::ExecLoadStore(u32 instr) {
     const bool is_simd = Bit(instr, 26);
-    if (is_simd) return false; // q0/d0/s0... pendiente (Fase SIMD)
+    if (is_simd) return ExecSimdLoadStore(instr); // q0/d0/s0..., ld1/st1: interpreter_simd_ldst.cpp
 
     const u32 group = Bits(instr, 28, 2); // bits 29..28
     const u32 rt = Bits(instr, 0, 5);

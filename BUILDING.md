@@ -103,6 +103,9 @@ gcc-aarch64-linux-gnu clang lld llvm`):
 
 ```bash
 python3 tools/gen_simd_tests.py   # tests/programs/simd/*.S -> tests/generated/simd_tests.hpp
+python3 tools/cpu_fuzz.py         # random instructions of every group -> tests/generated/cpu_fuzz.bin
 ```
+
+See [docs/07-nexo-internals/cpu-fuzzing.md](docs/07-nexo-internals/cpu-fuzzing.md) for the options.
 
 Third-party homebrew used for manual testing goes in `tests/homebrew/` (ignored by git).

@@ -23,6 +23,7 @@
 //   - svcSignalProcessWideKey: despierta a 'count' hilos de 'key'.
 // Referencia: switchbrew.org/wiki/SVC y docs/07-nexo-internals/threads.md
 #include "kernel.hpp"
+#include "arm64/fp_ops.hpp"
 #include "common/logger.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -222,6 +223,8 @@ KThread* Kernel::PickNext() {
 
 void Kernel::SwitchTo(const std::shared_ptr<KThread>& t) {
     if (t != m_current) {
+        // Los flags de coma flotante que dejo la FPU del PC son del hilo que sale
+        Core::FP::FoldHostFlags(m_cpu.GetState().fpsr);
         if (m_current && m_current->state != KThread::State::Terminated)
             m_current->ctx = m_cpu.GetState();      // guardar los registros del que sale
         m_cpu.GetState() = t->ctx;                  // cargar los del que entra

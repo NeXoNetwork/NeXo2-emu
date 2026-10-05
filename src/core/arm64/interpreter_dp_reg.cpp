@@ -142,6 +142,7 @@ bool Interpreter::DpCondSelect(u32 instr) {
     if (Bit(instr, 29)) return false;
     const u32 cond = Bits(instr, 12, 4);
     const u32 op2b = Bits(instr, 10, 2);
+    if (op2b > 1 || Bit(instr, 29)) return false;   // op2 = 1x: no valida
     u64 result;
     if (ConditionHolds(cond)) {
         result = X(rn, sf);
@@ -186,6 +187,21 @@ bool Interpreter::DpSource12(u32 instr) {
             case 0b001001: result = ShiftReg(a, 1, unsigned(b % datasize), sf); break; // LSRV
             case 0b001010: result = ShiftReg(a, 2, unsigned(b % datasize), sf); break; // ASRV
             case 0b001011: result = ShiftReg(a, 3, unsigned(b % datasize), sf); break; // RORV
+            case 0b010000: case 0b010001: case 0b010010: case 0b010011:   // CRC32B/H/W/X
+            case 0b010100: case 0b010101: case 0b010110: case 0b010111: { // CRC32CB/H/W/X
+                // CRC "reflejado" sin invertir al principio ni al final (eso lo hace el programa)
+                const unsigned size = 8u << (opcode & 3);
+                if ((size == 64) != sf) return false;
+                const u32 poly = (opcode & 4) ? 0x82F63B78u : 0xEDB88320u;
+                u64 crc = X(rn, false);
+                const u64 data = X(rm, sf) & Ones(size);
+                for (unsigned i = 0; i < size; ++i) {
+                    const u64 bit = (crc ^ (data >> i)) & 1;
+                    crc = (crc >> 1) ^ (bit ? poly : 0);
+                }
+                SetX(rd, crc & 0xFFFFFFFF, false);
+                return true;
+            }
             default: return false;
         }
         SetX(rd, result & Ones(datasize), sf);
@@ -197,7 +213,11 @@ bool Interpreter::DpSource12(u32 instr) {
     if (opcode2 == 0b00001) {
         // PACIA/AUTIA/XPACI... (Pointer Authentication). Como no firmamos
         // punteros, el valor no cambia: equivalen a NOP.
-        return sf;
+        //   opcode 0-7: PACIA..AUTDB;  8-15: las versiones "Z" (Rn = 11111);
+        //   16-17: XPACI/XPACD (Rn = 11111). El resto no existe.
+        const u32 op = Bits(instr, 10, 6);
+        if (!sf || op > 17 || (op >= 8 && rn != 31)) return false;
+        return true;
     }
     if (opcode2 != 0) return false;
     const u64 a = X(rn, sf);

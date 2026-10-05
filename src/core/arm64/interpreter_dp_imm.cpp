@@ -135,6 +135,7 @@ bool Interpreter::ExecDataProcImm(u32 instr) {
     // ------------------------------------------------------------------
     case 0b111: {
         if (Bits(instr, 29, 2) != 0 || Bit(instr, 21) != 0) return false;
+        if (Bit(instr, 22) != sf) return false;   // N tiene que ser igual a sf
         const u32 rm  = Bits(instr, 16, 5);
         const u32 lsb = Bits(instr, 10, 6);
         if (!sf && lsb >= 32) return false;

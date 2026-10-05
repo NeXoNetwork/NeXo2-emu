@@ -13,13 +13,25 @@ struct alignas(16) V128 {
     uint64_t hi = 0; // bits 64..127
 
     // Lee/escribe el carril 'index' de 'bytes' bytes (1, 2, 4 u 8)
+    // (Un memcpy con tamano fijo en cada caso: el compilador lo convierte en una sola
+    //  lectura/escritura. Con el tamano variable llamaba a la funcion memcpy de la libreria.)
     uint64_t Get(unsigned index, unsigned bytes) const {
-        uint64_t value = 0;
-        std::memcpy(&value, reinterpret_cast<const uint8_t*>(this) + index * bytes, bytes);
-        return value;
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(this) + index * bytes;
+        switch (bytes) {
+            case 1: return *p;
+            case 2: { uint16_t v; std::memcpy(&v, p, 2); return v; }
+            case 4: { uint32_t v; std::memcpy(&v, p, 4); return v; }
+            default: { uint64_t v; std::memcpy(&v, p, 8); return v; }
+        }
     }
     void Set(unsigned index, unsigned bytes, uint64_t value) {
-        std::memcpy(reinterpret_cast<uint8_t*>(this) + index * bytes, &value, bytes);
+        uint8_t* p = reinterpret_cast<uint8_t*>(this) + index * bytes;
+        switch (bytes) {
+            case 1: *p = uint8_t(value); break;
+            case 2: { const uint16_t v = uint16_t(value); std::memcpy(p, &v, 2); break; }
+            case 4: { const uint32_t v = uint32_t(value); std::memcpy(p, &v, 4); break; }
+            default: std::memcpy(p, &value, 8); break;
+        }
     }
     bool operator==(const V128& o) const { return lo == o.lo && hi == o.hi; }
 };

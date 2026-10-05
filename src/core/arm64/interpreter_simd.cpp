@@ -1,623 +1,1243 @@
-// SIMD vectorial ("Advanced SIMD" / NEON) y su variante escalar.
+// SIMD (Advanced SIMD / NEON) vectorial y escalar, por grupos del manual de ARM
+// ("Data Processing -- Scalar Floating-Point and Advanced SIMD").
 //
-// Un registro v0 de 128 bits se trata como varios "carriles" iguales:
-//   v0.16b = 16 x 8 bits   v0.8h = 8 x 16   v0.4s = 4 x 32   v0.2d = 2 x 64
-// Con Q = 0 se usan solo los 64 bits bajos (v0.8b, v0.4h, v0.2s) y los altos quedan a 0.
+//   Vectorial (0 Q U 0111x ...)                 Escalar (01 U 1111x ...)
+//     tres iguales (enteros y FP)                 tres iguales
+//     tres iguales FP16                           tres iguales FP16
+//     extension (SDOT/UDOT, SQRDMLAH)             extension (SQRDMLAH)
+//     tres distintos (largos/estrechos)           tres distintos (SQDMULL...)
+//     dos registros (+ FP16)                      dos registros (+ FP16)
+//     entre carriles (ADDV, FMAXV...)             pares (ADDP, FADDP...)
+//     copia (DUP, INS, UMOV, SMOV)                copia (DUP)
+//     permutar, EXT, TBL/TBX                      desplazamiento inmediato
+//     inmediato (MOVI, MVNI, ORR, BIC, FMOV)      por elemento
+//     desplazamiento inmediato
+//     por elemento
+// La criptografia (AES, SHA) esta en interpreter_crypto.cpp.
 //
-// Instrucciones: DUP, INS/MOV (elemento y general), UMOV/SMOV, MOVI/MVNI/ORR/BIC (inmediato),
-// FMOV (vector inmediato), AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF, ADD/SUB/MUL/MLA/MLS,
-// CMEQ/CMGT/CMGE/CMHI/CMHS/CMTST, SMAX/SMIN/UMAX/UMIN (+ pairwise), ADDP, USHL/SSHL,
-// comparaciones con #0, ABS/NEG/NOT/CNT/RBIT/REV, XTN, ADDV/UMAXV/UMINV/SMAXV/SMINV/UADDLV,
-// SHL/USHR/SSHR/USRA/SSRA/SHRN/USHLL/SSHLL, UZP/ZIP/TRN, EXT, TBL/TBX,
-// FADD/FSUB/FMUL/FDIV/FMLA/FMLS/FMAX/FMIN/FADDP/FCMxx/FABS/FNEG/FSQRT/SCVTF/UCVTF/FCVTZS/FCVTZU.
-#include "interpreter.hpp"
-#include "common/bit_utils.hpp"
-#include <cmath>
-#include <cstring>
+// Regla general: si una codificacion esta "reservada" en el manual, devolvemos false
+// (instruccion no valida), igual que una CPU real. tests/cpu_fuzz_tests.cpp lo comprueba
+// contra un ARM de referencia.
+#include "simd_common.hpp"
 
 namespace NeXo2::Core {
 
-using namespace NeXo2::Common;
+using namespace Simd;
 
-namespace {
-
-u64 Mask(unsigned bytes) { return Ones(bytes * 8); }
-s64 Sx(u64 v, unsigned bytes) { return SignExtend(v, bytes * 8); }
-
-float  F32(u64 b) { float f; u32 x = static_cast<u32>(b); std::memcpy(&f, &x, 4); return f; }
-double F64(u64 b) { double d; std::memcpy(&d, &b, 8); return d; }
-u64 B32(float f)  { u32 x; std::memcpy(&x, &f, 4); return x; }
-u64 B64(double d) { u64 x; std::memcpy(&x, &d, 8); return x; }
-
-// Aplica 'f' carril a carril sobre a y b
-template <typename F>
-V128 Map2(const V128& a, const V128& b, unsigned bytes, unsigned lanes, F f) {
-    V128 r{};
-    for (unsigned i = 0; i < lanes; ++i) r.Set(i, bytes, f(a.Get(i, bytes), b.Get(i, bytes)) & Mask(bytes));
-    return r;
+u64 Simd::ExpandImm(u32 op, u32 cmode, u32 imm8) {
+    u64 imm = 0;
+    auto rep32 = [](u64 v) { return v | (v << 32); };
+    auto rep16 = [](u64 v) { return v | (v << 16) | (v << 32) | (v << 48); };
+    switch (cmode >> 1) {
+        case 0: imm = rep32(u64(imm8)); break;
+        case 1: imm = rep32(u64(imm8) << 8); break;
+        case 2: imm = rep32(u64(imm8) << 16); break;
+        case 3: imm = rep32(u64(imm8) << 24); break;
+        case 4: imm = rep16(u64(imm8)); break;
+        case 5: imm = rep16(u64(imm8) << 8); break;
+        case 6:
+            imm = (cmode & 1) ? rep32((u64(imm8) << 16) | 0xFFFF) : rep32((u64(imm8) << 8) | 0xFF);
+            break;
+        default:
+            if ((cmode & 1) == 0 && op == 0) {           // MOVI .16b: el byte repetido
+                imm = u64(imm8) * 0x0101010101010101ull;
+            } else if ((cmode & 1) == 0 && op == 1) {    // MOVI .2d: cada bit -> un byte
+                for (int i = 0; i < 8; ++i) if ((imm8 >> i) & 1) imm |= 0xFFull << (i * 8);
+            } else if ((cmode & 1) == 1 && op == 0) {    // FMOV single
+                const u64 s = (imm8 >> 7) & 1, b = (imm8 >> 6) & 1;
+                const u64 f = (s << 31) | ((b ^ 1) << 30) | ((b ? 0x1Full : 0) << 25) | (u64(imm8 & 0x3F) << 19);
+                imm = rep32(f);
+            } else {                                      // FMOV double
+                const u64 s = (imm8 >> 7) & 1, b = (imm8 >> 6) & 1;
+                imm = (s << 63) | ((b ^ 1) << 62) | ((b ? 0xFFull : 0) << 54) | (u64(imm8 & 0x3F) << 48);
+            }
+            break;
+    }
+    return imm;
 }
 
-// AdvSIMDExpandImm del manual: el inmediato de MOVI/MVNI/ORR/BIC/FMOV (vector)
-u64 ExpandSimdImm(u32 op, u32 cmode, u64 imm8) {
-    switch (cmode >> 1) {
-        case 0b000: return Replicate(imm8, 32, 64);
-        case 0b001: return Replicate(imm8 << 8, 32, 64);
-        case 0b010: return Replicate(imm8 << 16, 32, 64);
-        case 0b011: return Replicate(imm8 << 24, 32, 64);
-        case 0b100: return Replicate(imm8, 16, 64);
-        case 0b101: return Replicate(imm8 << 8, 16, 64);
-        case 0b110: return (cmode & 1) ? Replicate((imm8 << 16) | 0xFFFF, 32, 64)  // MSL #16
-                                       : Replicate((imm8 << 8) | 0xFF, 32, 64);    // MSL #8
+struct SimdOps {
+    using V = V128;
+    static V& R(Interpreter& it, unsigned n) { return it.m_state.v[n & 31]; }
+    static void Write(Interpreter& it, unsigned rd, V v, bool q) {
+        if (!q) v.hi = 0;
+        R(it, rd) = v;
+    }
+    // Escribe un escalar de 'eb' bytes (el resto del registro a cero)
+    static void WriteScalar(Interpreter& it, unsigned rd, u64 v, unsigned eb) {
+        V r{};
+        r.Set(0, eb, v & LaneMask(eb));
+        R(it, rd) = r;
+    }
+    static void QC(Interpreter& it) { it.m_state.fpsr |= FP::FPSR_QC; }
+    static FP::Env Env(Interpreter& it) { return FP::Env{u32(it.m_state.fpcr), it.m_state.fpsr}; }
+    static FP::Rounding FpcrRounding(Interpreter& it) { return FP::Rounding(FP::RoundingMode(u32(it.m_state.fpcr))); }
+
+    static bool Dispatch(Interpreter& it, u32 instr);
+
+    // --- grupos vectoriales ---
+    static bool ThreeSame(Interpreter& it, u32 instr, bool scalar);
+    static bool ThreeSameFP(Interpreter& it, u32 instr, unsigned w, bool scalar, u32 key);
+    static bool ThreeSameFP16(Interpreter& it, u32 instr, bool scalar);
+    static bool ThreeSameExtra(Interpreter& it, u32 instr, bool scalar);
+    static bool ThreeDifferent(Interpreter& it, u32 instr, bool scalar);
+    static bool TwoRegMisc(Interpreter& it, u32 instr, bool scalar);
+    static bool TwoRegMiscFP(Interpreter& it, u32 instr, unsigned w, bool scalar, u32 key);
+    static bool TwoRegMiscFP16(Interpreter& it, u32 instr, bool scalar);
+    static bool AcrossLanes(Interpreter& it, u32 instr);
+    static bool ScalarPairwise(Interpreter& it, u32 instr);
+    static bool Copy(Interpreter& it, u32 instr, bool scalar);
+    static bool Permute(Interpreter& it, u32 instr);
+    static bool Ext(Interpreter& it, u32 instr);
+    static bool Table(Interpreter& it, u32 instr);
+    static bool ModifiedImm(Interpreter& it, u32 instr);
+    static bool ShiftImm(Interpreter& it, u32 instr, bool scalar);
+    static bool ByElement(Interpreter& it, u32 instr, bool scalar);
+};
+
+bool Interpreter::ExecSimdVector(u32 instr) { return SimdOps::Dispatch(*this, instr); }
+
+bool SimdOps::Dispatch(Interpreter& it, u32 instr) {
+    const bool scalar = Bit(instr, 30) && Bit(instr, 28);       // 01 U 1111x
+    if (!scalar && Bit(instr, 31)) return false;
+    if (scalar && Bit(instr, 31)) return false;
+    const bool b24 = Bit(instr, 24), b21 = Bit(instr, 21), b10 = Bit(instr, 10), b15 = Bit(instr, 15);
+    const bool u = Bit(instr, 29);
+
+    if (b24) {                                                  // 0111 1 / 1111 1
+        if (!b10) return ByElement(it, instr, scalar);
+        if (Bit(instr, 23)) return false;                       // inmediatos: bit 23 = 0
+        if (!scalar && Bits(instr, 19, 4) == 0) return ModifiedImm(it, instr);
+        if (Bits(instr, 19, 4) == 0) return false;
+        return ShiftImm(it, instr, scalar);
+    }
+    if (b21) {
+        if (Bits(instr, 10, 2) == 0b00) return ThreeDifferent(it, instr, scalar);
+        if (b10) return ThreeSame(it, instr, scalar);
+        // bits 11..10 = 10
+        if (Bits(instr, 17, 6) == 0b111100) return TwoRegMiscFP16(it, instr, scalar);   // bits 22..17
+        const u32 op = Bits(instr, 17, 4);
+        if (op == 0b0000) return TwoRegMisc(it, instr, scalar);
+        if (op == 0b1000) return scalar ? ScalarPairwise(it, instr) : AcrossLanes(it, instr);
+        if (op == 0b0100 && Bits(instr, 22, 2) == 0 && !u) return it.ExecCrypto(instr);   // AES / SHA 2 reg
+        return false;
+    }
+    // bit 21 = 0
+    if (b15 && b10) return ThreeSameExtra(it, instr, scalar);
+    if (b10) {
+        if (Bits(instr, 21, 3) == 0b000 && !b15) return Copy(it, instr, scalar);
+        if (Bits(instr, 21, 2) == 0b10 && Bits(instr, 14, 2) == 0) return ThreeSameFP16(it, instr, scalar);
+        return false;
+    }
+    if (scalar) {
+        if (!u && Bits(instr, 21, 3) == 0 && !b15 && Bits(instr, 10, 2) == 0) return it.ExecCrypto(instr);  // SHA 3 reg
+        return false;
+    }
+    if (b15) return false;
+    if (u) return (Bits(instr, 22, 2) == 0 && !b10) ? Ext(it, instr) : false;
+    if (Bits(instr, 10, 2) == 0b10) return Permute(it, instr);
+    if (Bits(instr, 10, 2) == 0b00 && Bits(instr, 22, 2) == 0) return Table(it, instr);
+    return false;
+}
+
+// ============================================================================
+//  Tres iguales (enteros y coma flotante)
+// ============================================================================
+
+bool SimdOps::ThreeSame(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30) || scalar, u = Bit(instr, 29);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 11, 5);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+
+    if (opcode >= 0b11000) {                                     // coma flotante
+        const unsigned w = (size & 1) ? 64 : 32;
+        if (!scalar && w == 64 && !q) return false;
+        return ThreeSameFP(it, instr, w, scalar, (u32(u) << 4) | ((size >> 1) << 3) | (opcode & 7));
+    }
+
+    const unsigned eb = 1u << size;
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+    const V a = R(it, rn), b = R(it, rm), d = R(it, rd);
+
+    // Logicas: el campo size elige la operacion
+    if (opcode == 0b00011) {
+        if (scalar) return false;
+        V r;
+        auto op = [&](u64 x, u64 y, u64 z) -> u64 {
+            if (!u) switch (size) { case 0: return x & y; case 1: return x & ~y; case 2: return x | y; default: return x | ~y; }
+            switch (size) {
+                case 0: return x ^ y;                         // EOR
+                case 1: return (z & x) | (~z & y);            // BSL
+                case 2: return (y & x) | (~y & z);            // BIT
+                default: return (~y & x) | (y & z);           // BIF
+            }
+        };
+        r.lo = op(a.lo, b.lo, d.lo);
+        r.hi = op(a.hi, b.hi, d.hi);
+        Write(it, rd, r, q);
+        return true;
+    }
+
+    // Validez de size/Q segun la instruccion
+    switch (opcode) {
+        case 0b00000: case 0b00010: case 0b00100: case 0b01100: case 0b01101: case 0b01110: case 0b01111:
+        case 0b10010: case 0b10100: case 0b10101:
+            if (scalar || size == 3) return false;
+            break;
+        case 0b10011:
+            if (scalar || (u ? size != 0 : size == 3)) return false;
+            break;
+        case 0b10110:
+            if (size == 0 || size == 3) return false;
+            break;
+        case 0b10111:
+            if (scalar || u || (size == 3 && !q)) return false;
+            break;
+        case 0b00110: case 0b00111: case 0b10000: case 0b10001: case 0b01000: case 0b01010:
+            if (scalar ? size != 3 : (size == 3 && !q)) return false;
+            break;
+        default:   // 00001, 00101, 01001, 01011 (saturantes): escalar en cualquier tamano
+            if (!scalar && size == 3 && !q) return false;
+            break;
+    }
+
+    bool sat = false;
+    V r{};
+    for (unsigned i = 0; i < lanes; ++i) {
+        const u64 x = a.Get(i, eb) , y = b.Get(i, eb);
+        const s64 sx = Sx(x, eb), sy = Sx(y, eb);
+        const I128 wx = Wide(x, eb, u), wy = Wide(y, eb, u);
+        u64 z = 0;
+        switch (opcode) {
+            case 0b00000: z = u ? (x + y) >> 1 : u64((sx + sy) >> 1); break;                        // HADD
+            case 0b00001: z = u ? SatU(wx + wy, eb, sat) : SatS(wx + wy, eb, sat); break;          // QADD
+            case 0b00010: z = u ? (x + y + 1) >> 1 : u64((sx + sy + 1) >> 1); break;               // RHADD
+            case 0b00100: z = u64((u ? s64(x) - s64(y) : sx - sy) >> 1); break;                    // HSUB
+            case 0b00101: z = u ? SatU(wx - wy, eb, sat) : SatS(wx - wy, eb, sat); break;          // QSUB
+            case 0b00110: z = (u ? x > y : sx > sy) ? ~0ull : 0; break;                            // CMHI / CMGT
+            case 0b00111: z = (u ? x >= y : sx >= sy) ? ~0ull : 0; break;                          // CMHS / CMGE
+            case 0b01000: z = ShiftByReg(x, eb, s8(y & 0xFF), u, false, false, sat); break;        // USHL / SSHL
+            case 0b01001: z = ShiftByReg(x, eb, s8(y & 0xFF), u, false, true, sat); break;         // QSHL
+            case 0b01010: z = ShiftByReg(x, eb, s8(y & 0xFF), u, true, false, sat); break;         // RSHL
+            case 0b01011: z = ShiftByReg(x, eb, s8(y & 0xFF), u, true, true, sat); break;          // QRSHL
+            case 0b01100: z = u ? (x > y ? x : y) : u64(sx > sy ? sx : sy); break;                 // MAX
+            case 0b01101: z = u ? (x < y ? x : y) : u64(sx < sy ? sx : sy); break;                 // MIN
+            case 0b01110: z = u ? (x > y ? x - y : y - x) : u64(sx > sy ? sx - sy : sy - sx); break;   // ABD
+            case 0b01111: z = d.Get(i, eb) + (u ? (x > y ? x - y : y - x) : u64(sx > sy ? sx - sy : sy - sx)); break; // ABA
+            case 0b10000: z = u ? x - y : x + y; break;                                            // SUB / ADD
+            case 0b10001: z = (u ? x == y : (x & y) != 0) ? ~0ull : 0; break;                      // CMEQ / CMTST
+            case 0b10010: z = u ? d.Get(i, eb) - x * y : d.Get(i, eb) + x * y; break;              // MLS / MLA
+            case 0b10011:
+                if (!u) { z = x * y; break; }                                                      // MUL
+                for (unsigned k = 0; k < 8; ++k) if ((y >> k) & 1) z ^= x << k;                    // PMUL
+                break;
+            case 0b10100: case 0b10101: case 0b10111: {                                            // pares
+                const unsigned half = lanes / 2;
+                const V& src = i < half ? a : b;
+                const unsigned k = (i % half) * 2;
+                const u64 p = src.Get(k, eb), s2 = src.Get(k + 1, eb);
+                const s64 sp = Sx(p, eb), ss = Sx(s2, eb);
+                if (opcode == 0b10111) z = p + s2;                                                 // ADDP
+                else if (opcode == 0b10100) z = u ? (p > s2 ? p : s2) : u64(sp > ss ? sp : ss);    // MAXP
+                else z = u ? (p < s2 ? p : s2) : u64(sp < ss ? sp : ss);                           // MINP
+                break;
+            }
+            case 0b10110: {                                                                        // SQ(R)DMULH
+                const unsigned bits = eb * 8;
+                I128 p = I128::From(sx * sy).Shl(1);
+                if (u) p = p + I128::From(s64(1) << (bits - 1));
+                z = SatS(p.Sar(bits), eb, sat);
+                break;
+            }
+            default: return false;
+        }
+        r.Set(i, eb, z & LaneMask(eb));
+    }
+    if (sat) QC(it);
+    if (scalar) WriteScalar(it, rd, r.lo, eb);
+    else Write(it, rd, r, q);
+    return true;
+}
+
+// Una operacion FP de "tres iguales". key = U:a:opcode<2:0>
+bool SimdOps::ThreeSameFP(Interpreter& it, u32 instr, unsigned w, bool scalar, u32 key) {
+    const bool q = Bit(instr, 30);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+    const unsigned eb = w / 8;
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+    const V a = R(it, rn), b = R(it, rm), d = R(it, rd);
+    FP::Env e = Env(it);
+    const u64 ones = LaneMask(eb);
+
+    // En escalar solo existen algunas
+    if (scalar) {
+        switch (key) {
+            case 0b00011: case 0b00100: case 0b00111: case 0b01111:          // FMULX FCMEQ FRECPS FRSQRTS
+            case 0b10100: case 0b10101: case 0b11010: case 0b11100: case 0b11101: break;   // FCMGE FACGE FABD FCMGT FACGT
+            default: return false;
+        }
+    }
+    const bool pairwise = key == 0b10000 || key == 0b10010 || key == 0b10110 || key == 0b11000 || key == 0b11110;
+    V r{};
+    for (unsigned i = 0; i < lanes; ++i) {
+        u64 x = a.Get(i, eb), y = b.Get(i, eb);
+        if (pairwise) {
+            const unsigned half = lanes / 2;
+            const V& src = i < half ? a : b;
+            const unsigned k = (i % half) * 2;
+            x = src.Get(k, eb);
+            y = src.Get(k + 1, eb);
+        }
+        u64 z;
+        switch (key) {
+            case 0b00000: case 0b10000: z = FP::MaxNum(x, y, w, e); break;                 // FMAXNM(P)
+            case 0b00001: z = FP::MulAdd(d.Get(i, eb), x, y, w, e); break;                 // FMLA
+            case 0b00010: z = FP::Add(x, y, w, e); break;                                  // FADD
+            case 0b00011: z = FP::MulX(x, y, w, e); break;                                 // FMULX
+            case 0b00100: z = FP::CompareEQ(x, y, w, e) ? ones : 0; break;                 // FCMEQ
+            case 0b00110: case 0b10110: z = FP::Max(x, y, w, e); break;                    // FMAX(P)
+            case 0b00111: z = FP::RecipStepFused(x, y, w, e); break;                       // FRECPS
+            case 0b01000: case 0b11000: z = FP::MinNum(x, y, w, e); break;                 // FMINNM(P)
+            case 0b01001: z = FP::MulAdd(d.Get(i, eb), FP::Neg(x, w), y, w, e); break;     // FMLS
+            case 0b01010: z = FP::Sub(x, y, w, e); break;                                  // FSUB
+            case 0b01110: case 0b11110: z = FP::Min(x, y, w, e); break;                    // FMIN(P)
+            case 0b01111: z = FP::RSqrtStepFused(x, y, w, e); break;                       // FRSQRTS
+            case 0b10010: z = FP::Add(x, y, w, e); break;                                  // FADDP
+            case 0b10011: z = FP::Mul(x, y, w, e); break;                                  // FMUL
+            case 0b10100: z = FP::CompareGE(x, y, w, e) ? ones : 0; break;                 // FCMGE
+            case 0b10101: z = FP::CompareGE(FP::Abs(x, w), FP::Abs(y, w), w, e) ? ones : 0; break;  // FACGE
+            case 0b10111: z = FP::Div(x, y, w, e); break;                                  // FDIV
+            case 0b11010: z = FP::Abs(FP::Sub(x, y, w, e), w); break;                      // FABD
+            case 0b11100: z = FP::CompareGT(x, y, w, e) ? ones : 0; break;                 // FCMGT
+            case 0b11101: z = FP::CompareGT(FP::Abs(x, w), FP::Abs(y, w), w, e) ? ones : 0; break;  // FACGT
+            default: return false;
+        }
+        r.Set(i, eb, z);
+    }
+    if (scalar) WriteScalar(it, rd, r.lo, eb);
+    else Write(it, rd, r, q);
+    return true;
+}
+
+bool SimdOps::ThreeSameFP16(Interpreter& it, u32 instr, bool scalar) {
+    const u32 key = (u32(Bit(instr, 29)) << 4) | (u32(Bit(instr, 23)) << 3) | Bits(instr, 11, 3);
+    return ThreeSameFP(it, instr, 16, scalar, key);
+}
+
+// SQRDMLAH / SQRDMLSH y SDOT / UDOT
+bool SimdOps::ThreeSameExtra(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30), u = Bit(instr, 29);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 11, 4);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+    const V a = R(it, rn), b = R(it, rm), d = R(it, rd);
+
+    if (opcode == 0b0000 || opcode == 0b0001) {                    // SQRDMLAH / SQRDMLSH
+        if (!u || size == 0 || size == 3) return false;
+        const unsigned eb = 1u << size, bits = eb * 8;
+        const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+        bool sat = false;
+        V r{};
+        for (unsigned i = 0; i < lanes; ++i) {
+            I128 p = I128::From(Sx(a.Get(i, eb), eb) * Sx(b.Get(i, eb), eb)).Shl(1);
+            if (opcode == 1) p = -p;
+            const I128 acc = I128::From(Sx(d.Get(i, eb), eb)).Shl(bits);
+            const I128 sum = acc + p + I128::From(s64(1) << (bits - 1));
+            r.Set(i, eb, SatS(sum.Sar(bits), eb, sat));
+        }
+        if (sat) QC(it);
+        if (scalar) WriteScalar(it, rd, r.lo, eb);
+        else Write(it, rd, r, q);
+        return true;
+    }
+    if (opcode == 0b0010 && !scalar) {                              // SDOT / UDOT
+        if (size != 2) return false;
+        V r = d;
+        const unsigned lanes = q ? 4 : 2;
+        for (unsigned i = 0; i < lanes; ++i) {
+            u64 acc = d.Get(i, 4);
+            for (unsigned k = 0; k < 4; ++k) {
+                const u64 x = a.Get(i * 4 + k, 1), y = b.Get(i * 4 + k, 1);
+                acc += u ? x * y : u64(Sx(x, 1) * Sx(y, 1));
+            }
+            r.Set(i, 4, acc & 0xFFFFFFFFu);
+        }
+        Write(it, rd, r, q);
+        return true;
+    }
+    return false;
+}
+
+// ============================================================================
+//  Tres distintos: operaciones "largas" (resultado del doble de ancho) y "estrechas"
+// ============================================================================
+
+bool SimdOps::ThreeDifferent(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30), u = Bit(instr, 29);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 12, 4);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+    const V a = R(it, rn), b = R(it, rm), d = R(it, rd);
+
+    if (opcode == 0b1110 && !scalar) {                       // PMULL / PMULL2
+        if (u || size == 1 || size == 2) return false;
+        V r{};
+        if (size == 3) {                                       // 64 x 64 -> 128 (criptografia)
+            PolyMul64(q ? a.hi : a.lo, q ? b.hi : b.lo, r.lo, r.hi);
+        } else {
+            const u64 x = q ? a.hi : a.lo, y = q ? b.hi : b.lo;
+            for (unsigned i = 0; i < 8; ++i) {
+                const u64 xa = (x >> (i * 8)) & 0xFF, yb = (y >> (i * 8)) & 0xFF;
+                u64 p = 0;
+                for (unsigned k = 0; k < 8; ++k) if ((yb >> k) & 1) p ^= xa << k;
+                r.Set(i, 2, p);
+            }
+        }
+        R(it, rd) = r;
+        return true;
+    }
+    if (size == 3) return false;
+    const bool sq_op = opcode == 0b1001 || opcode == 0b1011 || opcode == 0b1101;   // SQDMLAL SQDMLSL SQDMULL
+    if (scalar && (!sq_op || u)) return false;
+    if (sq_op && (u || size == 0)) return false;
+
+    const unsigned eb = 1u << size, wb = eb * 2;
+    const unsigned lanes = scalar ? 1 : 8 / eb;
+    const bool upper = q && !scalar;                          // variantes "2": mitad alta
+    auto narrow = [&](const V& v, unsigned i) { return upper ? v.Get(i + lanes, eb) : v.Get(i, eb); };
+    auto ext = [&](u64 v, unsigned bytes) { return u ? I128::FromU(v & LaneMask(bytes)) : I128::From(Sx(v, bytes)); };
+
+    // Estrechas: ADDHN, RADDHN, SUBHN, RSUBHN (fuentes anchas -> mitad del resultado)
+    if (opcode == 0b0100 || opcode == 0b0110) {
+        if (scalar) return false;
+        V r = upper ? d : V{};
+        for (unsigned i = 0; i < lanes; ++i) {
+            const u64 x = a.Get(i, wb), y = b.Get(i, wb);
+            u64 v = opcode == 0b0100 ? x + y : x - y;
+            u64 hi_part = (v >> (eb * 8)) & LaneMask(eb);
+            if (u) {   // con redondeo: + 2^(eb*8-1) antes de quedarse con la mitad alta (acarreo incluido)
+                const u64 rc = 1ull << (eb * 8 - 1);
+                const u64 vw = v & LaneMask(wb);
+                const u64 sum = vw + rc;
+                hi_part = wb == 8 ? ((sum >> 32) & LaneMask(eb)) : ((sum >> (eb * 8)) & LaneMask(eb));
+            }
+            r.Set(upper ? i + lanes : i, eb, hi_part);
+        }
+        Write(it, rd, r, true);
+        if (!upper) R(it, rd).hi = 0;
+        return true;
+    }
+
+    bool sat = false;
+    V r{};
+    for (unsigned i = 0; i < lanes; ++i) {
+        const u64 xn = narrow(a, i), yn = narrow(b, i);
+        const I128 x = ext(xn, eb), y = ext(yn, eb);
+        I128 z;
+        const I128 acc = u ? I128::FromU(d.Get(i, wb)) : I128::From(Sx(d.Get(i, wb), wb));
+        switch (opcode) {
+            case 0b0000: z = x + y; break;                                              // ADDL
+            case 0b0001: z = ext(a.Get(i, wb), wb) + y; break;                         // ADDW
+            case 0b0010: z = x - y; break;                                              // SUBL
+            case 0b0011: z = ext(a.Get(i, wb), wb) - y; break;                         // SUBW
+            case 0b0101: { I128 df = x - y; if (df.hi < 0) df = -df; z = acc + df; break; }  // ABAL
+            case 0b0111: { I128 df = x - y; if (df.hi < 0) df = -df; z = df; break; }        // ABDL
+            case 0b1000: z = acc + MulS(x.lo, y.lo); if (u) z = acc + I128::FromU(xn * yn); break;   // MLAL
+            case 0b1010: z = acc - MulS(x.lo, y.lo); if (u) z = acc - I128::FromU(xn * yn); break;   // MLSL
+            case 0b1100: z = MulS(s64(x.lo), s64(y.lo)); if (u) z = I128::FromU(xn * yn); break;     // MULL
+            case 0b1001: case 0b1011: case 0b1101: {                                    // SQDMLAL/SQDMLSL/SQDMULL
+                const u64 prod = SatS(MulS(Sx(xn, eb), Sx(yn, eb)).Shl(1), wb, sat);
+                if (opcode == 0b1101) { z = I128::From(Sx(prod, wb)); break; }
+                const I128 p = I128::From(Sx(prod, wb));
+                const I128 accs = I128::From(Sx(d.Get(i, wb), wb));
+                z = I128::From(Sx(SatS(opcode == 0b1001 ? accs + p : accs - p, wb, sat), wb));
+                break;
+            }
+            default: return false;
+        }
+        r.Set(i, wb, z.lo & LaneMask(wb));
+    }
+    if (sat) QC(it);
+    if (scalar) WriteScalar(it, rd, r.lo, wb);
+    else R(it, rd) = r;
+    return true;
+}
+
+// ============================================================================
+//  Dos registros (miscelanea): REV, CNT, ABS, NEG, comparaciones con 0, XTN...
+// ============================================================================
+
+bool SimdOps::TwoRegMisc(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30) || scalar, u = Bit(instr, 29);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 12, 5);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+
+    // Coma flotante (y URECPE/URSQRTE, que estan mezcladas con ellas)
+    const bool fp = (opcode >= 0b01100 && opcode <= 0b01111 && (size >> 1)) || opcode == 0b10110 ||
+                    opcode == 0b10111 || (opcode >= 0b11000 && opcode != 0b11110);
+    if (fp) {
+        const unsigned w = (size & 1) ? 64 : 32;
+        return TwoRegMiscFP(it, instr, w, scalar, (u32(u) << 6) | ((size >> 1) << 5) | opcode);
+    }
+
+    const unsigned eb = 1u << size;
+    const unsigned lanes = scalar ? 1 : (Bit(instr, 30) ? 16 : 8) / eb;
+    const V a = R(it, rn), d = R(it, rd);
+    bool sat = false;
+    V r{};
+
+    // Estrechas: XTN, SQXTN, UQXTN, SQXTUN (fuente del doble de ancho)
+    if (opcode == 0b10010 || opcode == 0b10100) {
+        if (size == 3 || (scalar && opcode == 0b10010 && !u)) return false;
+        const unsigned wb = eb * 2;
+        const unsigned n = scalar ? 1 : 8 / eb;
+        const bool upper = Bit(instr, 30) && !scalar;
+        r = upper ? d : V{};
+        for (unsigned i = 0; i < n; ++i) {
+            const u64 x = a.Get(i, wb);
+            u64 z;
+            if (opcode == 0b10010 && !u) z = x & LaneMask(eb);                               // XTN
+            else if (opcode == 0b10010) z = SatU(Wide(x, wb, false), eb, sat);               // SQXTUN
+            else z = u ? SatU(Wide(x, wb, true), eb, sat) : SatS(Wide(x, wb, false), eb, sat); // UQXTN / SQXTN
+            r.Set(upper ? i + n : i, eb, z);
+        }
+        if (sat) QC(it);
+        if (scalar) WriteScalar(it, rd, r.lo, eb);
+        else { R(it, rd) = r; if (!upper) R(it, rd).hi = 0; }
+        return true;
+    }
+    // SHLL / SHLL2: desplazar a la izquierda el tamano del elemento (largo)
+    if (opcode == 0b10011 && u && !scalar) {
+        if (size == 3) return false;
+        const unsigned n = 8 / eb, wb = eb * 2;
+        for (unsigned i = 0; i < n; ++i) {
+            const u64 x = Bit(instr, 30) ? a.Get(i + n, eb) : a.Get(i, eb);
+            r.Set(i, wb, (x << (eb * 8)) & LaneMask(wb));
+        }
+        R(it, rd) = r;
+        return true;
+    }
+    // Pares largos: SADDLP, UADDLP, SADALP, UADALP
+    if (opcode == 0b00010 || opcode == 0b00110) {
+        if (scalar || size == 3) return false;
+        const unsigned wb = eb * 2, n = lanes / 2;
+        for (unsigned i = 0; i < n; ++i) {
+            const u64 x = a.Get(2 * i, eb), y = a.Get(2 * i + 1, eb);
+            u64 z = u ? x + y : u64(Sx(x, eb) + Sx(y, eb));
+            if (opcode == 0b00110) z += d.Get(i, wb);
+            r.Set(i, wb, z & LaneMask(wb));
+        }
+        Write(it, rd, r, Bit(instr, 30));
+        return true;
+    }
+
+    // Validez
+    switch (opcode) {
+        case 0b00000: if (scalar || size == 3 || (u && size >= 2)) return false; break;   // REV64 / REV32
+        case 0b00001: if (scalar || u || size != 0) return false; break;                  // REV16
+        case 0b00100: if (scalar || size == 3) return false; break;                       // CLS / CLZ
+        case 0b00101: if (scalar || (u ? size > 1 : size != 0)) return false; break;      // CNT / NOT / RBIT
+        case 0b00011: case 0b00111:                                                        // SUQADD USQADD SQABS SQNEG
+            if (!scalar && size == 3 && !q) return false;
+            break;
+        case 0b01000: case 0b01001: case 0b01011:                                         // CMGT/CMGE/CMEQ/CMLE #0, ABS/NEG
+            if (scalar ? size != 3 : (size == 3 && !q)) return false;
+            break;
+        case 0b01010:                                                                      // CMLT #0
+            if (u || (scalar ? size != 3 : (size == 3 && !q))) return false;
+            break;
+        default: return false;
+    }
+
+    if (opcode == 0b00101 && u && size == 1) {                          // RBIT: siempre por bytes
+        for (unsigned i = 0; i < (Bit(instr, 30) ? 16u : 8u); ++i) {
+            const u64 x = a.Get(i, 1);
+            u64 z = 0;
+            for (unsigned k = 0; k < 8; ++k) if ((x >> k) & 1) z |= 1ull << (7 - k);
+            r.Set(i, 1, z);
+        }
+        Write(it, rd, r, Bit(instr, 30));
+        return true;
+    }
+
+    for (unsigned i = 0; i < lanes; ++i) {
+        const u64 x = a.Get(i, eb);
+        const s64 sx = Sx(x, eb);
+        u64 z = 0;
+        switch (opcode) {
+            case 0b00000: {                                                    // REV64 / REV32
+                const unsigned container = (u ? 4u : 8u) / eb;                // elementos por bloque
+                const unsigned base = (i / container) * container;
+                z = a.Get(base + (container - 1 - (i - base)), eb);
+                break;
+            }
+            case 0b00001: z = a.Get(i ^ 1, 1); break;                          // REV16 (bytes)
+            case 0b00011:                                                      // SUQADD / USQADD
+                if (!u) z = SatS(Wide(d.Get(i, eb), eb, false) + Wide(x, eb, true), eb, sat);
+                else    z = SatU(Wide(d.Get(i, eb), eb, true) + Wide(x, eb, false), eb, sat);
+                break;
+            case 0b00100: {                                                    // CLS / CLZ
+                const unsigned bits = eb * 8;
+                unsigned c = 0;
+                if (u) { for (int k = int(bits) - 1; k >= 0 && !((x >> k) & 1); --k) ++c; }
+                else {
+                    const u64 sgn = (x >> (bits - 1)) & 1;
+                    for (int k = int(bits) - 2; k >= 0 && ((x >> k) & 1) == sgn; --k) ++c;
+                }
+                z = c;
+                break;
+            }
+            case 0b00101:
+                if (!u) { u64 c = x; c = c - ((c >> 1) & 0x55); c = (c & 0x33) + ((c >> 2) & 0x33); z = (c + (c >> 4)) & 0x0F; } // CNT
+                else z = ~x;                                                    // NOT
+                break;
+            case 0b00111: {                                                    // SQABS / SQNEG
+                I128 v = I128::From(sx);
+                if (u || sx < 0) v = -v;
+                if (!u && sx >= 0) v = I128::From(sx);
+                z = SatS(v, eb, sat);
+                break;
+            }
+            case 0b01000: z = (u ? sx >= 0 : sx > 0) ? ~0ull : 0; break;      // CMGE / CMGT #0
+            case 0b01001: z = (u ? sx <= 0 : sx == 0) ? ~0ull : 0; break;     // CMLE / CMEQ #0
+            case 0b01010: z = sx < 0 ? ~0ull : 0; break;                       // CMLT #0
+            case 0b01011: z = u ? 0 - x : (sx < 0 ? 0 - u64(sx) : u64(sx)); break;      // NEG / ABS
+            default: return false;
+        }
+        r.Set(i, eb, z & LaneMask(eb));
+    }
+    if (sat) QC(it);
+    if (scalar) WriteScalar(it, rd, r.lo, eb);
+    else Write(it, rd, r, Bit(instr, 30));
+    return true;
+}
+
+// key = U:a:opcode(5)
+bool SimdOps::TwoRegMiscFP(Interpreter& it, u32 instr, unsigned w, bool scalar, u32 key) {
+    const bool q = Bit(instr, 30);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+    const V a = R(it, rn), d = R(it, rd);
+    FP::Env e = Env(it);
+    const FP::Rounding fr = FpcrRounding(it);
+    const bool sz = Bit(instr, 22);
+
+    // Conversiones entre formatos: FCVTN, FCVTXN (estrechas) y FCVTL (larga)
+    if ((key & 0x3F) == 0b0010110 || key == 0b0010111) {   // a = 0; U solo distingue FCVTXN
+        const bool to_narrow = key != 0b0010111;
+        const bool xn = key == 0b1010110;                     // FCVTXN: redondeo "a impar"
+        if (xn && !sz) return false;
+        if (to_narrow) {
+            const unsigned from = sz ? 64 : 32, to = from / 2;
+            if (scalar && !xn) return false;
+            const unsigned count = scalar ? 1 : 128 / from;   // 2 (64->32) o 4 (32->16)
+            const bool upper = q && !scalar;
+            V r = upper ? d : V{};
+            for (unsigned i = 0; i < count; ++i) {
+                const u64 v = FP::Convert(a.Get(i, from / 8), from, to, xn ? FP::RO : fr, e);
+                r.Set(upper ? i + count : i, to / 8, v);
+            }
+            if (scalar) WriteScalar(it, rd, r.lo, to / 8);
+            else { R(it, rd) = r; if (!upper) R(it, rd).hi = 0; }
+            return true;
+        }
+        if (scalar) return false;
+        const unsigned from = sz ? 32 : 16, to = from * 2, count = 64 / from;
+        V r{};
+        for (unsigned i = 0; i < count; ++i) {
+            const u64 v = q ? a.Get(i + count, from / 8) : a.Get(i, from / 8);
+            r.Set(i, to / 8, FP::Convert(v, from, to, fr, e));
+        }
+        R(it, rd) = r;
+        return true;
+    }
+
+    // URECPE / URSQRTE: enteros de 32 bits
+    if (key == 0b0111100 || key == 0b1111100) {
+        if (scalar || sz) return false;
+        V r{};
+        const unsigned lanes = q ? 4 : 2;
+        for (unsigned i = 0; i < lanes; ++i) {
+            const u32 x = u32(a.Get(i, 4));
+            r.Set(i, 4, key == 0b0111100 ? FP::URecipEstimate(x) : FP::URSqrtEstimate(x));
+        }
+        Write(it, rd, r, q);
+        return true;
+    }
+
+    if (!scalar && w == 64 && !q) return false;
+    if (scalar) {
+        // En escalar no hay FRINT*, FABS, FNEG ni FSQRT
+        switch (key & 0x1F) {
+            case 0b11000: case 0b11001: case 0b01111: return false;
+            default: break;
+        }
+        if (key == 0b1111111) return false;    // FSQRT
+    }
+    const unsigned eb = w / 8;
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+    const u64 ones = LaneMask(eb);
+    V r{};
+    for (unsigned i = 0; i < lanes; ++i) {
+        const u64 x = a.Get(i, eb);
+        u64 z;
+        switch (key) {
+            case 0b0011000: if (scalar) return false; z = FP::RoundInt(x, w, FP::RN, false, e); break;    // FRINTN
+            case 0b0011001: if (scalar) return false; z = FP::RoundInt(x, w, FP::RM, false, e); break;    // FRINTM
+            case 0b0111000: if (scalar) return false; z = FP::RoundInt(x, w, FP::RP, false, e); break;    // FRINTP
+            case 0b0111001: if (scalar) return false; z = FP::RoundInt(x, w, FP::RZ, false, e); break;    // FRINTZ
+            case 0b1011000: if (scalar) return false; z = FP::RoundInt(x, w, FP::RA, false, e); break;    // FRINTA
+            case 0b1011001: if (scalar) return false; z = FP::RoundInt(x, w, fr, true, e); break;         // FRINTX
+            case 0b1111001: if (scalar) return false; z = FP::RoundInt(x, w, fr, false, e); break;        // FRINTI
+            case 0b0011010: z = FP::ToFixed(x, w, 0, false, FP::RN, w, e); break;   // FCVTNS
+            case 0b0011011: z = FP::ToFixed(x, w, 0, false, FP::RM, w, e); break;   // FCVTMS
+            case 0b0011100: z = FP::ToFixed(x, w, 0, false, FP::RA, w, e); break;   // FCVTAS
+            case 0b0111010: z = FP::ToFixed(x, w, 0, false, FP::RP, w, e); break;   // FCVTPS
+            case 0b0111011: z = FP::ToFixed(x, w, 0, false, FP::RZ, w, e); break;   // FCVTZS
+            case 0b1011010: z = FP::ToFixed(x, w, 0, true, FP::RN, w, e); break;    // FCVTNU
+            case 0b1011011: z = FP::ToFixed(x, w, 0, true, FP::RM, w, e); break;    // FCVTMU
+            case 0b1011100: z = FP::ToFixed(x, w, 0, true, FP::RA, w, e); break;    // FCVTAU
+            case 0b1111010: z = FP::ToFixed(x, w, 0, true, FP::RP, w, e); break;    // FCVTPU
+            case 0b1111011: z = FP::ToFixed(x, w, 0, true, FP::RZ, w, e); break;    // FCVTZU
+            case 0b0011101: z = FP::FixedToFP(x, w, 0, false, w, fr, e); break;     // SCVTF
+            case 0b1011101: z = FP::FixedToFP(x, w, 0, true, w, fr, e); break;      // UCVTF
+            case 0b0101100: z = FP::CompareGT(x, 0, w, e) ? ones : 0; break;        // FCMGT #0
+            case 0b0101101: z = FP::CompareEQ(x, 0, w, e) ? ones : 0; break;        // FCMEQ #0
+            case 0b0101110: z = FP::CompareGT(0, x, w, e) ? ones : 0; break;        // FCMLT #0
+            case 0b1101100: z = FP::CompareGE(x, 0, w, e) ? ones : 0; break;        // FCMGE #0
+            case 0b1101101: z = FP::CompareGE(0, x, w, e) ? ones : 0; break;        // FCMLE #0
+            case 0b0101111: if (scalar) return false; z = FP::Abs(x, w); break;     // FABS
+            case 0b1101111: if (scalar) return false; z = FP::Neg(x, w); break;     // FNEG
+            case 0b0111101: z = FP::RecipEstimate(x, w, e); break;                  // FRECPE
+            case 0b1111101: z = FP::RSqrtEstimate(x, w, e); break;                  // FRSQRTE
+            case 0b0111111: if (!scalar) return false; z = FP::RecpX(x, w, e); break;   // FRECPX
+            case 0b1111111: if (scalar) return false; z = FP::Sqrt(x, w, e); break;     // FSQRT
+            default: return false;
+        }
+        r.Set(i, eb, z);
+    }
+    if (scalar) WriteScalar(it, rd, r.lo, eb);
+    else Write(it, rd, r, q);
+    return true;
+}
+
+bool SimdOps::TwoRegMiscFP16(Interpreter& it, u32 instr, bool scalar) {
+    const u32 key = (u32(Bit(instr, 29)) << 6) | (u32(Bit(instr, 23)) << 5) | Bits(instr, 12, 5);
+    // En FP16 no existen las conversiones de formato ni URECPE/URSQRTE
+    switch (key & 0x1F) {
+        case 0b10110: case 0b10111: return false;
         default: break;
     }
-    if ((cmode & 1) == 0) {
-        if (op == 0) return Replicate(imm8, 8, 64);                // MOVI 8 bits
-        u64 r = 0;                                                  // MOVI 64 bits: cada bit -> 1 byte
-        for (int i = 0; i < 8; ++i) if ((imm8 >> i) & 1) r |= 0xFFULL << (i * 8);
-        return r;
-    }
-    // FMOV (vector, inmediato)
-    const u64 a = (imm8 >> 7) & 1, b = (imm8 >> 6) & 1, cdefgh = imm8 & 0x3F;
-    if (op == 0) {
-        const u64 f32 = (a << 31) | ((b ^ 1) << 30) | ((b ? 0x1FULL : 0) << 25) | (cdefgh << 19);
-        return Replicate(f32, 32, 64);
-    }
-    return (a << 63) | ((b ^ 1) << 62) | ((b ? 0xFFULL : 0) << 54) | (cdefgh << 48);
+    if (key == 0b0111100 || key == 0b1111100) return false;
+    return TwoRegMiscFP(it, instr, 16, scalar, key);
 }
 
+// ============================================================================
+//  Entre carriles (ADDV, SMAXV, FMAXV...) y pares escalares (ADDP, FADDP...)
+// ============================================================================
+
+namespace {
+// Reduce de ARM: mitad baja y mitad alta por separado, y luego juntas (recursivo)
+template <typename F>
+u64 Reduce(const V128& v, unsigned first, unsigned count, unsigned eb, F op) {
+    if (count == 1) return v.Get(first, eb);
+    const unsigned half = count / 2;
+    return op(Reduce(v, first, half, eb, op), Reduce(v, first + half, half, eb, op));
+}
 } // namespace
 
-bool Interpreter::ExecSimdVector(u32 instr) {
-    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
-    const bool q = Bit(instr, 30);
+bool SimdOps::AcrossLanes(Interpreter& it, u32 instr) {
+    const bool q = Bit(instr, 30), u = Bit(instr, 29);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 12, 5);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+    const V a = R(it, rn);
+
+    if (opcode == 0b01100 || opcode == 0b01111) {               // FMAXNMV FMINNMV FMAXV FMINV
+        unsigned w;
+        if (u) { if ((size & 1) || !q) return false; w = 32; }
+        else   { if (size & 1) return false; w = 16; }
+        FP::Env e = Env(it);
+        const bool is_min = size >> 1;
+        const unsigned eb = w / 8, lanes = (q ? 16 : 8) / eb;
+        const u64 r = Reduce(a, 0, lanes, eb, [&](u64 x, u64 y) {
+            if (opcode == 0b01100) return is_min ? FP::MinNum(x, y, w, e) : FP::MaxNum(x, y, w, e);
+            return is_min ? FP::Min(x, y, w, e) : FP::Max(x, y, w, e);
+        });
+        WriteScalar(it, rd, r, eb);
+        return true;
+    }
+    if (size == 3 || (size == 2 && !q)) return false;
+    const unsigned eb = 1u << size, lanes = (q ? 16 : 8) / eb;
+    switch (opcode) {
+        case 0b00011: {                                           // SADDLV / UADDLV
+            u64 sum = 0;
+            for (unsigned i = 0; i < lanes; ++i) sum += u ? a.Get(i, eb) : u64(Sx(a.Get(i, eb), eb));
+            WriteScalar(it, rd, sum, eb * 2);
+            return true;
+        }
+        case 0b01010: case 0b11010: {                             // MAXV / MINV
+            const bool is_min = opcode == 0b11010;
+            u64 best = a.Get(0, eb);
+            for (unsigned i = 1; i < lanes; ++i) {
+                const u64 x = a.Get(i, eb);
+                const bool better = u ? (is_min ? x < best : x > best)
+                                      : (is_min ? Sx(x, eb) < Sx(best, eb) : Sx(x, eb) > Sx(best, eb));
+                if (better) best = x;
+            }
+            WriteScalar(it, rd, best, eb);
+            return true;
+        }
+        case 0b11011: {                                           // ADDV
+            if (u) return false;
+            u64 sum = 0;
+            for (unsigned i = 0; i < lanes; ++i) sum += a.Get(i, eb);
+            WriteScalar(it, rd, sum, eb);
+            return true;
+        }
+        default: return false;
+    }
+}
+
+bool SimdOps::ScalarPairwise(Interpreter& it, u32 instr) {
     const bool u = Bit(instr, 29);
-    const u32 size = Bits(instr, 22, 2);
-    const unsigned total = q ? 16 : 8;            // bytes usados del registro
-
-    // Escribe el resultado respetando Q (con Q = 0 los 64 bits altos van a cero)
-    auto write = [&](const V128& r) {
-        V128 out = r;
-        if (!q) out.hi = 0;
-        Vreg(rd) = out;
-    };
-
-    // ====================================================================
-    //  SIMD escalar (bits 31..30 = 01, 28..24 = 11110): opera con d0, s0...
-    // ====================================================================
-    if (Bits(instr, 30, 2) == 0b01 && Bits(instr, 24, 5) == 0b11110) {
-        const unsigned bytes = 1u << size;
-        const u64 a = Vreg(rn).Get(0, 8), b = Vreg(rm).Get(0, 8);
-
-        // DUP (elemento) escalar: "mov d0, v1.d[1]"
-        if (!u && Bits(instr, 21, 3) == 0b000 && Bits(instr, 10, 6) == 0b000001) {
-            const u32 imm5 = Bits(instr, 16, 5);
-            unsigned sz = 0;
-            while (sz < 4 && !((imm5 >> sz) & 1)) ++sz;
-            if (sz > 3) return false;
-            const unsigned eb = 1u << sz;
-            SetVScalar(rd, Vreg(rn).Get(imm5 >> (sz + 1), eb), eb);
-            return true;
-        }
-        // Dos registros (misc): CMxx #0, ABS, NEG, SCVTF/UCVTF, FCVTZS/FCVTZU...
-        if (Bits(instr, 17, 5) == 0b10000 && Bits(instr, 10, 2) == 0b10) {
-            const u32 opcode = Bits(instr, 12, 5);
-            if (opcode >= 0b01000 && opcode <= 0b01011 && size == 3) {
-                const s64 v = static_cast<s64>(a);
-                u64 r;
-                if (opcode == 0b01000)      r = (u ? v >= 0 : v > 0) ? ~0ULL : 0;  // CMGE / CMGT #0
-                else if (opcode == 0b01001) r = (u ? v <= 0 : v == 0) ? ~0ULL : 0; // CMLE / CMEQ #0
-                else if (opcode == 0b01010) { if (u) return false; r = v < 0 ? ~0ULL : 0; } // CMLT #0
-                else                        r = u ? 0 - a : static_cast<u64>(v < 0 ? -v : v); // NEG / ABS
-                SetVScalar(rd, r, 8);
-                return true;
-            }
-            const bool fp_double = size & 1;
-            const unsigned fb = fp_double ? 8 : 4;
-            if (opcode == 0b11101 && (size >> 1) == 0) {                        // SCVTF / UCVTF
-                const u64 raw = Vreg(rn).Get(0, fb);
-                if (fp_double) SetVScalar(rd, B64(u ? double(raw) : double(Sx(raw, 8))), 8);
-                else           SetVScalar(rd, B32(u ? float(u32(raw)) : float(s32(raw))), 4);
-                return true;
-            }
-            if (opcode == 0b11011 && (size >> 1) == 1) {                        // FCVTZS / FCVTZU
-                const double v = fp_double ? F64(a) : double(F32(a));
-                const unsigned ib = fb * 8;
-                u64 r = 0;
-                if (!std::isnan(v)) {
-                    const double t = std::trunc(v);
-                    if (!u) {
-                        const double max = std::ldexp(1.0, int(ib) - 1);
-                        r = t >= max ? Ones(ib - 1) : t < -max ? (1ULL << (ib - 1)) : u64(s64(t)) & Ones(ib);
-                    } else {
-                        r = t <= 0 ? 0 : t >= std::ldexp(1.0, int(ib)) ? Ones(ib) : u64(t);
-                    }
-                }
-                SetVScalar(rd, r, fb);
-                return true;
-            }
-            return false;
-        }
-        // Tres iguales escalar (solo 64 bits): ADD, SUB, CMEQ, CMGT, CMGE, CMHI, CMHS, CMTST
-        if (Bit(instr, 21) && Bit(instr, 10) && size == 3) {
-            const u32 opcode = Bits(instr, 11, 5);
-            const s64 sa = static_cast<s64>(a), sb = static_cast<s64>(b);
-            u64 r;
-            switch (opcode) {
-                case 0b10000: r = u ? a - b : a + b; break;
-                case 0b10001: r = (u ? a == b : (a & b) != 0) ? ~0ULL : 0; break;
-                case 0b00110: r = (u ? a > b : sa > sb) ? ~0ULL : 0; break;
-                case 0b00111: r = (u ? a >= b : sa >= sb) ? ~0ULL : 0; break;
-                default: return false;
-            }
-            SetVScalar(rd, r, 8);
-            return true;
-        }
-        // ADDP escalar: "addp d0, v1.2d"
-        if (!u && Bits(instr, 17, 5) == 0b11000 && Bits(instr, 12, 5) == 0b11011 &&
-            Bits(instr, 10, 2) == 0b10 && size == 3) {
-            SetVScalar(rd, Vreg(rn).lo + Vreg(rn).hi, 8);
-            return true;
-        }
-        (void)bytes;
-        return false;
-    }
-    // Desplazamiento por inmediato escalar (01 U 111110 immh immb opcode 1): SHL/USHR/SSHR d
-    if (Bits(instr, 30, 2) == 0b01 && Bits(instr, 23, 6) == 0b111110 && Bit(instr, 10)) {
-        const u32 immh = Bits(instr, 19, 4), immhb = Bits(instr, 16, 7);
-        if (!(immh & 0b1000)) return false;      // solo 64 bits
-        const u32 opcode = Bits(instr, 11, 5);
-        const u64 a = Vreg(rn).lo;
-        if (opcode == 0b01010 && !u) { SetVScalar(rd, a << (immhb - 64), 8); return true; } // SHL
-        if (opcode == 0b00000) {                                                              // USHR / SSHR
-            const unsigned sh = 128 - immhb;
-            const u64 r = u ? (sh >= 64 ? 0 : a >> sh) : u64(static_cast<s64>(a) >> (sh >= 64 ? 63 : sh));
-            SetVScalar(rd, r, 8);
-            return true;
-        }
-        return false;
-    }
-
-    if (Bit(instr, 31) != 0) return false;
-
-    // ====================================================================
-    //  Inmediato modificado: MOVI, MVNI, ORR, BIC, FMOV (vector)
-    //  0 Q op 0111100000 abc cmode o2 1 defgh Rd
-    // ====================================================================
-    if (Bits(instr, 19, 10) == 0b0111100000 && Bit(instr, 10)) {
-        const u32 cmode = Bits(instr, 12, 4);
-        const u64 imm8 = (u64(Bits(instr, 16, 3)) << 5) | Bits(instr, 5, 5);
-        const bool op = u;
-        if (op && cmode == 0b1111 && !q) return false;
-        const u64 imm = ExpandSimdImm(op, cmode, imm8);
-        V128 r{imm, imm};
-        const bool is_orr_bic = (cmode & 1) && (cmode >> 2) != 0b11 && (cmode >> 1) != 0b110;
-        if (is_orr_bic) {                        // ORR / BIC (inmediato) modifican Vd
-            V128 cur = Vreg(rd);
-            if (op) { cur.lo &= ~imm; cur.hi &= ~imm; }   // BIC
-            else    { cur.lo |= imm;  cur.hi |= imm;  }   // ORR
-            write(cur);
-            return true;
-        }
-        const bool is_mvni = op && cmode != 0b1110 && cmode != 0b1111;
-        if (is_mvni) { r.lo = ~imm; r.hi = ~imm; }
-        write(r);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 12, 5);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+    const V a = R(it, rn);
+    if (opcode == 0b11011) {                                      // ADDP (64 bits)
+        if (u || size != 3) return false;
+        WriteScalar(it, rd, a.lo + a.hi, 8);
         return true;
     }
-
-    // ====================================================================
-    //  Desplazamiento por inmediato (vector): 0 Q U 011110 immh immb opcode 1
-    // ====================================================================
-    if (Bits(instr, 23, 6) == 0b011110 && Bit(instr, 10) && Bits(instr, 19, 4) != 0) {
-        const u32 immh = Bits(instr, 19, 4), immhb = Bits(instr, 16, 7), opcode = Bits(instr, 11, 5);
-        // Tamano del carril segun el bit mas alto de immh: 0001 -> 8, 001x -> 16, 01xx -> 32, 1xxx -> 64
-        unsigned esize;
-        if (immh & 0b1000) esize = 64; else if (immh & 0b0100) esize = 32; else if (immh & 0b0010) esize = 16; else esize = 8;
-        const unsigned eb = esize / 8;
-        const V128 a = Vreg(rn);
-
-        switch (opcode) {
-            case 0b00000: case 0b00010: {                       // USHR/SSHR (+ USRA/SSRA)
-                if (esize == 64 && !q) return false;
-                const unsigned sh = 2 * esize - immhb;
-                const bool acc = (opcode == 0b00010);
-                V128 r = acc ? Vreg(rd) : V128{};
-                for (unsigned i = 0; i < total / eb; ++i) {
-                    const u64 v = a.Get(i, eb);
-                    const u64 s = u ? (sh >= esize ? 0 : v >> sh)
-                                    : u64(Sx(v, eb) >> (sh >= esize ? esize - 1 : sh));
-                    r.Set(i, eb, ((acc ? r.Get(i, eb) : 0) + s) & Mask(eb));
-                }
-                write(r);
-                return true;
-            }
-            case 0b01010: {                                     // SHL
-                if (u) return false;                            // SLI: pendiente
-                const unsigned sh = immhb - esize;
-                write(Map2(a, a, eb, total / eb, [&](u64 v, u64) { return v << sh; }));
-                return true;
-            }
-            case 0b10000: {                                     // SHRN / SHRN2 (estrecha a la mitad)
-                if (u || esize == 64) return false;
-                const unsigned db = eb, sb = eb * 2;            // destino / origen
-                const unsigned sh = 2 * esize - immhb;
-                V128 r = q ? Vreg(rd) : V128{};
-                const unsigned base = q ? 8 / db : 0;
-                for (unsigned i = 0; i < 8 / db; ++i) r.Set(base + i, db, (a.Get(i, sb) >> sh) & Mask(db));
-                Vreg(rd) = r;                                   // aqui Q elige mitad, no borra
-                if (!q) Vreg(rd).hi = 0;
-                return true;
-            }
-            case 0b10100: {                                     // USHLL/SSHLL (UXTL/SXTL)
-                if (esize == 64) return false;
-                const unsigned sb = eb, db = eb * 2;
-                const unsigned sh = immhb - esize;
-                const unsigned base = q ? 8 / sb : 0;           // USHLL2 usa la mitad alta
-                V128 r{};
-                for (unsigned i = 0; i < 8 / sb; ++i) {
-                    const u64 v = a.Get(base + i, sb);
-                    r.Set(i, db, ((u ? v : u64(Sx(v, sb))) << sh) & Mask(db));
-                }
-                Vreg(rd) = r;
-                return true;
-            }
-            default: return false;
-        }
+    unsigned w;
+    if (u) w = (size & 1) ? 64 : 32;
+    else { if (size & 1) return false; w = 16; }
+    const unsigned eb = w / 8;
+    const bool is_min = size >> 1;
+    const u64 x = a.Get(0, eb), y = a.Get(1, eb);
+    FP::Env e = Env(it);
+    u64 z;
+    switch (opcode) {
+        case 0b01100: z = is_min ? FP::MinNum(x, y, w, e) : FP::MaxNum(x, y, w, e); break;   // FMAXNMP / FMINNMP
+        case 0b01101: if (is_min) return false; z = FP::Add(x, y, w, e); break;              // FADDP
+        case 0b01111: z = is_min ? FP::Min(x, y, w, e) : FP::Max(x, y, w, e); break;         // FMAXP / FMINP
+        default: return false;
     }
+    WriteScalar(it, rd, z, eb);
+    return true;
+}
 
-    // ====================================================================
-    //  EXT: concatena Vm:Vn y extrae desde el byte imm4
-    // ====================================================================
-    if (u && Bits(instr, 24, 5) == 0b01110 && Bits(instr, 21, 3) == 0 && !Bit(instr, 15) && !Bit(instr, 10)) {
-        const u32 imm4 = Bits(instr, 11, 4);
-        if (!q && imm4 >= 8) return false;
-        u8 buf[32];
-        std::memcpy(buf, &Vreg(rn), total);
-        std::memcpy(buf + total, &Vreg(rm), total);
-        V128 r{};
-        std::memcpy(&r, buf + imm4, total);
-        write(r);
+// ============================================================================
+//  Copia, permutar, EXT, TBL/TBX, inmediatos
+// ============================================================================
+
+bool SimdOps::Copy(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30), op = Bit(instr, 29);
+    const u32 imm5 = Bits(instr, 16, 5), imm4 = Bits(instr, 11, 4);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+    if ((imm5 & 0xF) == 0) return false;
+    unsigned size = 0;
+    while (!((imm5 >> size) & 1)) ++size;
+    const unsigned eb = 1u << size;
+    const unsigned index = imm5 >> (size + 1);
+
+    if (scalar) {                                                  // DUP (escalar) = MOV Bd, Vn.B[i]
+        if (op || imm4 != 0) return false;
+        WriteScalar(it, rd, R(it, rn).Get(index, eb), eb);
         return true;
     }
-
-    // ====================================================================
-    //  TBL / TBX: busqueda de bytes en una tabla de 1 a 4 registros
-    // ====================================================================
-    if (!u && Bits(instr, 24, 5) == 0b01110 && Bits(instr, 21, 3) == 0 && Bits(instr, 10, 2) == 0 && !Bit(instr, 15)) {
-        const unsigned len = Bits(instr, 13, 2) + 1;
-        const bool tbx = Bit(instr, 12);
-        u8 table[64];
-        for (unsigned i = 0; i < len; ++i) std::memcpy(table + 16 * i, &Vreg((rn + i) % 32), 16);
-        const V128 idx = Vreg(rm);
-        V128 r = tbx ? Vreg(rd) : V128{};
-        for (unsigned i = 0; i < total; ++i) {
-            const u64 k = idx.Get(i, 1);
-            if (k < 16 * len) r.Set(i, 1, table[k]);
-        }
-        write(r);
+    if (op) {                                                      // INS (elemento): MOV Vd.T[i], Vn.T[j]
+        if (!q) return false;
+        const unsigned index2 = imm4 >> size;
+        V r = R(it, rd);
+        r.Set(index, eb, R(it, rn).Get(index2, eb));
+        R(it, rd) = r;
         return true;
     }
-
-    if (Bits(instr, 24, 5) != 0b01110) return false; // por elemento (FMUL v.s[i]...): pendiente
-
-    // ====================================================================
-    //  Copia: DUP, INS (MOV v.s[1], w0), UMOV/SMOV (MOV x0, v.d[0])
-    //  0 Q op 01110000 imm5 0 imm4 1 Rn Rd
-    // ====================================================================
-    if (Bits(instr, 21, 3) == 0 && !Bit(instr, 15) && Bit(instr, 10)) {
-        const u32 imm5 = Bits(instr, 16, 5), imm4 = Bits(instr, 11, 4);
-        unsigned sz = 0;
-        while (sz < 4 && !((imm5 >> sz) & 1)) ++sz;
-        if (sz > 3) return false;
-        const unsigned eb = 1u << sz;
-        const unsigned index = imm5 >> (sz + 1);
-
-        if (u) {                                         // INS (elemento): mov v0.b[1], v1.b[0]
-            Vreg(rd).Set(index, eb, Vreg(rn).Get(imm4 >> sz, eb));
+    switch (imm4) {
+        case 0b0000: case 0b0001: {                                // DUP (elemento / registro general)
+            if (size == 3 && !q) return false;
+            const u64 v = imm4 == 0 ? R(it, rn).Get(index, eb) : (it.X(rn) & LaneMask(eb));
+            V r{};
+            for (unsigned i = 0; i < (q ? 16u : 8u) / eb; ++i) r.Set(i, eb, v);
+            Write(it, rd, r, q);
             return true;
         }
-        switch (imm4) {
-            case 0b0000: {                               // DUP (elemento)
-                const u64 v = Vreg(rn).Get(index, eb);
-                V128 r{};
-                for (unsigned i = 0; i < total / eb; ++i) r.Set(i, eb, v);
-                write(r);
-                return true;
-            }
-            case 0b0001: {                               // DUP (general): dup v0.16b, w1
-                const u64 v = X(rn) & Mask(eb);
-                V128 r{};
-                for (unsigned i = 0; i < total / eb; ++i) r.Set(i, eb, v);
-                write(r);
-                return true;
-            }
-            case 0b0011:                                 // INS (general): mov v0.s[1], w1
-                Vreg(rd).Set(index, eb, X(rn) & Mask(eb));
-                return true;
-            case 0b0101:                                 // SMOV
-                SetX(rd, u64(Sx(Vreg(rn).Get(index, eb), eb)), q);
-                return true;
-            case 0b0111:                                 // UMOV: mov x0, v1.d[0]
-                SetX(rd, Vreg(rn).Get(index, eb), q);
-                return true;
-            default: return false;
+        case 0b0011: {                                             // INS (registro general)
+            if (!q) return false;
+            V r = R(it, rd);
+            r.Set(index, eb, it.X(rn) & LaneMask(eb));
+            R(it, rd) = r;
+            return true;
         }
+        case 0b0101: {                                             // SMOV
+            if (q ? size > 2 : size > 1) return false;
+            it.SetX(rd, u64(Sx(R(it, rn).Get(index, eb), eb)), q);
+            return true;
+        }
+        case 0b0111: {                                             // UMOV
+            if (q ? size != 3 : size > 2) return false;
+            it.SetX(rd, R(it, rn).Get(index, eb), q);
+            return true;
+        }
+        default: return false;
     }
+}
 
-    // ====================================================================
-    //  Permutaciones: UZP1/2, TRN1/2, ZIP1/2
-    // ====================================================================
-    if (!u && !Bit(instr, 21) && !Bit(instr, 15) && Bits(instr, 10, 2) == 0b10) {
-        const unsigned eb = 1u << size, lanes = total / eb, half = lanes / 2;
-        const V128 n = Vreg(rn), m = Vreg(rm);
-        auto cat = [&](unsigned k) { return k < lanes ? n.Get(k, eb) : m.Get(k - lanes, eb); };
-        const u32 opcode = Bits(instr, 12, 3);
-        V128 r{};
+bool SimdOps::Permute(Interpreter& it, u32 instr) {
+    const bool q = Bit(instr, 30);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 12, 3);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+    if (size == 3 && !q) return false;
+    if ((opcode & 3) == 0) return false;
+    const unsigned eb = 1u << size, lanes = (q ? 16 : 8) / eb, part = opcode >> 2, half = lanes / 2;
+    const V a = R(it, rn), b = R(it, rm);
+    V r{};
+    for (unsigned i = 0; i < lanes; ++i) {
+        u64 v;
+        switch (opcode & 3) {
+            case 1: {                                               // UZP1 / UZP2
+                const unsigned k = 2 * i + part;
+                v = k < lanes ? a.Get(k, eb) : b.Get(k - lanes, eb);
+                break;
+            }
+            case 2: {                                               // TRN1 / TRN2
+                const unsigned p = i / 2;
+                v = (i & 1) ? b.Get(2 * p + part, eb) : a.Get(2 * p + part, eb);
+                break;
+            }
+            default: {                                              // ZIP1 / ZIP2
+                const unsigned p = i / 2 + part * half;
+                v = (i & 1) ? b.Get(p, eb) : a.Get(p, eb);
+                break;
+            }
+        }
+        r.Set(i, eb, v);
+    }
+    Write(it, rd, r, q);
+    return true;
+}
+
+bool SimdOps::Ext(Interpreter& it, u32 instr) {
+    const bool q = Bit(instr, 30);
+    const u32 imm4 = Bits(instr, 11, 4);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+    if (!q && (imm4 & 8)) return false;
+    const unsigned n = q ? 16 : 8;
+    u8 buf[32];
+    const V a = R(it, rn), b = R(it, rm);
+    std::memcpy(buf, &a, 16);
+    std::memcpy(buf + n, &b, 16);
+    V r{};
+    std::memcpy(&r, buf + imm4, n);
+    Write(it, rd, r, q);
+    return true;
+}
+
+bool SimdOps::Table(Interpreter& it, u32 instr) {
+    const bool q = Bit(instr, 30), tbx = Bit(instr, 12);
+    const u32 len = Bits(instr, 13, 2) + 1;
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5), rm = Bits(instr, 16, 5);
+    u8 table[64];
+    for (u32 i = 0; i < len; ++i) std::memcpy(table + i * 16, &R(it, (rn + i) % 32), 16);
+    const V idx = R(it, rm), d = R(it, rd);
+    V r{};
+    for (unsigned i = 0; i < (q ? 16u : 8u); ++i) {
+        const u64 k = idx.Get(i, 1);
+        r.Set(i, 1, k < len * 16 ? table[k] : (tbx ? d.Get(i, 1) : 0));
+    }
+    Write(it, rd, r, q);
+    return true;
+}
+
+bool SimdOps::ModifiedImm(Interpreter& it, u32 instr) {
+    const bool q = Bit(instr, 30), op = Bit(instr, 29), o2 = Bit(instr, 11);
+    const u32 cmode = Bits(instr, 12, 4);
+    const u32 imm8 = (Bits(instr, 16, 3) << 5) | Bits(instr, 5, 5);
+    const u32 rd = Bits(instr, 0, 5);
+
+    u64 imm;
+    if (o2) {                                                      // FMOV (vector, half)
+        if (cmode != 0b1111 || op) return false;
+        const u64 s = (imm8 >> 7) & 1, b = (imm8 >> 6) & 1;
+        const u64 h = (s << 15) | ((b ^ 1) << 14) | ((b ? 3ull : 0) << 12) | (u64(imm8 & 0x3F) << 6);
+        imm = h * 0x0001000100010001ull;
+    } else {
+        if (cmode == 0b1111 && op && !q) return false;           // FMOV .1d no existe
+        imm = ExpandImm(op, cmode, imm8);
+    }
+    V d = R(it, rd), r{};
+    const bool is_orr_bic = !o2 && ((cmode < 8 && (cmode & 1)) || (cmode >= 8 && cmode < 12 && (cmode & 1)));
+    const bool is_mvni = !o2 && op && cmode < 14 && !is_orr_bic;
+    if (is_orr_bic) {
+        r.lo = op ? d.lo & ~imm : d.lo | imm;
+        r.hi = op ? d.hi & ~imm : d.hi | imm;
+    } else {
+        const u64 v = is_mvni ? ~imm : imm;
+        r.lo = v;
+        r.hi = v;
+    }
+    Write(it, rd, r, q);
+    return true;
+}
+
+// ============================================================================
+//  Desplazamiento por inmediato (vectorial y escalar)
+// ============================================================================
+
+bool SimdOps::ShiftImm(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30), u = Bit(instr, 29);
+    const u32 immh = Bits(instr, 19, 4), immhb = Bits(instr, 16, 7), opcode = Bits(instr, 11, 5);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+    unsigned hs = 3;
+    while (!((immh >> hs) & 1)) --hs;
+    const unsigned eb = 1u << hs, bits = eb * 8;
+    const unsigned rshift = 2 * bits - immhb, lshift = immhb - bits;
+    const V a = R(it, rn), d = R(it, rd);
+    bool sat = false;
+
+    const bool narrowing = opcode >= 0b10000 && opcode <= 0b10011;
+    const bool longop = opcode == 0b10100;
+    const bool fixedcvt = opcode == 0b11100 || opcode == 0b11111;
+
+    if (narrowing) {
+        if (hs == 3) return false;
+        if (scalar && !u && (opcode == 0b10000 || opcode == 0b10001)) return false;   // SHRN/RSHRN no son escalares
+        const unsigned wb = eb * 2, n = scalar ? 1 : 8 / eb;
+        const bool upper = q && !scalar;
+        V r = upper ? d : V{};
+        for (unsigned i = 0; i < n; ++i) {
+            const u64 x = a.Get(i, wb);
+            const bool round = opcode & 1;
+            u64 z;
+            if (opcode <= 0b10001 && !u) {                          // SHRN / RSHRN
+                z = ShiftByReg(x, wb, -s64(rshift), true, round, false, sat) & LaneMask(eb);
+            } else if (opcode <= 0b10001) {                         // SQSHRUN / SQRSHRUN
+                const u64 v = ShiftByReg(x, wb, -s64(rshift), false, round, false, sat);
+                z = SatU(I128::From(Sx(v, wb)), eb, sat);
+            } else {                                                // SQSHRN / UQSHRN (+R)
+                const u64 v = ShiftByReg(x, wb, -s64(rshift), u, round, false, sat);
+                z = u ? SatU(I128::FromU(v), eb, sat) : SatS(I128::From(Sx(v, wb)), eb, sat);
+            }
+            r.Set(upper ? i + n : i, eb, z);
+        }
+        if (sat) QC(it);
+        if (scalar) WriteScalar(it, rd, r.lo, eb);
+        else { R(it, rd) = r; if (!upper) R(it, rd).hi = 0; }
+        return true;
+    }
+    if (longop) {                                                   // SSHLL / USHLL (SXTL, UXTL)
+        if (scalar || hs == 3) return false;
+        const unsigned n = 8 / eb, wb = eb * 2;
+        V r{};
+        for (unsigned i = 0; i < n; ++i) {
+            const u64 x = q ? a.Get(i + n, eb) : a.Get(i, eb);
+            const u64 v = u ? x : u64(Sx(x, eb));
+            r.Set(i, wb, (v << lshift) & LaneMask(wb));
+        }
+        R(it, rd) = r;
+        return true;
+    }
+    if (fixedcvt) {                                                 // SCVTF/UCVTF/FCVTZS/FCVTZU con #fbits
+        if (hs == 0) return false;
+        if (!scalar && hs == 3 && !q) return false;
+        const unsigned w = bits;
+        FP::Env e = Env(it);
+        const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+        V r{};
         for (unsigned i = 0; i < lanes; ++i) {
-            u64 v;
-            switch (opcode) {
-                case 0b001: v = cat(2 * i);     break;                                  // UZP1
-                case 0b101: v = cat(2 * i + 1); break;                                  // UZP2
-                case 0b011: v = (i & 1) ? m.Get(i / 2, eb) : n.Get(i / 2, eb); break;   // ZIP1
-                case 0b111: v = (i & 1) ? m.Get(half + i / 2, eb) : n.Get(half + i / 2, eb); break; // ZIP2
-                case 0b010: v = (i & 1) ? m.Get(i - 1, eb) : n.Get(i, eb); break;       // TRN1
-                case 0b110: v = (i & 1) ? m.Get(i, eb) : n.Get(i + 1, eb); break;       // TRN2
-                default: return false;
-            }
-            r.Set(i, eb, v);
+            const u64 x = a.Get(i, eb);
+            r.Set(i, eb, opcode == 0b11100 ? FP::FixedToFP(x, w, rshift, u, w, FpcrRounding(it), e)
+                                           : FP::ToFixed(x, w, rshift, u, FP::RZ, w, e));
         }
-        write(r);
+        if (scalar) WriteScalar(it, rd, r.lo, eb);
+        else Write(it, rd, r, q);
         return true;
     }
 
-    // ====================================================================
-    //  Dos registros (misc): 0 Q U 01110 size 10000 opcode 10 Rn Rd
-    // ====================================================================
-    if (Bits(instr, 17, 5) == 0b10000 && Bits(instr, 10, 2) == 0b10) {
-        const u32 opcode = Bits(instr, 12, 5);
-        const unsigned eb = 1u << size, lanes = total / eb;
-        const V128 a = Vreg(rn);
-        V128 r{};
-        auto each = [&](auto f) { for (unsigned i = 0; i < lanes; ++i) r.Set(i, eb, f(a.Get(i, eb)) & Mask(eb)); };
+    // Resto: mismo ancho
+    const bool sat_left = opcode == 0b01100 || opcode == 0b01110;   // SQSHLU, SQSHL/UQSHL
+    if (scalar ? (!sat_left && hs != 3) : (hs == 3 && !q)) return false;
+    switch (opcode) {
+        case 0b00000: case 0b00010: case 0b00100: case 0b00110: case 0b01010: case 0b01110: break;
+        case 0b01000: case 0b01100: if (!u) return false; break;
+        default: return false;
+    }
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+    V r{};
+    for (unsigned i = 0; i < lanes; ++i) {
+        const u64 x = a.Get(i, eb), dv = d.Get(i, eb);
+        u64 z;
         switch (opcode) {
-            case 0b01000: each([&](u64 v) { return (u ? Sx(v, eb) >= 0 : Sx(v, eb) > 0) ? ~0ULL : 0; }); break;  // CMGE/CMGT #0
-            case 0b01001: each([&](u64 v) { return (u ? Sx(v, eb) <= 0 : v == 0) ? ~0ULL : 0; }); break;        // CMLE/CMEQ #0
-            case 0b01010: if (u) return false; each([&](u64 v) { return Sx(v, eb) < 0 ? ~0ULL : 0; }); break;  // CMLT #0
-            case 0b01011: each([&](u64 v) { const s64 s = Sx(v, eb); return u ? u64(0 - v) : u64(s < 0 ? -s : s); }); break; // NEG/ABS
-            case 0b00101: {   // NOT / CNT / RBIT: siempre por bytes; 'size' elige la operacion
-                for (unsigned i = 0; i < total; ++i) {
-                    const u64 v = a.Get(i, 1);
-                    u64 o = 0;
-                    if (size == 0 && u)       o = ~v & 0xFF;                                               // NOT
-                    else if (size == 0 && !u) { u64 x = v; while (x) { o += x & 1; x >>= 1; } }          // CNT
-                    else if (size == 1 && u)  { for (int k = 0; k < 8; ++k) if ((v >> k) & 1) o |= 1ULL << (7 - k); } // RBIT
-                    else return false;
-                    r.Set(i, 1, o);
-                }
+            case 0b00000: z = ShiftByReg(x, eb, -s64(rshift), u, false, false, sat); break;            // SSHR / USHR
+            case 0b00010: z = dv + ShiftByReg(x, eb, -s64(rshift), u, false, false, sat); break;       // SSRA / USRA
+            case 0b00100: z = ShiftByReg(x, eb, -s64(rshift), u, true, false, sat); break;             // SRSHR / URSHR
+            case 0b00110: z = dv + ShiftByReg(x, eb, -s64(rshift), u, true, false, sat); break;        // SRSRA / URSRA
+            case 0b01000: {                                                                           // SRI
+                const u64 mask = rshift >= bits ? 0 : (LaneMask(eb) >> rshift);
+                const u64 sh = rshift >= bits ? 0 : (x >> rshift);
+                z = (dv & ~mask) | (sh & mask);
                 break;
             }
-            case 0b00000: {                                                     // REV64 / REV32
-                const unsigned container = u ? 4 : 8;
-                if (eb >= container) return false;
-                for (unsigned i = 0; i < lanes; ++i) {
-                    const unsigned per = container / eb, blk = i / per, k = i % per;
-                    r.Set(i, eb, a.Get(blk * per + (per - 1 - k), eb));
-                }
+            case 0b01010:
+                if (!u) { z = x << lshift; break; }                                                    // SHL
+                z = (dv & ~(LaneMask(eb) << lshift)) | (x << lshift);                                 // SLI
                 break;
-            }
-            case 0b00001: {                                                     // REV16
-                if (u || eb != 1) return false;
-                for (unsigned i = 0; i < lanes; ++i) r.Set(i, 1, a.Get(i ^ 1, 1));
+            case 0b01100:                                                                             // SQSHLU
+                z = SatU(Wide(x, eb, false).Shl(lshift), eb, sat);
                 break;
-            }
-            case 0b10010: {                                                     // XTN / XTN2
-                if (u || size == 3) return false;
-                const unsigned db = eb, sb = eb * 2;
-                V128 out = q ? Vreg(rd) : V128{};
-                const unsigned base = q ? 8 / db : 0;
-                for (unsigned i = 0; i < 8 / db; ++i) out.Set(base + i, db, a.Get(i, sb) & Mask(db));
-                Vreg(rd) = out;
-                return true;
-            }
-            default: {
-                // Coma flotante vectorial: size<0> = 0 float, 1 double; size<1> distingue la operacion
-                const bool fd = size & 1;
-                const unsigned fb = fd ? 8 : 4, fl = total / fb;
-                auto fget = [&](u64 v) { return fd ? F64(v) : double(F32(v)); };
-                auto fput = [&](double d) { return fd ? B64(d) : B32(float(d)); };
-                auto fmap = [&](auto f) { for (unsigned i = 0; i < fl; ++i) r.Set(i, fb, f(a.Get(i, fb))); };
-                const u64 sign = fd ? (1ULL << 63) : (1ULL << 31);
-                if (opcode == 0b01111 && (size >> 1)) { fmap([&](u64 v) { return u ? v ^ sign : v & ~sign; }); break; } // FNEG/FABS
-                if (opcode == 0b11111 && (size >> 1) && u) { fmap([&](u64 v) { return fput(std::sqrt(fget(v))); }); break; } // FSQRT
-                if (opcode == 0b11101 && !(size >> 1)) {                                                           // SCVTF/UCVTF
-                    fmap([&](u64 v) { return fd ? B64(u ? double(v) : double(s64(v))) : B32(u ? float(u32(v)) : float(s32(v))); });
-                    break;
-                }
-                if (opcode == 0b11011 && (size >> 1)) {                                                            // FCVTZS/FCVTZU
-                    const unsigned ib = fb * 8;
-                    fmap([&](u64 v) -> u64 {
-                        const double d = std::trunc(fget(v));
-                        if (std::isnan(d)) return 0;
-                        if (!u) { const double mx = std::ldexp(1.0, int(ib) - 1);
-                                  return d >= mx ? Ones(ib - 1) : d < -mx ? (1ULL << (ib - 1)) : u64(s64(d)) & Ones(ib); }
-                        return d <= 0 ? 0 : d >= std::ldexp(1.0, int(ib)) ? Ones(ib) : u64(d);
-                    });
-                    break;
-                }
-                return false;
-            }
+            default:                                                                                  // SQSHL / UQSHL #
+                z = ShiftByReg(x, eb, s64(lshift), u, false, true, sat);
+                break;
         }
-        write(r);
-        return true;
+        r.Set(i, eb, z & LaneMask(eb));
     }
+    if (sat) QC(it);
+    if (scalar) WriteScalar(it, rd, r.lo, eb);
+    else Write(it, rd, r, q);
+    return true;
+}
 
-    // ====================================================================
-    //  Entre carriles: ADDV, UMAXV/SMAXV, UMINV/SMINV, UADDLV/SADDLV
-    // ====================================================================
-    if (Bits(instr, 17, 5) == 0b11000 && Bits(instr, 10, 2) == 0b10) {
-        const u32 opcode = Bits(instr, 12, 5);
-        const unsigned eb = 1u << size, lanes = total / eb;
-        if (size == 3) return false;
-        const V128 a = Vreg(rn);
-        u64 acc = a.Get(0, eb);
-        s64 sacc = Sx(acc, eb);
-        for (unsigned i = 1; i < lanes; ++i) {
-            const u64 v = a.Get(i, eb);
-            const s64 s = Sx(v, eb);
-            switch (opcode) {
-                case 0b11011: acc += v; break;                                        // ADDV
-                case 0b00011: if (u) acc += v; else sacc += s; break;                 // UADDLV/SADDLV
-                case 0b01010: if (u) { if (v > acc) acc = v; } else if (s > sacc) sacc = s; break; // UMAXV/SMAXV
-                case 0b11010: if (u) { if (v < acc) acc = v; } else if (s < sacc) sacc = s; break; // UMINV/SMINV
-                default: return false;
-            }
-        }
-        if (opcode == 0b11011 && u) return false;
-        if (opcode == 0b00011) SetVScalar(rd, (u ? acc : u64(sacc)) & Mask(eb * 2), eb * 2);
-        else if (!u && opcode != 0b11011) SetVScalar(rd, u64(sacc) & Mask(eb), eb);
-        else SetVScalar(rd, acc & Mask(eb), eb);
-        return true;
-    }
+// ============================================================================
+//  Por elemento: la segunda fuente es UN elemento de Vm, igual para todos los carriles
+// ============================================================================
 
-    // ====================================================================
-    //  Tres iguales: 0 Q U 01110 size 1 Rm opcode 1 Rn Rd
-    // ====================================================================
-    if (Bit(instr, 21) && Bit(instr, 10)) {
-        const u32 opcode = Bits(instr, 11, 5);
-        const unsigned eb = 1u << size, lanes = total / eb;
-        const V128 a = Vreg(rn), b = Vreg(rm);
+bool SimdOps::ByElement(Interpreter& it, u32 instr, bool scalar) {
+    const bool q = Bit(instr, 30), u = Bit(instr, 29);
+    const u32 size = Bits(instr, 22, 2), opcode = Bits(instr, 12, 4);
+    const u32 L = Bit(instr, 21), M = Bit(instr, 20), H = Bit(instr, 11);
+    const u32 rd = Bits(instr, 0, 5), rn = Bits(instr, 5, 5);
+    const V a = R(it, rn), d = R(it, rd);
 
-        // --- Logicas (size elige la operacion) ---
-        if (opcode == 0b00011) {
-            V128 r{};
-            const V128 d = Vreg(rd);
-            auto bitwise = [&](auto f) { r.lo = f(a.lo, b.lo, d.lo); r.hi = f(a.hi, b.hi, d.hi); };
-            switch ((u ? 4 : 0) | size) {
-                case 0: bitwise([](u64 x, u64 y, u64) { return x & y; });  break;           // AND
-                case 1: bitwise([](u64 x, u64 y, u64) { return x & ~y; }); break;           // BIC
-                case 2: bitwise([](u64 x, u64 y, u64) { return x | y; });  break;           // ORR (MOV)
-                case 3: bitwise([](u64 x, u64 y, u64) { return x | ~y; }); break;           // ORN
-                case 4: bitwise([](u64 x, u64 y, u64) { return x ^ y; });  break;           // EOR
-                case 5: bitwise([](u64 x, u64 y, u64 z) { return (x & z) | (y & ~z); }); break; // BSL
-                case 6: bitwise([](u64 x, u64 y, u64 z) { return (x & y) | (z & ~y); }); break; // BIT
-                default: bitwise([](u64 x, u64 y, u64 z) { return (z & y) | (x & ~y); }); break; // BIF
-            }
-            write(r);
-            return true;
-        }
-
-        // --- Coma flotante vectorial (opcode 11xxx) ---
-        if (opcode >= 0b11000) {
-            const bool fd = size & 1, hi_bit = size >> 1;
-            if (fd && !q) return false;
-            const unsigned fb = fd ? 8 : 4, fl = total / fb;
-            auto fg = [&](const V128& v, unsigned i) { return fd ? F64(v.Get(i, 8)) : double(F32(v.Get(i, 4))); };
-            auto fp = [&](V128& v, unsigned i, double x) { v.Set(i, fb, fd ? B64(x) : B32(float(x))); };
-            V128 r = Vreg(rd);
-            V128 out{};
-            for (unsigned i = 0; i < fl; ++i) {
-                const double x = fg(a, i), y = fg(b, i);
-                double z = 0;
-                u64 cmp = 0;
-                bool is_cmp = false;
-                if (fd) {
-                    switch ((u ? 0x40 : 0) | (hi_bit ? 0x20 : 0) | opcode) {
-                        case 0x1A: z = x + y; break;                          // FADD
-                        case 0x3A: z = x - y; break;                          // FSUB
-                        case 0x5B: z = x * y; break;                          // FMUL
-                        case 0x5F: z = x / y; break;                          // FDIV
-                        case 0x19: z = std::fma(x, y, fg(r, i)); break;       // FMLA
-                        case 0x39: z = std::fma(-x, y, fg(r, i)); break;      // FMLS
-                        case 0x1E: z = (std::isnan(x) || std::isnan(y)) ? NAN : (x > y ? x : y); break; // FMAX
-                        case 0x3E: z = (std::isnan(x) || std::isnan(y)) ? NAN : (x < y ? x : y); break; // FMIN
-                        case 0x1C: is_cmp = true; cmp = x == y; break;        // FCMEQ
-                        case 0x5C: is_cmp = true; cmp = x >= y; break;        // FCMGE
-                        case 0x7C: is_cmp = true; cmp = x > y; break;         // FCMGT
-                        case 0x5A: {                                          // FADDP
-                            const unsigned half = fl / 2;
-                            const V128& src = i < half ? a : b;
-                            const unsigned k = (i % half) * 2;
-                            z = fg(src, k) + fg(src, k + 1);
-                            break;
-                        }
-                        default: return false;
-                    }
-                } else {
-                    const float xf = float(x), yf = float(y), rf = F32(r.Get(i, 4));
-                    float zf = 0;
-                    switch ((u ? 0x40 : 0) | (hi_bit ? 0x20 : 0) | opcode) {
-                        case 0x1A: zf = xf + yf; break;
-                        case 0x3A: zf = xf - yf; break;
-                        case 0x5B: zf = xf * yf; break;
-                        case 0x5F: zf = xf / yf; break;
-                        case 0x19: zf = std::fma(xf, yf, rf); break;
-                        case 0x39: zf = std::fma(-xf, yf, rf); break;
-                        case 0x1E: zf = (std::isnan(xf) || std::isnan(yf)) ? NAN : (xf > yf ? xf : yf); break;
-                        case 0x3E: zf = (std::isnan(xf) || std::isnan(yf)) ? NAN : (xf < yf ? xf : yf); break;
-                        case 0x1C: is_cmp = true; cmp = xf == yf; break;
-                        case 0x5C: is_cmp = true; cmp = xf >= yf; break;
-                        case 0x7C: is_cmp = true; cmp = xf > yf; break;
-                        case 0x5A: {
-                            const unsigned half = fl / 2;
-                            const V128& src = i < half ? a : b;
-                            const unsigned k = (i % half) * 2;
-                            zf = F32(src.Get(k, 4)) + F32(src.Get(k + 1, 4));
-                            break;
-                        }
-                        default: return false;
-                    }
-                    z = zf;
-                }
-                if (is_cmp) out.Set(i, fb, cmp ? Mask(fb) : 0);
-                else        fp(out, i, z);
-            }
-            write(out);
-            return true;
-        }
-
-        // --- Enteros ---
-        V128 r{};
-        const V128 d = Vreg(rd);
+    // --- Coma flotante: FMLA, FMLS, FMUL, FMULX ---
+    const bool fpop = (opcode == 0b0001 || opcode == 0b0101) ? !u : (opcode == 0b1001);
+    if (fpop) {
+        unsigned w, index;
+        u32 rm;
+        if (size == 0) { w = 16; index = (H << 2) | (L << 1) | M; rm = Bits(instr, 16, 4); }
+        else if (size == 2) { w = 32; index = (H << 1) | L; rm = Bits(instr, 16, 5); }
+        else if (size == 3) { if (L) return false; w = 64; index = H; rm = Bits(instr, 16, 5); if (!scalar && !q) return false; }
+        else return false;
+        const unsigned eb = w / 8, lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+        const u64 y = R(it, rm).Get(index, eb);
+        FP::Env e = Env(it);
+        V r{};
         for (unsigned i = 0; i < lanes; ++i) {
-            const u64 x = a.Get(i, eb), y = b.Get(i, eb);
-            const s64 sx = Sx(x, eb), sy = Sx(y, eb);
+            const u64 x = a.Get(i, eb);
             u64 z;
             switch (opcode) {
-                case 0b10000: z = u ? x - y : x + y; break;                            // SUB / ADD
-                case 0b10001: z = (u ? x == y : (x & y) != 0) ? ~0ULL : 0; break;      // CMEQ / CMTST
-                case 0b00110: z = (u ? x > y : sx > sy) ? ~0ULL : 0; break;            // CMHI / CMGT
-                case 0b00111: z = (u ? x >= y : sx >= sy) ? ~0ULL : 0; break;          // CMHS / CMGE
-                case 0b01100: z = u ? (x > y ? x : y) : u64(sx > sy ? sx : sy); break; // UMAX / SMAX
-                case 0b01101: z = u ? (x < y ? x : y) : u64(sx < sy ? sx : sy); break; // UMIN / SMIN
-                case 0b10011: if (u) return false; z = x * y; break;                   // MUL
-                case 0b10010: z = u ? d.Get(i, eb) - x * y : d.Get(i, eb) + x * y; break; // MLS / MLA
-                case 0b01000: {                                                         // USHL / SSHL
-                    const s8 sh = static_cast<s8>(y & 0xFF);
-                    const unsigned bits = eb * 8;
-                    if (sh >= 0) z = sh >= int(bits) ? 0 : x << sh;
-                    else if (u)  z = -sh >= int(bits) ? 0 : x >> -sh;
-                    else         z = u64(sx >> (-sh >= int(bits) ? bits - 1 : unsigned(-sh)));
-                    break;
-                }
-                case 0b10100: case 0b10101: case 0b10111: {                            // pairwise
-                    const unsigned half = lanes / 2;
-                    const V128& src = i < half ? a : b;
-                    const unsigned k = (i % half) * 2;
-                    const u64 p = src.Get(k, eb), s2 = src.Get(k + 1, eb);
-                    const s64 sp = Sx(p, eb), ss = Sx(s2, eb);
-                    if (opcode == 0b10111) { if (u) return false; z = p + s2; }        // ADDP
-                    else if (opcode == 0b10100) z = u ? (p > s2 ? p : s2) : u64(sp > ss ? sp : ss); // UMAXP/SMAXP
-                    else                        z = u ? (p < s2 ? p : s2) : u64(sp < ss ? sp : ss); // UMINP/SMINP
-                    break;
-                }
-                default: return false;
+                case 0b0001: z = FP::MulAdd(d.Get(i, eb), x, y, w, e); break;                    // FMLA
+                case 0b0101: z = FP::MulAdd(d.Get(i, eb), FP::Neg(x, w), y, w, e); break;        // FMLS
+                default:     z = u ? FP::MulX(x, y, w, e) : FP::Mul(x, y, w, e); break;           // FMULX / FMUL
             }
-            r.Set(i, eb, z & Mask(eb));
+            r.Set(i, eb, z);
         }
-        write(r);
+        if (scalar) WriteScalar(it, rd, r.lo, eb);
+        else Write(it, rd, r, q);
         return true;
     }
 
-    return false;
+    // --- Enteros ---
+    if (size == 0 || size == 3) return false;
+    unsigned index;
+    u32 rm;
+    if (size == 1) { index = (H << 2) | (L << 1) | M; rm = Bits(instr, 16, 4); }
+    else           { index = (H << 1) | L; rm = Bits(instr, 16, 5); }
+    const unsigned eb = 1u << size, wb = eb * 2;
+    const V b = R(it, rm);
+
+    // SDOT / UDOT (por elemento): 4 bytes de cada carril de 32 bits por los 4 bytes del elemento
+    if (opcode == 0b1110) {
+        if (scalar || size != 2) return false;
+        const unsigned idx = (H << 1) | L;
+        const u32 rmd = Bits(instr, 16, 5);
+        const V bb = R(it, rmd);
+        V r = d;
+        for (unsigned i = 0; i < (q ? 4u : 2u); ++i) {
+            u64 acc = d.Get(i, 4);
+            for (unsigned k = 0; k < 4; ++k) {
+                const u64 x = a.Get(i * 4 + k, 1), y = bb.Get(idx * 4 + k, 1);
+                acc += u ? x * y : u64(Sx(x, 1) * Sx(y, 1));
+            }
+            r.Set(i, 4, acc & 0xFFFFFFFFu);
+        }
+        Write(it, rd, r, q);
+        return true;
+    }
+
+    const u64 y = b.Get(index, eb);
+    const s64 sy = Sx(y, eb);
+    bool sat = false;
+
+    const bool longop = opcode == 0b0010 || opcode == 0b0011 || opcode == 0b0110 || opcode == 0b0111 ||
+                        opcode == 0b1010 || opcode == 0b1011;
+    if (longop) {
+        const bool sq = opcode == 0b0011 || opcode == 0b0111 || opcode == 0b1011;
+        if (sq && u) return false;
+        if (scalar && !sq) return false;
+        const unsigned n = scalar ? 1 : 8 / eb;
+        const bool upper = q && !scalar;
+        V r{};
+        for (unsigned i = 0; i < n; ++i) {
+            const u64 xn = upper ? a.Get(i + n, eb) : a.Get(i, eb);
+            const u64 acc = d.Get(i, wb);
+            u64 z;
+            if (sq) {
+                const u64 prod = SatS(MulS(Sx(xn, eb), sy).Shl(1), wb, sat);
+                const I128 p = I128::From(Sx(prod, wb)), ac = I128::From(Sx(acc, wb));
+                if (opcode == 0b1011) z = prod;                                             // SQDMULL
+                else z = SatS(opcode == 0b0011 ? ac + p : ac - p, wb, sat);                 // SQDMLAL / SQDMLSL
+            } else {
+                const u64 prod = u ? xn * y : u64(Sx(xn, eb) * sy);
+                if (opcode == 0b1010) z = prod;                                             // SMULL / UMULL
+                else if (opcode == 0b0010) z = acc + prod;                                  // SMLAL / UMLAL
+                else z = acc - prod;                                                        // SMLSL / UMLSL
+            }
+            r.Set(i, wb, z & LaneMask(wb));
+        }
+        if (sat) QC(it);
+        if (scalar) WriteScalar(it, rd, r.lo, wb);
+        else R(it, rd) = r;
+        return true;
+    }
+
+    const unsigned lanes = scalar ? 1 : (q ? 16 : 8) / eb;
+    switch (opcode) {
+        case 0b1000: if (u || scalar) return false; break;               // MUL
+        case 0b0000: case 0b0100: if (!u || scalar) return false; break; // MLA / MLS
+        case 0b1100: if (u) return false; break;                          // SQDMULH
+        case 0b1101: break;                                               // SQRDMULH / SQRDMLAH
+        case 0b1111: if (!u) return false; break;                         // SQRDMLSH
+        default: return false;
+    }
+    V r{};
+    const unsigned bits = eb * 8;
+    for (unsigned i = 0; i < lanes; ++i) {
+        const u64 x = a.Get(i, eb);
+        const s64 sx = Sx(x, eb);
+        u64 z;
+        switch (opcode) {
+            case 0b1000: z = x * y; break;
+            case 0b0000: z = d.Get(i, eb) + x * y; break;
+            case 0b0100: z = d.Get(i, eb) - x * y; break;
+            case 0b1100: case 0b1101:
+                if (opcode == 0b1101 && u) {                              // SQRDMLAH
+                    const I128 acc = I128::From(Sx(d.Get(i, eb), eb)).Shl(bits);
+                    z = SatS((acc + MulS(sx, sy).Shl(1) + I128::From(s64(1) << (bits - 1))).Sar(bits), eb, sat);
+                } else {                                                  // SQDMULH / SQRDMULH
+                    I128 p = MulS(sx, sy).Shl(1);
+                    if (opcode == 0b1101) p = p + I128::From(s64(1) << (bits - 1));
+                    z = SatS(p.Sar(bits), eb, sat);
+                }
+                break;
+            default: {                                                    // SQRDMLSH
+                const I128 acc = I128::From(Sx(d.Get(i, eb), eb)).Shl(bits);
+                z = SatS((acc - MulS(sx, sy).Shl(1) + I128::From(s64(1) << (bits - 1))).Sar(bits), eb, sat);
+                break;
+            }
+        }
+        r.Set(i, eb, z & LaneMask(eb));
+    }
+    if (sat) QC(it);
+    if (scalar) WriteScalar(it, rd, r.lo, eb);
+    else Write(it, rd, r, q);
+    return true;
 }
 
 } // namespace NeXo2::Core

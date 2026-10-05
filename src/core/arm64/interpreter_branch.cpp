@@ -2,6 +2,7 @@
 // Instrucciones: B, BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET (y RETAA/RETAB),
 // SVC, BRK, NOP y demas HINT (incluidas PACIASP/AUTIASP), barreras, MRS/MSR.
 #include "interpreter.hpp"
+#include "fp_ops.hpp"
 #include "common/bit_utils.hpp"
 #include "common/logger.hpp"
 #include <cstdio>
@@ -161,7 +162,7 @@ bool Interpreter::ExecSystemRegister(u32 instr) {
         switch (reg) {
             case SysReg::NZCV:        value = m_state.GetNZCV();   break;
             case SysReg::FPCR:        value = m_state.fpcr;        break;
-            case SysReg::FPSR:        value = m_state.fpsr;        break;
+            case SysReg::FPSR:        FP::FoldHostFlags(m_state.fpsr); value = m_state.fpsr; break;  // + flags de la FPU del PC
             case SysReg::TPIDR_EL0:   value = m_state.tpidr_el0;   break;
             case SysReg::TPIDRRO_EL0: value = m_state.tpidrro_el0; break;
             case SysReg::CNTFRQ_EL0:  value = TICK_FREQUENCY;      break;
@@ -180,7 +181,7 @@ bool Interpreter::ExecSystemRegister(u32 instr) {
     switch (reg) {
         case SysReg::NZCV:      m_state.SetNZCV(value);    return true;
         case SysReg::FPCR:      m_state.fpcr = value;      return true;
-        case SysReg::FPSR:      m_state.fpsr = value;      return true;
+        case SysReg::FPSR:      FP::ClearHostFlags(); m_state.fpsr = value; return true;
         case SysReg::TPIDR_EL0: m_state.tpidr_el0 = value; return true;
         default: return false; // TPIDRRO_EL0 es solo lectura para el programa
     }

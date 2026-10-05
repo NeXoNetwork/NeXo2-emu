@@ -15,9 +15,12 @@ check that both give the same results.
 | `interpreter_dp_reg.cpp` | Data processing, register |
 | `interpreter_branch.cpp` | Branches, exceptions, system |
 | `interpreter_ldst.cpp` | Loads and stores |
-| `interpreter_simd_ldst.cpp` | SIMD/FP loads and stores (`ldr q0`, `stp q0, q1`, `ld1`/`st1`) |
-| `interpreter_fp.cpp` | Scalar floating point (`fadd d0`, `fcmp`, `scvtf`, `fmov`...) and SIMD/FP routing |
-| `interpreter_simd.cpp` | Vector SIMD / NEON (`dup`, `movi`, `cmeq`, `addp`, `ext`, `uzp1`, `tbl`...) and scalar SIMD |
+| `interpreter_simd_ldst.cpp` | SIMD/FP loads and stores (`ldr q0`, `stp q0, q1`, `ld1`-`ld4`, `ld1r`...) |
+| `interpreter_fp.cpp` | Scalar floating point (`fadd d0`, `fcmp`, `scvtf`, `fmov`...) in half, single and double, and SIMD/FP routing |
+| `interpreter_simd.cpp` | All of Advanced SIMD (NEON), vector and scalar, organised by the encoding groups of the manual (`SimdOps`) |
+| `interpreter_crypto.cpp` | AES (AESE/AESD/AESMC/AESIMC), SHA1 and SHA256 |
+| `fp_ops.hpp/.cpp` | Floating point with the exact ARM rules (NaN, FPCR, FPSR, half precision, estimates, conversions) |
+| `simd_common.hpp` | Shared SIMD helpers: lane masks, saturation, a portable 128-bit integer, rounding shifts |
 | `src/common/bit_utils.hpp` | `Bits`, `SignExtend`, `RotateRight`, `DecodeBitMasks`, 128-bit multiply high |
 
 The split follows the "Top-level encodings" table of the Arm Architecture
@@ -30,12 +33,13 @@ Reference Manual: bits 28..25 of every instruction select the group.
 | Immediate | ADR, ADRP, ADD/ADDS/SUB/SUBS (CMP, CMN, MOV sp), AND/ORR/EOR/ANDS (TST), MOVZ/MOVN/MOVK, SBFM/BFM/UBFM (LSL, LSR, ASR, UBFX, SBFX, BFI, BFXIL, UXTB/H, SXTB/H/W), EXTR (ROR) |
 | Register | AND/BIC/ORR/ORN/EOR/EON/ANDS/BICS (MOV, MVN), ADD/SUB shifted and extended, ADC/SBC, CCMP/CCMN, CSEL/CSINC/CSINV/CSNEG (CSET, CINC, CNEG), UDIV/SDIV, LSLV/LSRV/ASRV/RORV, RBIT/REV16/REV32/REV/CLZ/CLS, MADD/MSUB (MUL), SMADDL/UMADDL, SMULH/UMULH |
 | Branch / system | B, BL, B.cond, CBZ/CBNZ, TBZ/TBNZ, BR, BLR, RET, RETAA/RETAB, SVC, BRK, NOP and all HINTs (PACIASP/AUTIASP/BTI), DMB/DSB/ISB/CLREX, MRS/MSR (NZCV, FPCR, FPSR, TPIDR_EL0, TPIDRRO_EL0, CNTFRQ_EL0, CNTPCT_EL0, CNTVCT_EL0, CTR_EL0, DCZID_EL0), cache maintenance (NOP) and DC ZVA (zeroes 64 bytes) |
-| Load / store | LDR/STR (B, H, W, X; unsigned offset, pre/post-index, unscaled, register offset), LDRSB/LDRSH/LDRSW, LDR literal, PRFM, LDP/STP/LDPSW/LDNP/STNP, LDXR/STXR/LDAXR/STLXR, LDAR/STLR, CAS, LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN, SWP |
-
-| SIMD/FP loads/stores | LDR/STR b/h/s/d/q (all addressing modes), LDUR/STUR, LDR literal, LDP/STP s/d/q, LD1/ST1 (1-4 registers, single lane) |
-| Scalar FP | FMOV (reg, imm, general<->FP, V.D[1]), FABS, FNEG, FSQRT, FCVT, FRINT*, FADD, FSUB, FMUL, FDIV, FNMUL, FMAX/FMIN(NM), FMADD/FMSUB/FNMADD/FNMSUB, FCMP/FCMPE, FCCMP, FCSEL, SCVTF/UCVTF, FCVT{N,P,M,Z,A}{S,U} |
-| Vector SIMD | DUP, INS/MOV, UMOV/SMOV, MOVI/MVNI/ORR/BIC imm, FMOV imm, AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF, ADD/SUB/MUL/MLA/MLS, CMEQ/CMGT/CMGE/CMHI/CMHS/CMTST (+ vs #0), S/U MAX/MIN (+ pairwise), ADDP, USHL/SSHL, ABS/NEG/NOT/CNT/RBIT/REV, XTN, ADDV/UMAXV/UMINV/SMAXV/SMINV/UADDLV/SADDLV, SHL/USHR/SSHR/USRA/SSRA/SHRN/USHLL/SSHLL, UZP/ZIP/TRN, EXT, TBL/TBX, vector FADD/FSUB/FMUL/FDIV/FMLA/FMLS/FMAX/FMIN/FADDP/FCMxx/FABS/FNEG/FSQRT/SCVTF/UCVTF/FCVTZS/FCVTZU |
-| Scalar SIMD | CMxx d #0, ADD/SUB/CMEQ/CMGT... d, SHL/USHR/SSHR d, ADDP d, DUP (`mov d0, v1.d[1]`), SCVTF/UCVTF/FCVTZS/FCVTZU on s/d |
+| Load / store | LDR/STR (B, H, W, X; unsigned offset, pre/post-index, unscaled, register offset, unprivileged LDTR/STTR), LDRSB/LDRSH/LDRSW, LDR literal, PRFM, LDP/STP/LDPSW/LDNP/STNP, LDXR/STXR/LDAXR/STLXR, LDXP/STXP/LDAXP/STLXP, LDAR/STLR (LDLAR/STLLR), LDAPR, CAS, CASP, LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN, SWP |
+| CRC | CRC32B/H/W/X, CRC32CB/H/W/X |
+| SIMD/FP loads/stores | LDR/STR b/h/s/d/q (all addressing modes), LDUR/STUR, LDR literal, LDP/STP/LDNP/STNP s/d/q, LD1-LD4/ST1-ST4 (multiple structures, single lane), LD1R-LD4R, post-index by immediate or register |
+| Scalar FP | Everything in the "Floating-point" groups, for half (16), single (32) and double (64): FMOV (reg, imm, general<->FP incl. half and V.D[1]), FABS, FNEG, FSQRT, FCVT between all sizes, FRINTN/P/M/Z/A/X/I, FADD, FSUB, FMUL, FDIV, FNMUL, FMAX/FMIN(NM), FMADD/FMSUB/FNMADD/FNMSUB, FCMP/FCMPE, FCCMP/FCCMPE, FCSEL, SCVTF/UCVTF and FCVT{N,P,M,Z,A}{S,U} (integer and fixed point) |
+| Vector SIMD | All the Advanced SIMD groups: three same (incl. saturating, halving, rounding, shifts by register, pairwise, polynomial PMUL, all FP incl. FP16, FRECPS/FRSQRTS, FMULX, FABD, FACGE...), three different (long/wide/narrow: SADDL, UMULL, SQDMULL, PMULL incl. 64-bit, ADDHN, SABAL...), two-register misc (incl. SQXTN, SQABS, URECPE, FRECPE, FRSQRTE, FCVTN/FCVTL/FCVTXN, FRINT*), across lanes, copy, permute, EXT, TBL/TBX, modified immediate, shift by immediate (incl. narrowing with rounding/saturation, SRI/SLI, fixed point conversions), by element (incl. FP16, long, SQDMULH, SQRDMLAH, SDOT/UDOT), SQRDMLAH/SQRDMLSH, SDOT/UDOT |
+| Scalar SIMD | The scalar forms of all groups above (pairwise, saturating, shifts, by element, FP16...) |
+| Crypto | AESE, AESD, AESMC, AESIMC, SHA1C/P/M/H/SU0/SU1, SHA256H/H2/SU0/SU1 |
 
 ### Switch 2 specific behaviour
 
@@ -46,13 +50,47 @@ Reference Manual: bits 28..25 of every instruction select the group.
   counts executed instructions (temporary).
 - **TLS**: Horizon stores the thread's TLS pointer in `TPIDRRO_EL0`.
 
-### Not implemented yet
+### Not implemented
 
-- Rarer SIMD: LD2/LD3/LD4, LD1R, "by element" forms (`fmul v0.4s, v1.4s, v2.s[1]`), widening/narrowing
-  arithmetic (UADDL, SQXTN...), half precision, crypto (AES/SHA). FPCR rounding modes and FPSR flags.
-- LDXP/STXP, CASP, LDAPR, CRC32, other system registers.
+- Features the Switch 2 CPU (Cortex-A78C, ARMv8.2 + some v8.3/v8.4) does not have: SVE, SHA512/SHA3,
+  SM3/SM4, BF16, I8MM, FCMA (FCMLA/FCADD), JSCVT, FRINT32/64, MTE.
 - Exceptions: an unknown instruction just stops the CPU (`IsHalted()`), with the
   PC left on the instruction that failed.
+
+How complete this is, is measured, not guessed: see [CPU fuzzing](cpu-fuzzing.md).
+
+## Floating point with ARM rules (`fp_ops.hpp/.cpp`)
+
+The PC (x86) and ARM both follow IEEE 754, but they differ in the details, and programs
+can see those details:
+
+| Detail | x86 | ARM (what `FP::` does) |
+| :--- | :--- | :--- |
+| NaN result of an invalid operation (0/0, inf-inf) | negative (`FFC00000`) | positive "default NaN" (`7FC00000`) |
+| NaN inputs | depends on the instruction | first signalling NaN (made quiet), then first quiet NaN, keeping its payload |
+| FPCR.FZ / FZ16 | - | subnormal inputs and outputs become 0 (marks IDC / UFC) |
+| FPCR.DN | - | every NaN result is the default NaN |
+| FPCR.AHP | - | "alternative" half precision without infinities or NaN |
+| FRECPE / FRSQRTE | different tables | ARM's own estimate algorithm |
+| Half precision (16 bits) | no arithmetic | full support |
+
+How it works:
+
+- **Fast path** (`FP::Fast`, inline in the header): with the normal FPCR (round to nearest,
+  no FZ, no DN) and no NaN among the inputs, x86 gives exactly the ARM result and flags, so
+  `fadd s0, s1, s2` is a single host `addss`. Only a NaN *produced* by the operation is
+  replaced with ARM's default NaN. Almost all game code takes this path.
+- **Full path**: NaN rules first, then FZ on the inputs, then the operation on the host FPU
+  with its rounding mode set like FPCR (`RoundGuard`, `fesetround`), then FZ on the output.
+- **Software rounding** (`RoundTo`, the manual's `FPRound`): conversions between sizes,
+  float <-> integer/fixed point, FRINT, half precision and fused operations computed in
+  double. To avoid rounding twice (wrong in rare cases), the double step truncates and
+  keeps a "sticky" bit, and `RoundTo` does the only real rounding.
+- **FPSR flags**: flags computed in software go to `fpsr` at once; those of the host FPU stay
+  in the FPU and are collected by `FP::FoldHostFlags()` when the program reads FPSR
+  (`mrs x0, fpsr`) and on every thread switch (the FPU is shared by all guest threads).
+- `fp_ops.cpp` is compiled with `-frounding-math` (GCC/Clang) or `/fp:strict` (MSVC), so the
+  compiler does not move operations around the rounding-mode changes.
 
 ## Tests
 
@@ -72,6 +110,11 @@ stores **every** register at the end (x0-x28, NZCV, v0-v31) in `tests/generated/
 `tests/simd_tests.cpp` runs the same code in NeXo and compares register by register, so the
 expected values come from real ARM behaviour (NaN, saturation, rounding...) and not from us.
 
+## CPU fuzzing (against a real ARM)
+
+`tests/cpu_fuzz_tests.cpp` runs ~43 000 random instructions of every encoding group and
+compares each result with QEMU. See [CPU fuzzing](cpu-fuzzing.md).
+
 ## How to add a new instruction
 
 1. Find its encoding in the Arm ARM (or run `llvm-mc -triple=aarch64 -show-encoding`).
@@ -90,6 +133,9 @@ Measured with NX-FixCheat (libnx console homebrew), g++ -O2, one x86-64 core:
 | First working version | ~42 M |
 | Two-level page table + code page cache + inlined helpers | ~95 M |
 | + decode cache (fast handlers for hot instructions) | ~170 M |
+
+Floating point (micro-benchmark, ns per guest instruction, loop overhead included; an integer
+ADD costs 4.4): scalar FADD 5.6, FMADD 5.6, vector FADD .4S 11, vector FMLA .4S 17.
 
 What made the difference (profiled with valgrind/callgrind):
 
@@ -130,7 +176,9 @@ Run() with cache (RunCached):
   immediates, logical masks (`DecodeBitMasks` runs once), branch targets (absolute).
 - **Fast handlers** only for the hot instructions: ADD/SUB (imm and register), logical
   (imm and register), MOV, MOVZ/MOVK, LSL/LSR/ASR (imm and register), bitfield, CSEL family,
-  MADD, B/BL/B.cond/CBZ/TBZ/BR/BLR/RET, LDR/STR (imm12, imm9, pre/post, register), LDP/STP.
+  MADD, B/BL/B.cond/CBZ/TBZ/BR/BLR/RET, LDR/STR (imm12, imm9, pre/post, register), LDP/STP,
+  and floating point: FADD/FSUB/FMUL/FDIV/FNMUL, FMADD family, FMOV/FABS/FNEG (S and D),
+  vector FADD/FSUB/FMUL/FDIV/FMLA/FMLS (.2S, .4S, .2D).
   Many are templates (`AddSubReg<SUB, FLAGS, SHIFTED>`, `LoadStoreFixed<MODE, STORE, BYTES>`),
   so the common case has no runtime checks at all.
 - Everything else uses `Generic`, which calls the normal decoder (`Execute`). Rule:

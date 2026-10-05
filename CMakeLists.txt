@@ -22,6 +22,8 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/arm64/interpreter_simd_ldst.cpp"
     "${SRC_DIR}/core/arm64/interpreter_fp.cpp"
     "${SRC_DIR}/core/arm64/interpreter_simd.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_crypto.cpp"
+    "${SRC_DIR}/core/arm64/fp_ops.cpp"
     "${SRC_DIR}/core/loader/nro.cpp"
     "${SRC_DIR}/core/hle/kernel.cpp"
     "${SRC_DIR}/core/hle/kernel_threads.cpp"
@@ -40,6 +42,13 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/hle/services/vi.cpp"
     "${SRC_DIR}/core/system.cpp"
 )
+# fp_ops.cpp cambia el modo de redondeo de la FPU del PC: el compilador no debe
+# calcular nada en tiempo de compilacion ni reordenar las operaciones alrededor.
+if(MSVC)
+    set_source_files_properties("${SRC_DIR}/core/arm64/fp_ops.cpp" PROPERTIES COMPILE_OPTIONS "/fp:strict")
+else()
+    set_source_files_properties("${SRC_DIR}/core/arm64/fp_ops.cpp" PROPERTIES COMPILE_OPTIONS "-frounding-math")
+endif()
 target_include_directories(nexo2_core PUBLIC
     "${SRC_DIR}"
     "${SRC_DIR}/core"
@@ -135,6 +144,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/memory_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/decode_cache_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/threads_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/cpu_fuzz_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
     # Carpeta con hello.nro y demas archivos de prueba

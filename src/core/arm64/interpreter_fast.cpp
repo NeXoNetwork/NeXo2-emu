@@ -15,7 +15,9 @@
 // tests/decode_cache_tests.cpp lo comprueba ejecutando miles de instrucciones al azar
 // por los dos caminos.
 #include "interpreter.hpp"
+#include "fp_ops.hpp"
 #include "common/bit_utils.hpp"
+#include <cmath>
 
 namespace NeXo2::Core {
 
@@ -273,6 +275,92 @@ struct FastOps {
     // ==================================================================
     //  Decodificador
     // ==================================================================
+    // ------------------------------------------------------------------
+    // Coma flotante: las mas usadas por los juegos (FADD, FMUL, FMADD, FMOV... en
+    // S y D, y FADD/FMUL/FMLA vectoriales). Primero el camino rapido de fp_ops.hpp;
+    // si no vale (NaN, FZ, otro redondeo...), las funciones completas de FP::.
+    // ------------------------------------------------------------------
+    template <unsigned W> static u64 GetS(Interpreter& it, unsigned r) { return it.Vreg(r).Get(0, W / 8); }
+    template <unsigned W> static void PutS(Interpreter& it, unsigned r, u64 v) {
+        V128& x = it.Vreg(r);
+        x = V128{};
+        x.Set(0, W / 8, v);
+    }
+    template <FP::Fast::Op OP>
+    static u64 FpArith(Interpreter& it, u64 a, u64 b, unsigned w) {
+        u64 r;
+        if (FP::Fast::Arith<OP>(a, b, w, u32(it.m_state.fpcr), r)) return r;
+        FP::Env e{u32(it.m_state.fpcr), it.m_state.fpsr};
+        if constexpr (OP == FP::Fast::ADD) return FP::Add(a, b, w, e);
+        else if constexpr (OP == FP::Fast::SUB) return FP::Sub(a, b, w, e);
+        else if constexpr (OP == FP::Fast::MUL) return FP::Mul(a, b, w, e);
+        else return FP::Div(a, b, w, e);
+    }
+    // acc + n*m con un solo redondeo
+    static u64 FpMulAdd(Interpreter& it, u64 acc, u64 n, u64 m, unsigned w) {
+        const u32 fpcr = u32(it.m_state.fpcr);
+        if (FP::Fast::FpcrOk(fpcr)) {
+            if (w == 32 && !FP::Fast::NaN32(acc) && !FP::Fast::NaN32(n) && !FP::Fast::NaN32(m))
+                return FP::Fast::Out32(std::fma(FP::Fast::F32(n), FP::Fast::F32(m), FP::Fast::F32(acc)));
+            if (w == 64 && !FP::Fast::NaN64(acc) && !FP::Fast::NaN64(n) && !FP::Fast::NaN64(m))
+                return FP::Fast::Out64(std::fma(FP::Fast::F64(n), FP::Fast::F64(m), FP::Fast::F64(acc)));
+        }
+        FP::Env e{fpcr, it.m_state.fpsr};
+        return FP::MulAdd(acc, n, m, w, e);
+    }
+
+    // FMUL, FDIV, FADD, FSUB, FNMUL escalares
+    template <FP::Fast::Op OP, bool NEG, unsigned W>
+    static bool Fp2(Interpreter& it, const D& d) {
+        u64 r = FpArith<OP>(it, GetS<W>(it, d.rn), GetS<W>(it, d.rm), W);
+        if (NEG) r ^= 1ull << (W - 1);                       // FNMUL: el resultado cambiado de signo
+        PutS<W>(it, d.rd, r);
+        return true;
+    }
+    // FMADD, FMSUB, FNMADD, FNMSUB: las negaciones van en los operandos, antes (como el manual)
+    template <bool O1, bool O0, unsigned W>
+    static bool Fp3(Interpreter& it, const D& d) {
+        constexpr u64 SIGN = 1ull << (W - 1);
+        u64 a = GetS<W>(it, d.ra), n = GetS<W>(it, d.rn);
+        if (O1) a ^= SIGN;
+        if (O0 != O1) n ^= SIGN;
+        PutS<W>(it, d.rd, FpMulAdd(it, a, n, GetS<W>(it, d.rm), W));
+        return true;
+    }
+    // FMOV / FABS / FNEG entre registros (solo tocan el bit de signo: nunca hay flags)
+    template <u32 OPC, unsigned W>
+    static bool Fp1(Interpreter& it, const D& d) {
+        constexpr u64 SIGN = 1ull << (W - 1);
+        u64 v = GetS<W>(it, d.rn);
+        if (OPC == 1) v &= ~SIGN;
+        if (OPC == 2) v ^= SIGN;
+        PutS<W>(it, d.rd, v);
+        return true;
+    }
+    // Vectoriales: FADD, FSUB, FMUL, FDIV, FMLA, FMLS (.2S, .4S, .2D)
+    enum VecOp : u32 { V_ADD, V_SUB, V_MUL, V_DIV, V_FMLA, V_FMLS };
+    template <VecOp OP, unsigned W, bool Q>
+    static bool VecFp(Interpreter& it, const D& d) {
+        constexpr unsigned B = W / 8, LANES = (Q ? 16 : 8) / B;
+        const V128 n = it.Vreg(d.rn), m = it.Vreg(d.rm);
+        V128 r = it.Vreg(d.rd);
+        for (unsigned i = 0; i < LANES; ++i) {
+            const u64 x = n.Get(i, B), y = m.Get(i, B);
+            u64 z;
+            if constexpr (OP == V_ADD) z = FpArith<FP::Fast::ADD>(it, x, y, W);
+            else if constexpr (OP == V_SUB) z = FpArith<FP::Fast::SUB>(it, x, y, W);
+            else if constexpr (OP == V_MUL) z = FpArith<FP::Fast::MUL>(it, x, y, W);
+            else if constexpr (OP == V_DIV) z = FpArith<FP::Fast::DIV>(it, x, y, W);
+            else if constexpr (OP == V_FMLA) z = FpMulAdd(it, r.Get(i, B), x, y, W);
+            else z = FpMulAdd(it, r.Get(i, B), x ^ (1ull << (W - 1)), y, W);
+            r.Set(i, B, z);
+        }
+        if (!Q) r.hi = 0;
+        it.Vreg(d.rd) = r;
+        return true;
+    }
+
+    static void DecodeSimdFp(u32 raw, D& d);
     static void DecodeDataProcImm(u32 raw, u64 pc, D& d);
     static void DecodeDataProcReg(u32 raw, D& d);
     static void DecodeBranch(u32 raw, u64 pc, D& d);
@@ -445,7 +533,8 @@ void FastOps::DecodeLoadStore(u32 raw, D& d) {
     if (group == 0b10) {                                     // LDP / STP / LDPSW
         const u32 opc = Bits(raw, 30, 2);
         const bool load = Bit(raw, 22);
-        if (opc == 0b11 || (opc == 0b01 && !load)) return;
+        if (Bit(raw, 25)) return;                            // no existe (bits 25..23 = 1xx)
+        if (opc == 0b11 || (opc == 0b01 && (!load || Bits(raw, 23, 2) == 0))) return;
         const unsigned bytes = (opc == 0b10) ? 8 : 4;
         d.ra = u8(Bits(raw, 10, 5));
         d.b = u8(bytes);
@@ -479,6 +568,7 @@ void FastOps::DecodeLoadStore(u32 raw, D& d) {
         const u32 mode = Bits(raw, 10, 2);
         const bool writeback = (mode == 0b01 || mode == 0b11);
         if (writeback && opc == 0b10 && size == 3) return;
+        if (mode == 0b10 && opc == 0b10 && size == 3) return;   // LDTR "PRFM": no existe
         d.imm = u64(SignExtend(Bits(raw, 12, 9), 9));
         d.fn = (mode == 0b01) ? PickLoadStore<POST>(d.a, bytes)
              : (mode == 0b11) ? PickLoadStore<PRE>(d.a, bytes)
@@ -501,6 +591,69 @@ void FastOps::DecodeLoadStore(u32 raw, D& d) {
     // Atomicos LSE: Generic
 }
 
+void FastOps::DecodeSimdFp(u32 raw, D& d) {
+    d.rd = u8(Bits(raw, 0, 5));
+    d.rn = u8(Bits(raw, 5, 5));
+    d.rm = u8(Bits(raw, 16, 5));
+    const u32 type = Bits(raw, 22, 2);                       // 00 = S (32), 01 = D (64)
+    using F = FP::Fast::Op;
+
+    if ((raw & 0xFF200C00u) == 0x1E200800u && type <= 1) {   // FP 2 operandos
+        const bool dbl = type == 1;
+        switch (Bits(raw, 12, 4)) {
+            case 0b0000: d.fn = dbl ? &Fp2<F::MUL, false, 64> : &Fp2<F::MUL, false, 32>; return;
+            case 0b0001: d.fn = dbl ? &Fp2<F::DIV, false, 64> : &Fp2<F::DIV, false, 32>; return;
+            case 0b0010: d.fn = dbl ? &Fp2<F::ADD, false, 64> : &Fp2<F::ADD, false, 32>; return;
+            case 0b0011: d.fn = dbl ? &Fp2<F::SUB, false, 64> : &Fp2<F::SUB, false, 32>; return;
+            case 0b1000: d.fn = dbl ? &Fp2<F::MUL, true, 64>  : &Fp2<F::MUL, true, 32>;  return;
+            default: return;                                 // FMAX, FMIN...: Generic
+        }
+    }
+    if ((raw & 0xFF000000u) == 0x1F000000u && type <= 1) {   // FMADD y compania
+        d.ra = u8(Bits(raw, 10, 5));
+        static constexpr D::Handler t32[4] = {&Fp3<false, false, 32>, &Fp3<false, true, 32>,
+                                              &Fp3<true, false, 32>,  &Fp3<true, true, 32>};
+        static constexpr D::Handler t64[4] = {&Fp3<false, false, 64>, &Fp3<false, true, 64>,
+                                              &Fp3<true, false, 64>,  &Fp3<true, true, 64>};
+        const u32 k = (Bit(raw, 21) << 1) | Bit(raw, 15);
+        d.fn = type ? t64[k] : t32[k];
+        return;
+    }
+    if ((raw & 0xFF207C00u) == 0x1E204000u && type <= 1) {   // FP 1 operando
+        switch (Bits(raw, 15, 6)) {
+            case 0b000000: d.fn = type ? &Fp1<0, 64> : &Fp1<0, 32>; return;   // FMOV
+            case 0b000001: d.fn = type ? &Fp1<1, 64> : &Fp1<1, 32>; return;   // FABS
+            case 0b000010: d.fn = type ? &Fp1<2, 64> : &Fp1<2, 32>; return;   // FNEG
+            default: return;
+        }
+    }
+    if ((raw & 0x9F200400u) == 0x0E200400u) {               // SIMD tres iguales
+        const bool q = Bit(raw, 30), u = Bit(raw, 29), a = Bit(raw, 23), sz = Bit(raw, 22);
+        if (sz && !q) return;                                // .1D no existe: Generic da el error
+        const u32 key = (u32(u) << 6) | (u32(a) << 5) | Bits(raw, 11, 5);
+        VecOp op;
+        switch (key) {
+            case 0b0011010: op = V_ADD;  break;
+            case 0b0111010: op = V_SUB;  break;
+            case 0b1011011: op = V_MUL;  break;
+            case 0b1011111: op = V_DIV;  break;
+            case 0b0011001: op = V_FMLA; break;
+            case 0b0111001: op = V_FMLS; break;
+            default: return;
+        }
+#define NEXO2_VEC(OP) (sz ? &VecFp<OP, 64, true> : q ? &VecFp<OP, 32, true> : &VecFp<OP, 32, false>)
+        switch (op) {
+            case V_ADD:  d.fn = NEXO2_VEC(V_ADD);  break;
+            case V_SUB:  d.fn = NEXO2_VEC(V_SUB);  break;
+            case V_MUL:  d.fn = NEXO2_VEC(V_MUL);  break;
+            case V_DIV:  d.fn = NEXO2_VEC(V_DIV);  break;
+            case V_FMLA: d.fn = NEXO2_VEC(V_FMLA); break;
+            default:     d.fn = NEXO2_VEC(V_FMLS); break;
+        }
+#undef NEXO2_VEC
+    }
+}
+
 void Interpreter::Decode(u32 raw, u64 pc, DecodedInstr& d) {
     d = DecodedInstr{};
     d.raw = raw;
@@ -510,6 +663,7 @@ void Interpreter::Decode(u32 raw, u64 pc, DecodedInstr& d) {
     else if ((op0 & 0b1110) == 0b1010) FastOps::DecodeBranch(raw, pc, d);
     else if ((op0 & 0b0101) == 0b0100) FastOps::DecodeLoadStore(raw, d);
     else if ((op0 & 0b0111) == 0b0101) FastOps::DecodeDataProcReg(raw, d);
+    else if ((op0 & 0b0111) == 0b0111) FastOps::DecodeSimdFp(raw, d);
 }
 
 } // namespace NeXo2::Core

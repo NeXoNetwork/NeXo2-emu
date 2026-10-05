@@ -39,7 +39,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
     Current focus: **speed** (interpreter optimisation, then JIT).
 
 ### Phase 1: Core Infrastructure
-- [~] **Logging Framework:** Simple logger to console and `nexo2.log` (`src/common/logger.hpp`). Not thread-safe yet.
+- [x] **Logging Framework:** Thread-safe logger to console and `nexo2.log` (`src/common/logger.hpp`).
 - [~] **Memory Management Unit:** Paged guest memory (4 KB pages, allocated on demand) with a Horizon-style region map. 64 KB pages and permission checks pending.
 - [ ] **Virtual File System (VFS):** Initial support for parsing NCA and HFS2 container formats.
 - [x] **NRO Loader:** Loads homebrew `.nro` files (segments, memory map, NACP title). See [docs/07-nexo-internals/nro-loader-and-hle.md](docs/07-nexo-internals/nro-loader-and-hle.md).
@@ -47,7 +47,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ### Phase 2: CPU Emulation (ARM64)
 - [x] **State Management:** Implementation of the ARM64 register set (X0-X30, SP, PC, and PSTATE).
-- [~] **Instruction Decoder:** Integer, scalar FP and the common SIMD/NEON subset of ARMv8.2-A done, checked bit-for-bit against a reference ARM (QEMU). Rarer SIMD forms pending. See [docs/07-nexo-internals/cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md).
+- [x] **Instruction Decoder:** All of ARMv8.2-A for EL0: integer, scalar FP (half/single/double with exact ARM NaN, FPCR and FPSR rules), all Advanced SIMD/NEON groups, crypto (AES/SHA1/SHA256), CRC32, LSE atomics. 100 % of ~15 600 random valid instructions match a reference ARM (QEMU). See [cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md) and [cpu-fuzzing.md](docs/07-nexo-internals/cpu-fuzzing.md).
 - [x] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
 - [x] **CPU Tests:** `nexo2_tests` runs hand-written ARM64 programs and clang-compiled C code.
 - [~] **JIT Integration:** Ballistic front-end (ARM64 -> IR) wired in; no backend yet.

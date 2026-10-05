@@ -39,7 +39,7 @@ bool Interpreter::ExecLoadStore(u32 instr) {
     // ------------------------------------------------------------------
     // LDR (literal): lee una constante situada cerca del codigo
     // ------------------------------------------------------------------
-    if (group == 0b01 && Bit(instr, 24) == 0) {
+    if (group == 0b01 && Bits(instr, 24, 2) == 0) {
         const u32 opc = Bits(instr, 30, 2);
         const u64 addr = m_state.pc + SignExtend(Bits(instr, 5, 19), 19) * 4;
         switch (opc) {
@@ -82,6 +82,7 @@ bool Interpreter::ExecLoadStore(u32 instr) {
             default:   addr = base + imm; break;                                          // LDUR / LDTR
         }
         if (writeback && opc == 0b10 && size == 3) return false;
+        if (mode == 0b10 && opc == 0b10 && size == 3) return false;   // LDTR: no hay PRFM sin privilegios
     } else if (Bits(instr, 10, 2) == 0b10) {
         // [Xn, Xm{, LSL #n}] / [Xn, Wm, SXTW #n]  (offset con registro)
         const u32 option = Bits(instr, 13, 3);
@@ -94,6 +95,12 @@ bool Interpreter::ExecLoadStore(u32 instr) {
         const u32 rs = Bits(instr, 16, 5);
         const u32 o3 = Bit(instr, 15);
         const u32 aop = Bits(instr, 12, 3);
+        if (o3 && aop == 0b100) {
+            // LDAPR: lectura con "acquire" (ARMv8.3). Rs = 11111, A = 1, R = 0.
+            if (rs != 0b11111 || !Bit(instr, 23) || Bit(instr, 22)) return false;
+            SetX(rt, ReadMemory(XorSP(rn), bytes));
+            return true;
+        }
         const u64 address = XorSP(rn);
         const u64 old = ReadMemory(address, bytes);
         const u64 mask = Ones(bytes * 8);
@@ -147,7 +154,8 @@ bool Interpreter::ExecLoadStorePair(u32 instr) {
     const u32  rt2  = Bits(instr, 10, 5);
     const u32  rn   = Bits(instr, 5, 5);
 
-    if (opc == 0b11 || (opc == 0b01 && !load)) return false;
+    if (Bit(instr, 25)) return false;                       // bits 25..23 = 1xx: no existe
+    if (opc == 0b11 || (opc == 0b01 && (!load || type == 0b00))) return false;   // LDPSW no tiene version no-temporal
 
     const unsigned bytes = (opc == 0b10) ? 8 : 4;
     const s64 offset = SignExtend(Bits(instr, 15, 7), 7) * s64(bytes);
@@ -178,6 +186,7 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
     const bool load = Bit(instr, 22);
     const bool o1   = Bit(instr, 21);
     const u32  rs   = Bits(instr, 16, 5);
+    const u32  rt2  = Bits(instr, 10, 5);
     const u32  rn   = Bits(instr, 5, 5);
     const u32  rt   = Bits(instr, 0, 5);
     const unsigned bytes = 1u << size;
@@ -202,15 +211,56 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
         return true;
     }
 
+    if (!o2 && o1 && (size & 2)) {
+        // LDXP / LDAXP / STXP / STLXP: dos registros (W o X) a la vez
+        const bool sf = size & 1;
+        const unsigned eb = sf ? 8 : 4;
+        if (load) {
+            const u64 lo = ReadMemory(addr, eb), hi = ReadMemory(addr + eb, eb);
+            SetX(rt, lo, sf);
+            SetX(rt2, hi, sf);
+            m_exclusiveValid = true;
+            m_exclusiveAddr  = addr;
+        } else {
+            if (m_exclusiveValid && m_exclusiveAddr == addr) {
+                const u64 lo = X(rt, sf), hi = X(rt2, sf);   // leer antes: Rs podria ser uno de ellos
+                WriteMemory(addr, lo, eb);
+                WriteMemory(addr + eb, hi, eb);
+                SetX(rs, 0, false);
+            } else {
+                SetX(rs, 1, false);
+            }
+            m_exclusiveValid = false;
+        }
+        return true;
+    }
+
+    if (!o2 && o1) {
+        // CASP / CASPA / CASPL / CASPAL: compara y cambia una pareja de registros (pares)
+        if (rt2 != 0b11111 || (rs & 1) || (rt & 1)) return false;
+        const bool sf = Bit(instr, 30);
+        const unsigned eb = sf ? 8 : 4;
+        const u64 mask = Ones(eb * 8);
+        const u64 old_lo = ReadMemory(addr, eb), old_hi = ReadMemory(addr + eb, eb);
+        if (old_lo == (X(rs, sf) & mask) && old_hi == (X(rs + 1, sf) & mask)) {
+            WriteMemory(addr, X(rt, sf), eb);
+            WriteMemory(addr + eb, X(rt + 1, sf), eb);
+        }
+        SetX(rs, old_lo, sf);
+        SetX(rs + 1, old_hi, sf);
+        return true;
+    }
+
     if (o2 && !o1) {
         // LDAR / STLR (y LDLAR/STLLR): acceso normal con orden de memoria.
-        // Con un solo nucleo el orden ya es secuencial.
+        // Rs y Rt2 tienen que ser 11111 (si no, la instruccion no es valida).
+        if (rs != 0b11111 || rt2 != 0b11111) return false;
         if (load) SetX(rt, ReadMemory(addr, bytes));
         else      WriteMemory(addr, X(rt), bytes);
         return true;
     }
 
-    if (o2 && o1 && Bits(instr, 10, 5) == 0b11111) {
+    if (rt2 == 0b11111) {
         // CAS / CASA / CASL / CASAL: si mem == Rs, mem = Rt. Rs recibe el valor viejo.
         const u64 mask = Ones(bytes * 8);
         const u64 old  = ReadMemory(addr, bytes);
@@ -218,8 +268,7 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
         SetX(rs, old, size == 3);
         return true;
     }
-
-    return false; // LDXP/STXP, CASP: pendiente
+    return false;
 }
 
 } // namespace NeXo2::Core

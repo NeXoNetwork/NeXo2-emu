@@ -100,6 +100,7 @@ public:
 
 private:
     friend struct FastOps;   // las funciones rapidas de interpreter_fast.cpp
+    friend struct SimdOps;   // las instrucciones SIMD de interpreter_simd.cpp
 
     // --- Cache de instrucciones decodificadas ---
     // Una pagina de 4 KB tiene 1024 instrucciones: una entrada por cada una.
@@ -132,6 +133,7 @@ private:
     bool ExecSimdFp(u32 instr);        // reparte entre coma flotante y SIMD vectorial
     bool ExecFloatingPoint(u32 instr);
     bool ExecSimdVector(u32 instr);
+    bool ExecCrypto(u32 instr);        // AES y SHA1/SHA256 (interpreter_crypto.cpp)
 
     // Registros SIMD: escribir un escalar (s0, d0...) pone a cero el resto del registro
     V128& Vreg(unsigned n) { return m_state.v[n & 31]; }

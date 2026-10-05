@@ -4,7 +4,8 @@ How NeXo 2 itself is built (our code, not the console).
 
 | File | Content |
 | :--- | :--- |
-| [cpu-interpreter.md](cpu-interpreter.md) | ARM64 interpreter: structure, implemented instructions, tests, how to add an instruction, performance, decode cache |
+| [cpu-interpreter.md](cpu-interpreter.md) | ARM64 interpreter: structure, implemented instructions, floating point with ARM rules, tests, how to add an instruction, performance, decode cache |
+| [cpu-fuzzing.md](cpu-fuzzing.md) | Random instructions compared against a reference ARM: how it works, results, known QEMU differences, usage |
 | [nro-loader-and-hle.md](nro-loader-and-hle.md) | NRO loader, process memory layout, Homebrew ABI, HLE kernel SVCs |
 | [ipc-and-services.md](ipc-and-services.md) | IPC (HIPC/CMIF/TIPC, domains), all services (sm:, applet, hid, time, fs/SD card...), how to add a service |
 | [threads.md](threads.md) | Threads, scheduler (6 time-sliced cores), mutex/condvar protocol |
@@ -13,7 +14,7 @@ How NeXo 2 itself is built (our code, not the console).
 
 ## Test suite
 
-`nexo2_tests` (55 tests) covers every page above: CPU programs and SIMD differential tests,
+`nexo2_tests` (56 tests) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
 the NRO loader, IPC, the libnx start-up services, display (deswizzle, GraphicBuffer parsing,
 pixel formats), SD card paths, controller LIFOs, decode cache and threads. Run it after any change:
 `build\Release\nexo2_tests.exe`.

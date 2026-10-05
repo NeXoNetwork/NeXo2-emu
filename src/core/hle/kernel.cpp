@@ -1,4 +1,8 @@
 #include "kernel.hpp"
+#include "firmware.hpp"
+#include "ipc.hpp"
+#include "services/set.hpp"
+#include "services/sm.hpp"
 #include "common/logger.hpp"
 #include <cstdio>
 
@@ -26,6 +30,7 @@ namespace ConfigKey {
     constexpr u32 Argv                 = 5;
     constexpr u32 SyscallAvailableHint = 6;
     constexpr u32 AppletType           = 7;
+    constexpr u32 HosVersion           = 16;
 }
 constexpr u32 CONFIG_FLAG_MANDATORY = 1;
 } // namespace
@@ -33,6 +38,12 @@ constexpr u32 CONFIG_FLAG_MANDATORY = 1;
 Kernel::Kernel(Core::Memory& memory, Core::Interpreter& cpu)
     : m_memory(memory), m_cpu(cpu) {
     m_cpu.SetSvcHandler([this](u32 imm, CPUState& state) { HandleSvc(imm, state); });
+    RegisterDefaultServices();
+}
+
+// Servicios que sm: sabe entregar. Cada servicio nuevo se anade aqui.
+void Kernel::RegisterDefaultServices() {
+    m_services.Register("set:sys", [] { return std::make_shared<SystemSettings>(); });
 }
 
 void Kernel::Reset() {
@@ -40,6 +51,7 @@ void Kernel::Reset() {
     m_imageSize = 0;
     m_exited = false;
     m_debugOutput.clear();
+    m_handles.Clear();
 }
 
 // ============================================================================
@@ -93,7 +105,11 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
     add_entry(ConfigKey::AppletType, 0, 0 /* Application */, 0);
     add_entry(ConfigKey::Argv, 0, 0, argv_str);
     add_entry(ConfigKey::SyscallAvailableHint, 0, ~0ULL, ~0ULL);
+    add_entry(ConfigKey::HosVersion, 0, Firmware::HOS_VERSION, 0);
     add_entry(ConfigKey::EndOfList, 0, info_str, info.size());
+
+    // El hilo principal existe como handle (aun no emulamos hilos de verdad)
+    m_handles.Insert(MAIN_THREAD_HANDLE, std::make_shared<KDummyObject>("hilo principal"));
 
     // Registros de entrada
     CPUState& s = m_cpu.GetState();
@@ -123,6 +139,9 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
         case 0x1E: SvcGetSystemTick(s);     return;
         case 0x26: SvcBreak(s);             return;
         case 0x27: SvcOutputDebugString(s); return;
+        case 0x1F: SvcConnectToNamedPort(s); return;
+        case 0x21: SvcSendSyncRequest(s);    return;
+        case 0x22: SvcSendSyncRequestWithUserBuffer(s); return;
         case 0x29: SvcGetInfo(s);           return;
         default: {
             // SVC desconocida: paramos para que se vea claramente que falta.
@@ -179,8 +198,14 @@ void Kernel::SvcSleepThread(CPUState&) {
     // Con un solo hilo no hay nada que hacer: seguimos ejecutando.
 }
 
+// svcCloseHandle(handle = W0)
 void Kernel::SvcCloseHandle(CPUState& s) {
-    SetResult(s, Result::Success);
+    const u32 handle = static_cast<u32>(s.x[0]);
+    if (handle == CURRENT_THREAD_PSEUDO_HANDLE || handle == CURRENT_PROCESS_PSEUDO_HANDLE) {
+        SetResult(s, Result::Success);
+        return;
+    }
+    SetResult(s, m_handles.Close(handle) ? Result::Success : Result::InvalidHandle);
 }
 
 // svcGetSystemTick -> X0 = ticks. Mismo contador que CNTPCT_EL0.
@@ -277,6 +302,166 @@ const char* Kernel::SvcName(u32 imm) {
         "SetResourceLimitLimitValue", "CallSecureMonitor",
     };
     return imm < 0x80 ? names[imm] : "?";
+}
+
+// ============================================================================
+//  IPC: conexion a puertos y envio de mensajes a servicios
+// ============================================================================
+
+u32 Kernel::CreateSessionHandle(std::shared_ptr<ServiceObject> service) {
+    auto state = std::make_shared<SessionState>();
+    state->root = std::move(service);
+    return m_handles.Create(std::make_shared<KClientSession>(state));
+}
+
+void Kernel::ReportUnimplemented(const std::string& service_name, u32 command_id) {
+    const std::string msg = "Servicio '" + service_name + "': comando " + std::to_string(command_id) +
+                            " no implementado";
+    Logger::Log(Logger::Level::Warning, "[HLE] " + msg);
+    m_cpu.Halt(msg);
+}
+
+// svcConnectToNamedPort(nombre = X1) -> W0 = resultado, W1 = handle
+// El unico puerto con nombre que usan los programas es "sm:".
+void Kernel::SvcConnectToNamedPort(CPUState& s) {
+    char name[13] = {};
+    m_memory.ReadBytes(s.x[1], name, 12);
+    const std::string port(name);
+
+    if (port != "sm:") {
+        Logger::Log(Logger::Level::Warning, "[HLE] svcConnectToNamedPort(\"" + port + "\"): puerto desconocido");
+        SetResult(s, Result::NotFound);
+        return;
+    }
+    const u32 handle = CreateSessionHandle(std::make_shared<ServiceManager>());
+    Logger::Log(Logger::Level::Info, "[HLE] svcConnectToNamedPort(\"sm:\") -> handle " + std::to_string(handle));
+    SetResult(s, Result::Success);
+    s.x[1] = handle;
+}
+
+// svcSendSyncRequest(handle = W0): el mensaje esta en la TLS del hilo
+void Kernel::SvcSendSyncRequest(CPUState& s) {
+    SetResult(s, ProcessIpcRequest(static_cast<u32>(s.x[0]), s.tpidrro_el0));
+}
+
+// svcSendSyncRequestWithUserBuffer(buffer = X0, tamano = X1, handle = W2): el mensaje esta en 'buffer'
+void Kernel::SvcSendSyncRequestWithUserBuffer(CPUState& s) {
+    SetResult(s, ProcessIpcRequest(static_cast<u32>(s.x[2]), s.x[0]));
+}
+
+u32 Kernel::ProcessIpcRequest(u32 handle, u64 message) {
+    auto session = m_handles.Get<KClientSession>(handle);
+    if (!session) {
+        Logger::Log(Logger::Level::Warning, "[IPC] Handle " + std::to_string(handle) + " no es una sesion");
+        return Result::InvalidHandle;
+    }
+    const std::shared_ptr<SessionState>& state = session->state;
+    IpcRequest req = ParseHipcRequest(m_memory, message);
+
+    // --- Cerrar la sesion (despues el programa hara svcCloseHandle) ---
+    if (req.type == CommandType::Close) return Result::Success;
+
+    // --- TIPC: type = 16 + comando, los argumentos empiezan directamente en los datos ---
+    if (req.type >= CommandType::TipcBase) {
+        req.command_id = req.type - CommandType::TipcBase;
+        req.payload_offset = message + req.data_offset;
+        req.payload_size = req.data_size;
+        IpcContext ctx(*this, m_memory, req, IpcContext::Protocol::Tipc, false);
+        if (!state->root->SupportsTipc()) {
+            ctx.Unimplemented(state->root->Name() + " (TIPC)");
+            return Result::Success;
+        }
+        state->root->Dispatch(ctx);
+        if (ctx.IsHandled()) ctx.WriteResponse(message, state);
+        return Result::Success;
+    }
+
+    const bool is_request = req.type == CommandType::Request || req.type == CommandType::RequestWithContext;
+    const bool is_control = req.type == CommandType::Control || req.type == CommandType::ControlWithContext;
+    if (!is_request && !is_control) {
+        m_cpu.Halt("Mensaje IPC de tipo " + std::to_string(req.type) + " no soportado");
+        return Result::Success;
+    }
+
+    // --- CMIF: los datos empiezan alineados a 16 bytes ---
+    u64 cursor = message + ((req.data_offset + 15) & ~u64(15));
+    const u64 data_end = message + req.data_offset + req.data_size;
+    std::shared_ptr<ServiceObject> target = state->root;
+    const bool domain_message = is_request && state->is_domain;
+
+    if (domain_message) {
+        // Cabecera de dominio: tipo, n objetos de entrada, tamano, id del objeto destino
+        const u8  dtype = m_memory.Read<u8>(cursor + 0);
+        const u8  num_in_objects = m_memory.Read<u8>(cursor + 1);
+        const u16 dsize = m_memory.Read<u16>(cursor + 2);
+        const u32 object_id = m_memory.Read<u32>(cursor + 4);
+        req.is_domain_message = true;
+        req.domain_command = dtype;
+        req.domain_object_id = object_id;
+        for (u32 i = 0; i < num_in_objects; ++i)
+            req.domain_in_objects.push_back(m_memory.Read<u32>(cursor + 16 + dsize + i * 4));
+
+        if (dtype == 2) { // cerrar un objeto del dominio
+            state->domain_objects.erase(object_id);
+            IpcContext ctx(*this, m_memory, req, IpcContext::Protocol::Cmif, true);
+            ctx.WriteResponse(message, state);
+            return Result::Success;
+        }
+        auto it = state->domain_objects.find(object_id);
+        if (it == state->domain_objects.end()) {
+            m_cpu.Halt("IPC: objeto de dominio " + std::to_string(object_id) + " no existe");
+            return Result::Success;
+        }
+        target = it->second;
+        cursor += 16;
+    }
+
+    if (m_memory.Read<u32>(cursor) != CMIF_IN_MAGIC)
+        Logger::Log(Logger::Level::Warning, "[IPC] Falta la cabecera SFCI en el mensaje");
+    req.command_id = m_memory.Read<u32>(cursor + 8);
+    req.payload_offset = cursor + 16;
+    req.payload_size = data_end > cursor + 16 ? static_cast<u32>(data_end - (cursor + 16)) : 0;
+
+    IpcContext ctx(*this, m_memory, req, IpcContext::Protocol::Cmif, domain_message);
+    if (is_control) HandleControlCommand(ctx, state);
+    else            target->Dispatch(ctx);
+    if (ctx.IsHandled()) ctx.WriteResponse(message, state);
+    return Result::Success;
+}
+
+void Kernel::HandleControlCommand(IpcContext& ctx, const std::shared_ptr<SessionState>& state) {
+    const std::string& name = state->root->Name();
+    switch (ctx.CommandId()) {
+        case 0: { // ConvertCurrentObjectToDomain -> id del objeto principal
+            if (!state->is_domain) {
+                state->is_domain = true;
+                state->AddDomainObject(state->root);
+            }
+            const u32 id = state->domain_objects.begin()->first;
+            Logger::Log(Logger::Level::Info, "[IPC] " + name + " convertido a dominio (objeto " + std::to_string(id) + ")");
+            ctx.Push<u32>(id);
+            break;
+        }
+        case 1: { // CopyFromCurrentDomain(id) -> sesion nueva con ese objeto
+            const u32 id = ctx.Pop<u32>();
+            auto it = state->domain_objects.find(id);
+            if (it == state->domain_objects.end()) { ctx.SetResult(Result::InvalidHandle); return; }
+            ctx.PushMoveHandle(CreateSessionHandle(it->second));
+            break;
+        }
+        case 2:   // CloneCurrentObject
+        case 4: { // CloneCurrentObjectEx(tag)
+            ctx.PushMoveHandle(m_handles.Create(std::make_shared<KClientSession>(state)));
+            break;
+        }
+        case 3:   // QueryPointerBufferSize -> tamano del buffer para punteros (descriptores X/C)
+            ctx.Push<u16>(0x8000);
+            break;
+        default:
+            ctx.Unimplemented(name + " (control)");
+            return;
+    }
+    ctx.SetResult(Result::Success);
 }
 
 } // namespace NeXo2::HLE

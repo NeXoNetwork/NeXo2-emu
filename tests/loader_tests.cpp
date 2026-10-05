@@ -75,7 +75,7 @@ TEST(Nro_HelloRunsToExit) {
     CHECK(sys.GetKernel().HasExited());
     const std::string& out = sys.GetKernel().GetDebugOutput();
     CHECK(Contains(out, "Hola desde un NRO en NeXo 2!"));
-    CHECK(Contains(out, "Loader: X1=0xFFFFFFFFFFFFFFFF, entradas de config=4"));
+    CHECK(Contains(out, "Loader: X1=0xFFFFFFFFFFFFFFFF, entradas de config=5"));
     CHECK(Contains(out, "argv: hello.nro"));
     CHECK(Contains(out, "Contador (.data): 42"));
     CHECK(Contains(out, "svcSetHeapSize: rc=0x0, heap en 0x80000000"));
@@ -120,11 +120,11 @@ TEST(Nro_RejectsInvalidFiles) {
 
 TEST(Kernel_UnknownSvcStopsCpu) {
     Core::System sys;
-    const u32 program[] = { 0xD4000441u /* svc #0x22 */ };
+    const u32 program[] = { 0xD4000101u /* svc #0x08 */ };
     sys.LoadRawProgram(program, 1, HLE::Layout::CODE_BASE);
     sys.GetCpu().Run(10);
     CHECK(sys.GetCpu().IsHalted());
-    CHECK(sys.GetCpu().GetHaltReason().find("SendSyncRequestWithUserBuffer") != std::string::npos);
+    CHECK(sys.GetCpu().GetHaltReason().find("CreateThread") != std::string::npos);
     CHECK(std::string(HLE::Kernel::SvcName(0x29)) == "GetInfo");
     CHECK(std::string(HLE::Kernel::SvcName(0x6F)) == "GetSystemInfo");
     CHECK(std::string(HLE::Kernel::SvcName(0x7F)) == "CallSecureMonitor");

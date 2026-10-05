@@ -42,7 +42,7 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 - `X0` = pointer to the loader config list, `X1` = `0xFFFFFFFFFFFFFFFF`.
 - `X30` = exit stub (`svc #0x7`): if the program returns from its entry, it exits cleanly.
 - Config entries given: `MainThreadHandle`, `AppletType` (Application), `Argv`,
-  `SyscallAvailableHint`, `EndOfList` (pointer to "NeXo 2 HLE loader").
+  `SyscallAvailableHint`, `HosVersion` (20.1.0), `EndOfList` (pointer to "NeXo 2 HLE loader").
 
 ## Implemented SVCs
 
@@ -52,10 +52,13 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 | 0x06 | QueryMemory | Fills `MemoryInfo` from the region map (free gaps included). |
 | 0x07 | ExitProcess | Halts the CPU. |
 | 0x0B | SleepThread | No-op (single thread). |
-| 0x16 | CloseHandle | Always succeeds. |
+| 0x16 | CloseHandle | Removes the handle from the handle table. |
 | 0x1E | GetSystemTick | Same counter as `CNTPCT_EL0` (instructions executed). |
 | 0x26 | Break | Halts the CPU (program aborted). |
 | 0x27 | OutputDebugString | Text shown in the "Programa" window and the console. |
+| 0x1F | ConnectToNamedPort | Only "sm:". See [ipc-and-services.md](ipc-and-services.md). |
+| 0x21 | SendSyncRequest | IPC message in TLS. |
+| 0x22 | SendSyncRequestWithUserBuffer | IPC message in a user buffer. |
 | 0x29 | GetInfo | Region addresses/sizes, memory totals, core mask, entropy, program id. |
 
 Any other SVC halts the CPU with its name, e.g. `SVC 0x1F (ConnectToNamedPort) no implementada`.
@@ -71,8 +74,7 @@ checks every line it prints.
 
 ## Next steps
 
-1. **IPC + service manager (`sm:`)**: libnx homebrew starts with
-   `svcConnectToNamedPort("sm:")` and `svcSendSyncRequest`. This is the next wall.
+1. ~~IPC + service manager (`sm:`)~~ done: see [ipc-and-services.md](ipc-and-services.md). Next: `appletOE`, `hid`, `time`, `fsp-srv`.
 2. Threads and synchronization SVCs (`CreateThread`, `WaitSynchronization`, `ArbitrateLock`...).
 3. Permission checks on memory access (today the region map is informational).
 4. SIMD/FP in the CPU (needed by almost every real program).

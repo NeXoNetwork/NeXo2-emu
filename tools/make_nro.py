@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Compila el homebrew de prueba (tests/programs/nro_hello/) y lo empaqueta como NRO:
-    tests/generated/hello.nro
+Compila los homebrew de prueba y los empaqueta como NRO:
+    tests/programs/nro_<nombre>/main.c  ->  tests/generated/<nombre>.nro
 
-No hace falta ejecutarlo para compilar NeXo: el .nro generado ya esta en el repo.
-Solo hay que ejecutarlo si cambias tests/programs/nro_hello/.
+Todos comparten el arranque y el linker script de tests/programs/nro_common/.
+El titulo de cada uno (NACP) sale de title.txt en su carpeta.
+
+No hace falta ejecutarlo para compilar NeXo: los .nro generados ya estan en el repo.
+Solo hay que ejecutarlo si cambias algo en tests/programs/nro_*/.
 
 Requisitos: clang, ld.lld, llvm-objcopy y llvm-nm (LLVM 15 o superior).
     En Windows: winget install LLVM.LLVM
@@ -27,10 +30,10 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SRC = ROOT / "tests" / "programs" / "nro_hello"
-OUTPUT = ROOT / "tests" / "generated" / "hello.nro"
+PROGRAMS = ROOT / "tests" / "programs"
+COMMON = PROGRAMS / "nro_common"
+OUTPUT_DIR = ROOT / "tests" / "generated"
 
-TITLE = "NeXo Hello"
 AUTHOR = "NeXo 2 tests"
 
 CFLAGS = ["--target=aarch64-none-elf", "-march=armv8.2-a", "-O2", "-mgeneral-regs-only",
@@ -50,15 +53,16 @@ def align(v, a):
     return (v + a - 1) & ~(a - 1)
 
 
-def main():
-    for tool in ("clang", "ld.lld", "llvm-objcopy", "llvm-nm", "llvm-readelf"):
-        if not shutil.which(tool):
-            sys.exit(f"No se encuentra '{tool}'. Instala LLVM (ver cabecera de este script).")
+def build_nro(src_dir: pathlib.Path):
+    name = src_dir.name[len("nro_"):]
+    output = OUTPUT_DIR / f"{name}.nro"
+    title_file = src_dir / "title.txt"
+    title = title_file.read_text(encoding="utf-8").strip() if title_file.exists() else name
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         objs = []
-        for src in (SRC / "crt0.S", SRC / "main.c"):
+        for src in (COMMON / "crt0.S", src_dir / "main.c"):
             obj = tmp / (src.name + ".o")
             run(["clang", *CFLAGS, "-c", str(src), "-o", str(obj)])
             objs.append(obj)
@@ -68,8 +72,8 @@ def main():
                 sys.exit(f"{src.name} usa direcciones absolutas (R_AARCH64_ABS64). "
                          "Evita tablas de punteros globales en el codigo de prueba.")
 
-        elf = tmp / "hello.elf"
-        run(["ld.lld", "-T", str(SRC / "link.ld"), "--no-relax", *map(str, objs), "-o", str(elf)])
+        elf = tmp / f"{name}.elf"
+        run(["ld.lld", "-T", str(COMMON / "link.ld"), "--no-relax", *map(str, objs), "-o", str(elf)])
 
         # Direcciones de las secciones y simbolos
         sections = {}
@@ -94,7 +98,7 @@ def main():
         image_size = data_off + data_size
         assert text_off == 0 and ro_off % PAGE == 0 and data_off % PAGE == 0
 
-        raw = tmp / "hello.bin"
+        raw = tmp / f"{name}.bin"
         run(["llvm-objcopy", "-O", "binary", "--remove-section=.bss", str(elf), str(raw)])
         image = bytearray(raw.read_bytes())
         image = image[:image_size] + bytes(max(0, image_size - len(image)))
@@ -104,7 +108,7 @@ def main():
                          b"NRO0", 0, image_size, 0,
                          text_off, text_size, ro_off, ro_size,
                          data_off, data_size, bss_size, 0,
-                         b"NeXo2-test-hello".ljust(32, b"\0"),
+                         f"NeXo2-test-{name}".encode()[:32].ljust(32, b"\0"),
                          0, 0, 0, 0, 0, 0, 0, 0)
     assert len(header) == 0x70
     image[0x10:0x80] = header
@@ -113,15 +117,24 @@ def main():
     nacp = bytearray(0x4000)
     for lang in range(16):
         base = lang * 0x300
-        nacp[base:base + len(TITLE)] = TITLE.encode()
+        nacp[base:base + len(title)] = title.encode()
         nacp[base + 0x200:base + 0x200 + len(AUTHOR)] = AUTHOR.encode()
     nacp[0x3060:0x3065] = b"1.0.0"  # DisplayVersion
     aset = struct.pack("<4sI" "QQ" "QQ" "QQ", b"ASET", 0, 0, 0, 0x38, len(nacp), 0, 0)
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_bytes(bytes(image) + aset + bytes(nacp))
-    print(f"Generado {OUTPUT.relative_to(ROOT)}: imagen {image_size:#x} bytes "
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(bytes(image) + aset + bytes(nacp))
+    print(f"Generado {output.relative_to(ROOT)} (\"{title}\"): imagen {image_size:#x} bytes "
           f"(.text {text_size:#x}, .rodata {ro_size:#x}, .data {data_size:#x}, .bss {bss_size:#x})")
+
+
+def main():
+    for tool in ("clang", "ld.lld", "llvm-objcopy", "llvm-nm", "llvm-readelf"):
+        if not shutil.which(tool):
+            sys.exit(f"No se encuentra '{tool}'. Instala LLVM (ver cabecera de este script).")
+    for src_dir in sorted(PROGRAMS.glob("nro_*")):
+        if src_dir.is_dir() and (src_dir / "main.c").exists():
+            build_nro(src_dir)
 
 
 if __name__ == "__main__":

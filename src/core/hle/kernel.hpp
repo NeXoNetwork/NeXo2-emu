@@ -1,8 +1,11 @@
 #pragma once
+#include <memory>
 #include <string>
 #include "common/types.hpp"
 #include "arm64/interpreter.hpp"
 #include "memory.hpp"
+#include "kernel_objects.hpp"
+#include "service.hpp"
 
 // Kernel HLE (High-Level Emulation) de Horizon.
 //
@@ -38,6 +41,8 @@ namespace Result {
     constexpr u32 OutOfMemory      = 0xD001;
     constexpr u32 InvalidHandle    = 0xE401;
     constexpr u32 InvalidEnumValue = 0xF001;
+    constexpr u32 NotFound         = 0xF201;
+    constexpr u32 InvalidCombination = 0xE801;
 }
 
 // Handles "falsos" que entregamos al programa.
@@ -69,6 +74,20 @@ public:
     // Nombre de una SVC para mensajes ("SetHeapSize"...). "?" si no la conocemos.
     static const char* SvcName(u32 imm);
 
+    // --- IPC y servicios (los usan sm: y el codigo de ipc.cpp) ---
+    ServiceRegistry& Services() { return m_services; }
+    HandleTable&     Handles()  { return m_handles; }
+
+    // Crea una sesion nueva con 'service' y devuelve su handle.
+    u32 CreateSessionHandle(std::shared_ptr<ServiceObject> service);
+
+    // Un servicio ha recibido un comando que no existe: para la CPU con el detalle.
+    void ReportUnimplemented(const std::string& service_name, u32 command_id);
+
+    // Atiende un mensaje IPC que esta en 'message' para la sesion 'handle'.
+    // Devuelve el resultado de la SVC (no el del comando, que va dentro del mensaje).
+    u32 ProcessIpcRequest(u32 handle, u64 message);
+
 private:
     // Cada SVC lee sus argumentos de X0..X7 y deja el resultado en W0 (+ salidas en X1...).
     void SvcSetHeapSize(Core::CPUState& s);
@@ -80,9 +99,19 @@ private:
     void SvcBreak(Core::CPUState& s);
     void SvcOutputDebugString(Core::CPUState& s);
     void SvcGetInfo(Core::CPUState& s);
+    void SvcConnectToNamedPort(Core::CPUState& s);
+    void SvcSendSyncRequest(Core::CPUState& s);
+    void SvcSendSyncRequestWithUserBuffer(Core::CPUState& s);
+
+    // Comandos "Control" de CMIF (dominios, clonar sesiones, tamano de buffer)
+    void HandleControlCommand(IpcContext& ctx, const std::shared_ptr<SessionState>& state);
+    void RegisterDefaultServices();
 
     Core::Memory&      m_memory;
     Core::Interpreter& m_cpu;
+
+    HandleTable     m_handles;
+    ServiceRegistry m_services;
 
     u64  m_heapSize = 0;
     u64  m_imageSize = 0;

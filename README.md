@@ -59,7 +59,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ### Phase 4: OS Kernel & Services (HLE)
 - [~] **Supervisor Call Dispatcher:** HLE kernel with the first SVCs (SetHeapSize, QueryMemory, ExitProcess, OutputDebugString, GetInfo...). Homebrew ABI loader config.
-- [ ] **Service Infrastructure:** Registration and IPC handling for system services (FS, HID, etc.).
+- [~] **Service Infrastructure:** IPC (HIPC/CMIF/TIPC, domains), handle table, `sm:` and `set:sys`. Next: applet, hid, time, fs. See [docs/07-nexo-internals/ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
 - [ ] **Scheduler:** Basic multi-core thread scheduling and synchronization primitives.
 
 ## Development Status

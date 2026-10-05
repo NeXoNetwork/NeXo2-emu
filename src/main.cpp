@@ -263,6 +263,8 @@ int main(int argc, char** argv) {
             ImGui::Text(".text 0x%X  .rodata 0x%X  .data 0x%X  .bss 0x%X",
                         info->header.text_size, info->header.ro_size,
                         info->header.data_size, info->header.bss_size);
+            ImGui::Text("Handles abiertos: %zu (sesiones IPC con servicios, hilo principal...)",
+                        kernel.Handles().Count());
             if (kernel.HasExited())
                 ImGui::TextColored(ImVec4(0, 1, 0, 1), "El programa ha terminado (svcExitProcess)");
         } else {

@@ -59,3 +59,6 @@ externals/*/bin/
 # --- Archivos que genera el programa al ejecutarse ---
 imgui.ini
 Testing/
+
+# --- Homebrew de terceros para pruebas (no se suben al repo) ---
+tests/homebrew/

@@ -30,10 +30,10 @@ HidServer::HidServer() : ServiceObject("hid") {
 }
 
 HidAppletResource::HidAppletResource() : ServiceObject("hid:IAppletResource") {
-    // GetSharedMemoryHandle -> handle "copy" de la memoria compartida de hid.
-    // Va a cero: ningun mando conectado todavia.
+    // GetSharedMemoryHandle -> handle "copy" de la memoria compartida de hid, con
+    // dos mandos conectados (ver hle/input.hpp). La interfaz la actualiza con el teclado.
     RegisterCommand(0, "GetSharedMemoryHandle", [](IpcContext& ctx) {
-        ctx.PushCopyHandle(ctx.GetKernel().CreateSharedMemory("hid", HID_SHARED_MEMORY_SIZE));
+        ctx.PushCopyHandle(ctx.GetKernel().GetHidSharedMemoryHandle());
         ctx.SetResult(Result::Success);
     });
 }

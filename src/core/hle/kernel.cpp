@@ -74,6 +74,8 @@ void Kernel::Reset() {
     m_debugOutput.clear();
     m_handles.Clear();
     m_display.Reset();
+    m_input.Reset();
+    m_hidMemory.reset();
 }
 
 // ============================================================================
@@ -557,6 +559,19 @@ u32 Kernel::CreateSharedMemory(const std::string& name, size_t size, std::shared
     return m_handles.Create(shmem);
 }
 
+u32 Kernel::GetHidSharedMemoryHandle() {
+    if (!m_hidMemory) {
+        m_hidMemory = std::make_shared<KSharedMemory>("hid", HidLayout::SIZE);
+        m_input.InitSharedMemory(m_hidMemory->data);
+    }
+    return m_handles.Create(m_hidMemory);
+}
+
+void Kernel::SetPadInput(const PadInput& pad) {
+    if (!m_hidMemory) return;   // el programa aun no ha pedido la memoria de hid
+    m_input.Update(m_hidMemory->data, m_memory, m_hidMemory->mapped_address, pad);
+}
+
 // svcClearEvent / svcResetSignal(handle = W0)
 void Kernel::SvcClearEvent(CPUState& s) {
     auto ev = m_handles.Get<KEvent>(static_cast<u32>(s.x[0]));
@@ -599,6 +614,7 @@ void Kernel::SvcMapSharedMemory(CPUState& s) {
     if (m_memory.QueryRegion(addr).state != MemoryState::Free) { SetResult(s, Result::InvalidState); return; }
 
     m_memory.WriteBytes(addr, shmem->data.data(), size);
+    shmem->mapped_address = addr;
     const auto perm = (s.x[3] & 2) ? MemoryPermission::ReadWrite : MemoryPermission::Read;
     m_memory.MapRegion(addr, size, MemoryState::Shared, perm, "compartida: " + shmem->name);
     Logger::Log(Logger::Level::Info, "[HLE] svcMapSharedMemory(" + shmem->name + ") en " + Hex(addr));
@@ -607,6 +623,7 @@ void Kernel::SvcMapSharedMemory(CPUState& s) {
 
 // svcUnmapSharedMemory(handle = W0, addr = X1, size = X2)
 void Kernel::SvcUnmapSharedMemory(CPUState& s) {
+    if (auto shmem = m_handles.Get<KSharedMemory>(static_cast<u32>(s.x[0]))) shmem->mapped_address = 0;
     m_memory.UnmapRegion(s.x[1], s.x[2]);
     SetResult(s, Result::Success);
 }

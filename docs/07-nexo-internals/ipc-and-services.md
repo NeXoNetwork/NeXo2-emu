@@ -25,7 +25,7 @@ program:  reads the response from TLS
 | `src/core/hle/services/set.*` | `set:sys` - GetFirmwareVersion / GetFirmwareVersion2 |
 | `src/core/hle/services/apm.*` | `apm` - OpenSession, performance mode/configuration |
 | `src/core/hle/services/applet.*` | `appletOE` -> IApplicationProxy and its sub-interfaces (state, self, window, functions...) |
-| `src/core/hle/services/hid.*` | `hid` - CreateAppletResource, shared memory (0x40000, no controllers yet), Activate*/SetSupported* stubs |
+| `src/core/hle/services/hid.*` | `hid` - CreateAppletResource, shared memory (0x40000) with two connected controllers fed from the PC keyboard/gamepad (see [input.md](input.md)), Activate*/SetSupported* stubs |
 | `src/core/hle/services/time.*` | `time:u/a/s` - clocks, time zone (UTC), shared memory filled with the PC's clock |
 | `src/core/hle/services/fs.*` | `fsp-srv` - SD card backed by a PC folder: IFileSystem (create/delete/rename/open files and folders, entry type, free space), IFile (read/write/size), IDirectory (list) |
 | `src/core/hle/services/vi.*`, `nvdrv.*` | Display: `vi:m/s/u` and `nvdrv` - see [display.md](display.md) |
@@ -85,7 +85,7 @@ formats as libnx; `tests/services_tests.cpp` checks them.
 
 After start-up, the SD card (`fsp-srv` IFileSystem) and the screen (`vi:m`, `nvdrv`, see
 [display.md](display.md)) are implemented too, so a libnx console homebrew runs and draws.
-Still missing: controllers (hid shared memory with real input), threads, audio... Each one
+Controllers work too ([input.md](input.md)). Still missing: threads, audio... Each one
 shows up as a "no implementado" message.
 
 ## SD card (`sdmc:/`)

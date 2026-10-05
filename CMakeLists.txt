@@ -26,6 +26,7 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/hle/ipc.cpp"
     "${SRC_DIR}/core/hle/service.cpp"
     "${SRC_DIR}/core/hle/display.cpp"
+    "${SRC_DIR}/core/hle/input.cpp"
     "${SRC_DIR}/core/hle/services/sm.cpp"
     "${SRC_DIR}/core/hle/services/set.cpp"
     "${SRC_DIR}/core/hle/services/apm.cpp"
@@ -117,6 +118,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/services_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/simd_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/display_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/input_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
     # Carpeta con hello.nro y demas archivos de prueba

@@ -7,6 +7,7 @@
 #include "system.hpp"
 #include "common/logger.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -82,6 +83,68 @@ static void RunSlice(System& sys, double budget_ms) {
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Mandos: teclado y mando del PC -> mando de la Switch
+// ---------------------------------------------------------------------------
+// Teclado (por posicion de la tecla, sirve para cualquier distribucion):
+//   Flechas = cruceta   X = A   Z = B   S = X   A = Y
+//   Q = L   W = R   1 = ZL   2 = ZR   Intro = +   Retroceso = -
+//   T/F/G/H = stick izquierdo   I/J/K/L = stick derecho
+// Mando (SDL, por posicion como en Nintendo): derecha = A, abajo = B, arriba = X, izquierda = Y
+static SDL_Gamepad* g_gamepad = nullptr;
+
+static NeXo2::HLE::PadInput ReadPadInput(bool use_keyboard) {
+    using namespace NeXo2::HLE;
+    PadInput pad;
+    auto stick = [](bool neg, bool pos) { return (pos ? STICK_MAX : 0) - (neg ? STICK_MAX : 0); };
+
+    if (use_keyboard) {
+        const bool* k = SDL_GetKeyboardState(nullptr);
+        const struct { SDL_Scancode key; u64 button; } map[] = {
+            {SDL_SCANCODE_UP, NpadButton::Up},     {SDL_SCANCODE_DOWN, NpadButton::Down},
+            {SDL_SCANCODE_LEFT, NpadButton::Left}, {SDL_SCANCODE_RIGHT, NpadButton::Right},
+            {SDL_SCANCODE_X, NpadButton::A}, {SDL_SCANCODE_Z, NpadButton::B},
+            {SDL_SCANCODE_S, NpadButton::X}, {SDL_SCANCODE_A, NpadButton::Y},
+            {SDL_SCANCODE_Q, NpadButton::L}, {SDL_SCANCODE_W, NpadButton::R},
+            {SDL_SCANCODE_1, NpadButton::ZL}, {SDL_SCANCODE_2, NpadButton::ZR},
+            {SDL_SCANCODE_RETURN, NpadButton::Plus}, {SDL_SCANCODE_BACKSPACE, NpadButton::Minus},
+        };
+        for (const auto& m : map) if (k[m.key]) pad.buttons |= m.button;
+        pad.lx = stick(k[SDL_SCANCODE_F], k[SDL_SCANCODE_H]);
+        pad.ly = stick(k[SDL_SCANCODE_G], k[SDL_SCANCODE_T]);
+        pad.rx = stick(k[SDL_SCANCODE_J], k[SDL_SCANCODE_L]);
+        pad.ry = stick(k[SDL_SCANCODE_K], k[SDL_SCANCODE_I]);
+    }
+
+    if (g_gamepad) {
+        const struct { SDL_GamepadButton b; u64 button; } map[] = {
+            {SDL_GAMEPAD_BUTTON_EAST, NpadButton::A},  {SDL_GAMEPAD_BUTTON_SOUTH, NpadButton::B},
+            {SDL_GAMEPAD_BUTTON_NORTH, NpadButton::X}, {SDL_GAMEPAD_BUTTON_WEST, NpadButton::Y},
+            {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, NpadButton::L}, {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, NpadButton::R},
+            {SDL_GAMEPAD_BUTTON_START, NpadButton::Plus}, {SDL_GAMEPAD_BUTTON_BACK, NpadButton::Minus},
+            {SDL_GAMEPAD_BUTTON_LEFT_STICK, NpadButton::StickL}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK, NpadButton::StickR},
+            {SDL_GAMEPAD_BUTTON_DPAD_UP, NpadButton::Up},     {SDL_GAMEPAD_BUTTON_DPAD_DOWN, NpadButton::Down},
+            {SDL_GAMEPAD_BUTTON_DPAD_LEFT, NpadButton::Left}, {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, NpadButton::Right},
+        };
+        for (const auto& m : map) if (SDL_GetGamepadButton(g_gamepad, m.b)) pad.buttons |= m.button;
+        if (SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)  > 16000) pad.buttons |= NpadButton::ZL;
+        if (SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) pad.buttons |= NpadButton::ZR;
+        // Ejes de SDL: -32768..32767 con Y hacia abajo. En la Switch Y va hacia arriba.
+        auto axis = [](Sint16 v, bool invert) {
+            int x = invert ? -int(v) : int(v);
+            if (x > -6000 && x < 6000) return 0;                 // zona muerta
+            return std::clamp(x, -STICK_MAX, STICK_MAX);
+        };
+        const s32 lx = axis(SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_LEFTX), false);
+        const s32 ly = axis(SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_LEFTY), true);
+        const s32 rx = axis(SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_RIGHTX), false);
+        const s32 ry = axis(SDL_GetGamepadAxis(g_gamepad, SDL_GAMEPAD_AXIS_RIGHTY), true);
+        if (lx || ly) { pad.lx = lx; pad.ly = ly; }
+        if (rx || ry) { pad.rx = rx; pad.ry = ry; }
+    }
+    return pad;
+}
+
 // Nombre legible del tipo de zona de memoria (MemoryState de Horizon)
 static const char* StateName(NeXo2::Core::MemoryState s) {
     using NeXo2::Core::MemoryState;
@@ -115,7 +178,7 @@ static void LogUi(const std::string& what) {
 
 int main(int argc, char** argv) {
     NeXo2::Common::Logger::EnableFile("nexo2.log");
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
         SDL_Log("Error inicializando SDL: %s", SDL_GetError());
         return -1;
     }
@@ -180,6 +243,17 @@ int main(int argc, char** argv) {
                 LogUi("Clic raton en (" + std::to_string((int)event.button.x) + ", " +
                       std::to_string((int)event.button.y) + ")");
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) LogUi("Tecla F5");
+            // Mando del PC: usamos el primero que se conecte
+            if (event.type == SDL_EVENT_GAMEPAD_ADDED && !g_gamepad) {
+                g_gamepad = SDL_OpenGamepad(event.gdevice.which);
+                if (g_gamepad) LogUi(std::string("Mando conectado: ") + SDL_GetGamepadName(g_gamepad));
+            }
+            if (event.type == SDL_EVENT_GAMEPAD_REMOVED && g_gamepad &&
+                SDL_GetGamepadID(g_gamepad) == event.gdevice.which) {
+                SDL_CloseGamepad(g_gamepad);
+                g_gamepad = nullptr;
+                LogUi("Mando desconectado");
+            }
             // F5 = Run / Pausa
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5 && !event.key.repeat)
                 SetRunning(sys, !g_emuRunning);
@@ -192,7 +266,11 @@ int main(int argc, char** argv) {
         }
 
         // La CPU emulada corre ~12 ms por fotograma (el resto es para la interfaz)
-        if (g_emuRunning) RunSlice(sys, 12.0);
+        // Antes, los mandos: el teclado solo cuenta si no se esta escribiendo en la interfaz
+        if (g_emuRunning) {
+            sys.GetKernel().SetPadInput(ReadPadInput(!ImGui::GetIO().WantCaptureKeyboard));
+            RunSlice(sys, 12.0);
+        }
 
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -359,7 +437,16 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowSize(ImVec2(660 * main_scale, 420 * main_scale), ImGuiCond_FirstUseEver);
         ImGui::Begin("Pantalla");
         if (frame.count > 0 && screenTexture) {
-            ImGui::Text("Imagenes: %llu", (unsigned long long)frame.count);
+            ImGui::Text("Imagenes: %llu   Mando: %s", (unsigned long long)frame.count,
+                        g_gamepad ? SDL_GetGamepadName(g_gamepad) : "teclado");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Flechas = cruceta   X = A   Z = B   S = X   A = Y\n"
+                                  "Q = L   W = R   1 = ZL   2 = ZR\n"
+                                  "Intro = +   Retroceso = -\n"
+                                  "T/F/G/H = stick izquierdo   I/J/K/L = stick derecho\n"
+                                  "(haz clic fuera de los campos de texto para que el teclado vaya al juego)");
             // Escalar a lo que quepa en la ventana manteniendo 16:9
             const ImVec2 avail = ImGui::GetContentRegionAvail();
             float w = avail.x, h = avail.x * 9.0f / 16.0f;
@@ -382,6 +469,7 @@ int main(int argc, char** argv) {
 
     if (logoTexture) SDL_DestroyTexture(logoTexture);
     if (screenTexture) SDL_DestroyTexture(screenTexture);
+    if (g_gamepad) SDL_CloseGamepad(g_gamepad);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

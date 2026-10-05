@@ -49,19 +49,32 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 | SVC | Name | Notes |
 | :--- | :--- | :--- |
 | 0x01 | SetHeapSize | Size must be a multiple of 2 MB. Heap at `0x80000000`. |
+| 0x02 | SetMemoryPermission | Changes the permission in the region map. |
+| 0x03 | SetMemoryAttribute | Only checks alignment (no caches to emulate). |
 | 0x06 | QueryMemory | Fills `MemoryInfo` from the region map (free gaps included). |
 | 0x07 | ExitProcess | Halts the CPU. |
 | 0x0B | SleepThread | No-op (single thread). |
+| 0x0C | GetThreadPriority | Always 44 (normal). |
+| 0x10 | GetCurrentProcessorNumber | Always core 0. |
+| 0x11 | SignalEvent | Success (no threads to wake). |
+| 0x12 / 0x17 | ClearEvent / ResetSignal | Clears a `KEvent`. |
+| 0x13 / 0x14 | MapSharedMemory / UnmapSharedMemory | Copies the content in and remembers the address (hid updates it live). |
+| 0x15 | CreateTransferMemory | Returns a handle; the memory stays in place (used by nvdrv). |
 | 0x16 | CloseHandle | Removes the handle from the handle table. |
+| 0x18 | WaitSynchronization | Returns at once if an event is signaled; an endless wait halts the CPU. |
+| 0x1A / 0x1B | ArbitrateLock / ArbitrateUnlock | Single thread: lock always succeeds, unlock clears the mutex word. |
+| 0x1C | WaitProcessWideKeyAtomic | Returns "timed out" with the mutex still owned (nobody else can signal). |
+| 0x1D | SignalProcessWideKey | Success (no threads to wake). |
 | 0x1E | GetSystemTick | Same counter as `CNTPCT_EL0` (instructions executed). |
-| 0x26 | Break | Halts the CPU (program aborted). |
-| 0x27 | OutputDebugString | Text shown in the "Programa" window and the console. |
 | 0x1F | ConnectToNamedPort | Only "sm:". See [ipc-and-services.md](ipc-and-services.md). |
 | 0x21 | SendSyncRequest | IPC message in TLS. |
 | 0x22 | SendSyncRequestWithUserBuffer | IPC message in a user buffer. |
+| 0x24 / 0x25 | GetProcessId / GetThreadId | Fixed ids. |
+| 0x26 | Break | Halts the CPU (program aborted). |
+| 0x27 | OutputDebugString | Text shown in the "Programa" window and the console. |
 | 0x29 | GetInfo | Region addresses/sizes, memory totals, core mask, entropy, program id. |
 
-Any other SVC halts the CPU with its name, e.g. `SVC 0x1F (ConnectToNamedPort) no implementada`.
+Any other SVC halts the CPU with its name, e.g. `SVC 0x08 (CreateThread) no implementada`.
 That message tells you exactly what to implement next.
 
 ## Test homebrew
@@ -74,7 +87,10 @@ checks every line it prints.
 
 ## Next steps
 
-1. ~~IPC + service manager (`sm:`)~~ done: see [ipc-and-services.md](ipc-and-services.md). Next: `appletOE`, `hid`, `time`, `fsp-srv`.
-2. Threads and synchronization SVCs (`CreateThread`, `WaitSynchronization`, `ArbitrateLock`...).
+1. Speed: decode cache in the interpreter, then the Ballistic JIT.
+2. Real threads: `CreateThread`/`StartThread`, a scheduler, and proper waits in the
+   synchronization SVCs above (today they assume a single thread).
 3. Permission checks on memory access (today the region map is informational).
-4. SIMD/FP in the CPU (needed by almost every real program).
+
+Done since this page was first written: IPC and services, SIMD/FP, display, SD card and
+controllers (see the other pages in this folder).

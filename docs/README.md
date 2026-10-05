@@ -16,7 +16,7 @@ Build instructions are in [../BUILDING.md](../BUILDING.md).
 | [04-formats](04-formats/README.md) | NCA, NSO, NRO, NPDM... | Phase 1 (VFS), loaders |
 | [05-switch2-system](05-switch2-system/README.md) | Firmware versions, compatibility mode | Timers, Switch 1 titles |
 | [06-resources](06-resources/README.md) | ARM / NVIDIA / Vulkan manuals, tools | All |
-| [07-nexo-internals](07-nexo-internals/README.md) | How NeXo's own code works (CPU interpreter, tests) | Phase 2 |
+| [07-nexo-internals](07-nexo-internals/README.md) | How NeXo's own code works: CPU, loader + kernel, IPC/services, display, input | All implemented parts |
 
 Each folder has a `README.md` with Switchbrew links plus local notes.
 
@@ -25,8 +25,10 @@ Each folder has a `README.md` with Switchbrew links plus local notes.
 1. **CPU** (`src/core/arm64`): 07-nexo-internals/cpu-interpreter → 01-hardware/t239-soc → 06-resources (ARM manuals) → 02-horizon-os/svc
 2. **Memory** (`src/core/memory`): 02-horizon-os/memory-layout
 3. **Loading a program**: 04-formats/nro → 04-formats/nso
-4. **HLE**: 03-services-ipc/hipc → 03-services-ipc/services
-5. **Timers / compatibility**: 05-switch2-system/compatibility-mode
+4. **HLE**: 07-nexo-internals/ipc-and-services → 03-services-ipc/hipc → 03-services-ipc/services
+5. **Screen**: 07-nexo-internals/display
+6. **Controllers**: 07-nexo-internals/input
+7. **Timers / compatibility**: 05-switch2-system/compatibility-mode
 
 ## Why the OS pages count as "Switch 2"
 

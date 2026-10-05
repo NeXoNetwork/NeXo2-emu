@@ -69,6 +69,7 @@ struct KEvent final : KObject {
 struct KSharedMemory final : KObject {
     std::string name;
     std::vector<u8> data;
+    u64 mapped_address = 0;   // donde la mapeo el programa (0 = sin mapear)
     KSharedMemory(std::string n, size_t size) : name(std::move(n)), data(size, 0) {}
     const char* TypeName() const override { return "KSharedMemory"; }
 };

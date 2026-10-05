@@ -8,6 +8,7 @@
 #include "kernel_objects.hpp"
 #include "service.hpp"
 #include "display.hpp"
+#include "input.hpp"
 
 // Kernel HLE (High-Level Emulation) de Horizon.
 //
@@ -101,6 +102,11 @@ public:
     void SetSdmcRoot(const std::filesystem::path& root) { m_sdmcRoot = root; }
     const std::filesystem::path& GetSdmcRoot() const { return m_sdmcRoot; }
 
+    // Mandos: memoria compartida de hid (una por proceso) y estado nuevo de los botones
+    u32  GetHidSharedMemoryHandle();
+    void SetPadInput(const PadInput& pad);
+    const InputState& GetInput() const { return m_input; }
+
     // Objetos que los servicios entregan como handles "copy"
     u32 CreateEvent(const std::string& name, bool signaled = false);
     // Devuelve el handle y deja en 'out' el objeto para rellenar su contenido.
@@ -136,6 +142,8 @@ private:
     HandleTable     m_handles;
     ServiceRegistry m_services;
     Display         m_display;
+    InputState      m_input;
+    std::shared_ptr<KSharedMemory> m_hidMemory;
     std::filesystem::path m_sdmcRoot = "sdmc";
 
     u64  m_heapSize = 0;

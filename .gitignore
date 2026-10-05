@@ -55,3 +55,7 @@ desktop.ini
 # pero ignoramos cualquier basura que se genere dentro de ellos.
 externals/*/build/
 externals/*/bin/
+
+# --- Archivos que genera el programa al ejecutarse ---
+imgui.ini
+Testing/

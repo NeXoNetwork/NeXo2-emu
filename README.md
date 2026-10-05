@@ -24,8 +24,10 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 * `src/common/`: Utilities, thread-safe logging, and global types.
 * `src/core/arm64/`: CPU execution engine and state management.
 * `tests/`: CPU tests and the ARM64/C test programs they run.
-* `src/core/memory/`: Virtual Memory Manager (VMM).
-* `src/core/hle/`: High-Level Emulation (Kernel and OS Services).
+* `src/core/memory/`: Virtual Memory Manager (VMM) and memory region map.
+* `src/core/loader/`: Executable loaders (NRO).
+* `src/core/system.hpp`: `System` class tying memory, CPU, kernel and loader together.
+* `src/core/hle/`: High-Level Emulation (Kernel SVCs; OS services later).
 * `src/video_core/`: Vulkan implementation and hardware renderer.
 * `docs/`: Hardware and OS documentation — start at [docs/README.md](docs/README.md).
 * `externals/`: Third-party dependencies (ballistic, SDL3, etc.).
@@ -39,6 +41,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 - [ ] **Logging Framework:** Implementation of a high-performance, thread-safe logging system.
 - [ ] **Memory Management Unit:** Development of a VMM with support for 4KB and 64KB page granularity.
 - [ ] **Virtual File System (VFS):** Initial support for parsing NCA and HFS2 container formats.
+- [x] **NRO Loader:** Loads homebrew `.nro` files (segments, memory map, NACP title). See [docs/07-nexo-internals/nro-loader-and-hle.md](docs/07-nexo-internals/nro-loader-and-hle.md).
 - [ ] **Command Line Interface:** Robust argument parsing for debugging and trace orchestration.
 
 ### Phase 2: CPU Emulation (ARM64)
@@ -55,7 +58,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 - [ ] **Shader Pipeline:** Preliminary research into Ampere microcode-to-SPIR-V translation.
 
 ### Phase 4: OS Kernel & Services (HLE)
-- [ ] **Supervisor Call Dispatcher:** Interrupt handling system for HLE syscall interception.
+- [~] **Supervisor Call Dispatcher:** HLE kernel with the first SVCs (SetHeapSize, QueryMemory, ExitProcess, OutputDebugString, GetInfo...). Homebrew ABI loader config.
 - [ ] **Service Infrastructure:** Registration and IPC handling for system services (FS, HID, etc.).
 - [ ] **Scheduler:** Basic multi-core thread scheduling and synchronization primitives.
 

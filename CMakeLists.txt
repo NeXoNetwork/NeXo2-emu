@@ -10,7 +10,7 @@ set(IMGUI_DIR "${EXT_DIR}/imgui")
 
 option(NEXO2_BUILD_TESTS "Compilar los tests de la CPU (nexo2_tests)" ON)
 
-# 1a. Nucleo del emulador (CPU + memoria) como libreria estatica.
+# 1a. Nucleo del emulador (CPU, memoria, cargador NRO, kernel HLE) como libreria estatica.
 #     Asi lo usan tanto el ejecutable como los tests, sin compilarlo dos veces.
 add_library(nexo2_core STATIC
     "${SRC_DIR}/core/arm64/interpreter.cpp"
@@ -18,6 +18,9 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/arm64/interpreter_dp_reg.cpp"
     "${SRC_DIR}/core/arm64/interpreter_branch.cpp"
     "${SRC_DIR}/core/arm64/interpreter_ldst.cpp"
+    "${SRC_DIR}/core/loader/nro.cpp"
+    "${SRC_DIR}/core/hle/kernel.cpp"
+    "${SRC_DIR}/core/system.cpp"
 )
 target_include_directories(nexo2_core PUBLIC
     "${SRC_DIR}"
@@ -91,8 +94,15 @@ endif()
 #    Ejecutar:  ctest -C Release --output-on-failure
 if(NEXO2_BUILD_TESTS)
     enable_testing()
-    add_executable(nexo2_tests "${CMAKE_SOURCE_DIR}/tests/cpu_tests.cpp")
+    add_executable(nexo2_tests
+        "${CMAKE_SOURCE_DIR}/tests/test_main.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/cpu_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/loader_tests.cpp"
+    )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
+    # Carpeta con hello.nro y demas archivos de prueba
+    target_compile_definitions(nexo2_tests PRIVATE
+        NEXO2_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/generated")
     target_link_libraries(nexo2_tests PRIVATE nexo2_core)
     add_test(NAME cpu_tests COMMAND nexo2_tests)
 endif()

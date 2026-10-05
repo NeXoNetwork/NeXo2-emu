@@ -3,54 +3,18 @@
 // Cada test carga un programa de tests/programs/ en memoria, lo ejecuta en el
 // interprete hasta llegar a "brk #0" y comprueba los registros/memoria.
 //
-// Compilar y ejecutar (desde la carpeta build):
-//     cmake --build . --config Release --target nexo2_tests
-//     ctest -C Release --output-on-failure      (o ejecutar nexo2_tests.exe directamente)
+// Compilar y ejecutar: ver BUILDING.md (seccion "Run the tests").
 
-#include <cstdio>
 #include <cstring>
-#include <functional>
 #include <string>
-#include <vector>
 
+#include "test_framework.hpp"
 #include "arm64/interpreter.hpp"
 #include "memory.hpp"
 #include "generated/test_programs.hpp"
 
 using namespace NeXo2::Core;
 namespace P = NeXo2::Tests::Programs;
-
-// ---------------------------------------------------------------------------
-// Mini framework de tests (sin dependencias externas)
-// ---------------------------------------------------------------------------
-static int g_failures = 0;
-static int g_checks   = 0;
-
-#define CHECK_EQ(actual, expected)                                                       \
-    do {                                                                                 \
-        ++g_checks;                                                                      \
-        const unsigned long long a_ = (unsigned long long)(actual);                      \
-        const unsigned long long e_ = (unsigned long long)(expected);                    \
-        if (a_ != e_) {                                                                  \
-            ++g_failures;                                                                \
-            std::printf("    FALLO %s:%d  %s = 0x%llX, esperado 0x%llX\n",               \
-                        __FILE__, __LINE__, #actual, a_, e_);                            \
-        }                                                                                \
-    } while (0)
-
-#define CHECK(cond)                                                                      \
-    do {                                                                                 \
-        ++g_checks;                                                                      \
-        if (!(cond)) {                                                                   \
-            ++g_failures;                                                                \
-            std::printf("    FALLO %s:%d  %s\n", __FILE__, __LINE__, #cond);             \
-        }                                                                                \
-    } while (0)
-
-struct TestCase { const char* name; std::function<void()> fn; };
-static std::vector<TestCase>& Registry() { static std::vector<TestCase> r; return r; }
-struct Registrar { Registrar(const char* n, std::function<void()> f) { Registry().push_back({n, std::move(f)}); } };
-#define TEST(name) static void name(); static Registrar reg_##name(#name, name); static void name()
 
 // ---------------------------------------------------------------------------
 // Entorno de ejecucion: memoria + CPU con un programa cargado
@@ -321,20 +285,4 @@ TEST(CompiledC_HashFnv1a) {
     m.mem.WriteBytes(DATA_BASE, data, sizeof(data) - 1);
     CHECK_EQ(m.Call(P::c_functions_hash_fnv1a, {DATA_BASE, sizeof(data) - 1}),
              Host::fnv1a(data, sizeof(data) - 1));
-}
-
-// ---------------------------------------------------------------------------
-int main() {
-    std::printf("NeXo 2 - tests de la CPU ARM64\n\n");
-    int failed_tests = 0;
-    for (const auto& t : Registry()) {
-        const int before = g_failures;
-        t.fn();
-        const bool ok = (g_failures == before);
-        if (!ok) ++failed_tests;
-        std::printf("[%s] %s\n", ok ? " OK " : "FAIL", t.name);
-    }
-    std::printf("\n%zu tests, %d comprobaciones, %d fallos\n",
-                Registry().size(), g_checks, g_failures);
-    return failed_tests == 0 ? 0 : 1;
 }

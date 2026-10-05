@@ -3,17 +3,19 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
-#include "arm64/interpreter.hpp"
 #include "arm64/jit_ballistic.hpp"
-#include "core/memory/memory.hpp"
+#include "system.hpp"
+#include "common/logger.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
 
 using NeXo2::Core::BallisticJit;
-using NeXo2::Core::Interpreter;
-using NeXo2::Core::Memory;
+using NeXo2::Core::System;
 
-// Programa ARM64 de ejemplo que se carga en memoria en 0x80000000.
+// Programa ARM64 de ejemplo (se usa si no se abre ningun NRO).
 // Suma 1..10 con un bucle y llama a una funcion que calcula Fibonacci(20).
 // Al terminar: X0 = 55 (0x37) y X3 = 6765 (0x1A6D).
 // (Para generar codigo maquina asi, ver tools/asm2cpp.py y tests/programs/.)
@@ -43,19 +45,65 @@ alignas(16) static const uint32_t g_demo_program[] = {
     0xD2824680u, 0xD2800841u, 0xD29FE002u,
 };
 
-static void LoadProgram(Memory& mem) {
-    for (unsigned i = 0; i < sizeof(g_program) / sizeof(g_program[0]); ++i)
-        mem.Write<uint32_t>(PROG_BASE + i * 4, g_program[i]);
+static void LoadDemo(System& sys) {
+    sys.LoadRawProgram(g_program, sizeof(g_program) / sizeof(g_program[0]), PROG_BASE);
 }
 
-int main(int, char**) {
+// Ejecuta hasta que la CPU se pare y lo apunta en la consola.
+static void RunProgram(System& sys) {
+    auto& cpu = sys.GetCpu();
+    const unsigned long long n = cpu.Run(50'000'000);
+    NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
+        "[UI] Run: " + std::to_string(n) + " instrucciones ejecutadas. " +
+        (cpu.IsHalted() ? cpu.GetHaltReason() : std::string("(limite alcanzado)")));
+}
+
+// Nombre legible del tipo de zona de memoria (MemoryState de Horizon)
+static const char* StateName(NeXo2::Core::MemoryState s) {
+    using NeXo2::Core::MemoryState;
+    switch (s) {
+        case MemoryState::Free:         return "Libre";
+        case MemoryState::Static:       return "Static";
+        case MemoryState::Code:         return "Code";
+        case MemoryState::CodeData:     return "CodeData";
+        case MemoryState::Normal:       return "Heap";
+        case MemoryState::Stack:        return "Pila";
+        case MemoryState::ThreadLocal:  return "TLS";
+        case MemoryState::Inaccessible: return "Inaccesible";
+    }
+    return "?";
+}
+
+static const char* PermName(NeXo2::Core::MemoryPermission p) {
+    switch (static_cast<uint32_t>(p)) {
+        case 1:  return "R--";
+        case 3:  return "RW-";
+        case 5:  return "R-X";
+        default: return "---";
+    }
+}
+
+// Apunta en el log cada boton pulsado (para depurar la interfaz)
+static void LogUi(const std::string& what) {
+    NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info, "[UI] " + what);
+}
+
+int main(int argc, char** argv) {
+    NeXo2::Common::Logger::EnableFile("nexo2.log");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         SDL_Log("Error inicializando SDL: %s", SDL_GetError());
         return -1;
     }
 
-    SDL_Window* window = SDL_CreateWindow("NeXo 2 | 0.0.0.1", 1280, 720, SDL_WINDOW_RESIZABLE);
+    // Escala de pantalla de Windows (100% = 1.0, 125% = 1.25...). Sin tenerla en
+    // cuenta, la interfaz se ve pequena y los clics del raton caen en otro sitio.
+    float main_scale = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
+    if (main_scale <= 0.0f) main_scale = 1.0f;
+    LogUi("Escala de pantalla: " + std::to_string(main_scale));
+    SDL_Window* window = SDL_CreateWindow("NeXo 2 | 0.0.0.2", (int)(1400 * main_scale), (int)(800 * main_scale),
+                                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
+    SDL_SetRenderVSync(renderer, 1); // no dibujar mas rapido que la pantalla (ahorra CPU)
 
     SDL_Texture* logoTexture = nullptr;
     if (SDL_Surface* logoSurface = SDL_LoadBMP("assets/logo.bmp")) {
@@ -63,14 +111,25 @@ int main(int, char**) {
         SDL_DestroySurface(logoSurface);
     }
 
-    Memory       mem;
-    LoadProgram(mem);        // el programa vive en memoria antes de ejecutar
-    Interpreter  cpu(mem);   // PC arranca en 0x80000000
+    // --- La "consola" emulada ---
+    System sys;
     BallisticJit jit;
     int lastIrCount = -1;
 
+    // Ruta del NRO: la de la linea de comandos o el homebrew de prueba
+    char nroPath[512] = "tests/generated/hello.nro";
+    if (argc > 1) {
+        std::snprintf(nroPath, sizeof(nroPath), "%s", argv[1]);
+        if (!sys.LoadNroFile(nroPath)) LoadDemo(sys);
+    } else {
+        LoadDemo(sys);
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.ScaleAllSizes(main_scale);   // botones, margenes... a la escala de la pantalla
+    style.FontScaleDpi = main_scale;   // texto a la escala de la pantalla
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
@@ -80,15 +139,32 @@ int main(int, char**) {
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) running = false;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+                LogUi("Clic raton en (" + std::to_string((int)event.button.x) + ", " +
+                      std::to_string((int)event.button.y) + ")");
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) LogUi("Tecla F5");
+            // F5 = Run
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) RunProgram(sys);
+            // Arrastrar un .nro a la ventana lo carga
+            if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) {
+                std::snprintf(nroPath, sizeof(nroPath), "%s", event.drop.data);
+                sys.LoadNroFile(nroPath);
+            }
         }
 
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        // Tamano inicial de la ventana (solo la primera vez; luego se puede redimensionar)
-        ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(760, 640), ImGuiCond_FirstUseEver);
+        auto& cpu = sys.GetCpu();
+        auto& mem = sys.GetMemory();
+        auto& kernel = sys.GetKernel();
+
+        // =====================================================================
+        //  Ventana 1: CPU
+        // =====================================================================
+        ImGui::SetNextWindowPos(ImVec2(20 * main_scale, 20 * main_scale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(760 * main_scale, 640 * main_scale), ImGuiCond_FirstUseEver);
         ImGui::Begin("NeXo 2 Diagnostics");
 
         auto Tick = [](const char* label, bool ok) {
@@ -98,6 +174,7 @@ int main(int, char**) {
 
         Tick("ARM64 Interpreter", true);
         Tick("Memory (paged VMM)", mem.IsReady());
+        Tick("NRO Loader + HLE Kernel (SVC basicas)", true);
         Tick("JIT: Ballistic (IR front-end)", jit.IsReady());
         Tick("SDL3 Graphics Driver", true);
         Tick("Vulkan Core", false);
@@ -125,11 +202,11 @@ int main(int, char**) {
         ImGui::Text("Paginas RAM activas: %zu (%.2f MB)",
                     mem.AllocatedPages(), mem.AllocatedBytes() / (1024.0 * 1024.0));
 
-        if (ImGui::Button("Step CPU")) cpu.Step();
+        if (ImGui::Button("Step CPU")) { LogUi("Boton Step CPU"); cpu.Step(); }
         ImGui::SameLine();
-        if (ImGui::Button("Reset CPU")) cpu.Reset();
+        if (ImGui::Button("Reiniciar programa")) { LogUi("Boton Reiniciar programa"); sys.Restart(); }
         ImGui::SameLine();
-        if (ImGui::Button("Run (hasta parar)")) cpu.Run(1'000'000);
+        if (ImGui::Button("Run (hasta parar)")) { LogUi("Boton Run (hasta parar)"); RunProgram(sys); }
 
         ImGui::Separator();
         ImGui::Text("Ballistic JIT (traduce ARM64 -> IR; sin ejecucion todavia)");
@@ -143,15 +220,88 @@ int main(int, char**) {
 
         if (logoTexture) {
             ImGui::Separator();
-            ImGui::Text("Engine Logo:");
             ImGui::Image((ImTextureID)(intptr_t)logoTexture, ImVec2(150, 75));
         }
+        ImGui::End();
 
+        // =====================================================================
+        //  Ventana 2: Programa cargado (NRO), salida y mapa de memoria
+        // =====================================================================
+        ImGui::SetNextWindowPos(ImVec2(800 * main_scale, 20 * main_scale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(580 * main_scale, 760 * main_scale), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Programa");
+
+        ImGui::TextWrapped("Abre un homebrew .nro (o arrastralo a la ventana):");
+        ImGui::SetNextItemWidth(-110);
+        ImGui::InputText("##ruta", nroPath, sizeof(nroPath));
+        ImGui::SameLine();
+        if (ImGui::Button("Cargar NRO", ImVec2(-1, 0))) { LogUi("Boton Cargar NRO"); sys.LoadNroFile(nroPath); }
+        if (ImGui::Button("Cargar demo")) { LogUi("Boton Cargar demo"); LoadDemo(sys); }
+        // Controles tambien aqui, para no depender de la otra ventana
+        ImGui::SameLine();
+        if (ImGui::Button("Run")) { LogUi("Boton Run"); RunProgram(sys); }
+        ImGui::SameLine();
+        if (ImGui::Button("Step")) { LogUi("Boton Step"); cpu.Step(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Reiniciar")) { LogUi("Boton Reiniciar"); sys.Restart(); }
+        if (cpu.IsHalted())
+            ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "CPU parada: %s", cpu.GetHaltReason().c_str());
+        else
+            ImGui::TextDisabled("Listo para ejecutar (%llu instrucciones)",
+                                (unsigned long long)cpu.GetInstructionCount());
+        if (!sys.GetLastError().empty())
+            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "%s", sys.GetLastError().c_str());
+
+        ImGui::Separator();
+        if (const auto* info = sys.GetNroInfo()) {
+            ImGui::Text("Archivo: %s", sys.GetProgramName().c_str());
+            if (!info->title.empty())
+                ImGui::Text("Titulo:  %s  (%s)", info->title.c_str(), info->author.c_str());
+            ImGui::Text("Cargado en 0x%llX, entrada 0x%llX, tamano 0x%llX",
+                        (unsigned long long)info->base, (unsigned long long)info->entry,
+                        (unsigned long long)info->image_size);
+            ImGui::Text(".text 0x%X  .rodata 0x%X  .data 0x%X  .bss 0x%X",
+                        info->header.text_size, info->header.ro_size,
+                        info->header.data_size, info->header.bss_size);
+            if (kernel.HasExited())
+                ImGui::TextColored(ImVec4(0, 1, 0, 1), "El programa ha terminado (svcExitProcess)");
+        } else {
+            ImGui::Text("Programa: %s", sys.GetProgramName().c_str());
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Salida del programa (svcOutputDebugString):");
+        ImGui::BeginChild("salida", ImVec2(0, 260), ImGuiChildFlags_Borders);
+        ImGui::TextUnformatted(kernel.GetDebugOutput().c_str());
+        if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
+        ImGui::EndChild();
+
+        ImGui::Separator();
+        ImGui::Text("Mapa de memoria:");
+        if (ImGui::BeginTable("memmap", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                           ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("Inicio");
+            ImGui::TableSetupColumn("Tamano");
+            ImGui::TableSetupColumn("Tipo / permisos");
+            ImGui::TableSetupColumn("Nombre");
+            ImGui::TableHeadersRow();
+            for (const auto& [base, r] : mem.Regions()) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::Text("%010llX", (unsigned long long)r.base);
+                ImGui::TableNextColumn(); ImGui::Text("%llX", (unsigned long long)r.size);
+                ImGui::TableNextColumn(); ImGui::Text("%s %s", StateName(r.state), PermName(r.perm));
+                ImGui::TableNextColumn(); ImGui::Text("%s", r.name.c_str());
+            }
+            ImGui::EndTable();
+        }
         ImGui::End();
 
         SDL_SetRenderDrawColor(renderer, 10, 10, 15, 255);
         SDL_RenderClear(renderer);
         ImGui::Render();
+        // Dibujar en pixeles reales (pantallas con escala != 100%)
+        const ImGuiIO& io = ImGui::GetIO();
+        SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
     }

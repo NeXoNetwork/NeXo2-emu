@@ -40,10 +40,23 @@ ctest -C Release --output-on-failure
 
 Or run `Release\nexo2_tests.exe` directly to see every test.
 
-## 5. (Optional) Regenerate the test programs
+## 5. Run a homebrew (.nro)
+
+From the project root (so `assets/` and `tests/` are found):
+
+```cmd
+build\Release\NeXo2.exe tests\generated\hello.nro
+```
+
+Or start `NeXo2.exe` and drag a `.nro` file onto the window, or use the
+"Cargar NRO" button. Only very simple homebrew runs for now: anything built
+with libnx needs IPC services that are not emulated yet.
+
+## 6. (Optional) Regenerate the test programs
 
 Only needed if you change `tests/programs/`. Requires LLVM (`winget install LLVM.LLVM`):
 
 ```cmd
-python tools/asm2cpp.py
+python tools/asm2cpp.py     :: tests/programs/*.S and *.c  -> tests/generated/test_programs.hpp
+python tools/make_nro.py    :: tests/programs/nro_hello/   -> tests/generated/hello.nro
 ```

@@ -5,9 +5,11 @@
 #include "services/applet.hpp"
 #include "services/fs.hpp"
 #include "services/hid.hpp"
+#include "services/nvdrv.hpp"
 #include "services/set.hpp"
 #include "services/sm.hpp"
 #include "services/time.hpp"
+#include "services/vi.hpp"
 #include "common/logger.hpp"
 #include <cstdio>
 
@@ -56,6 +58,13 @@ void Kernel::RegisterDefaultServices() {
     m_services.Register("time:a",   [] { return std::make_shared<TimeService>("time:a"); });
     m_services.Register("time:s",   [] { return std::make_shared<TimeService>("time:s"); });
     m_services.Register("fsp-srv",  [] { return std::make_shared<FileSystemProxy>(); });
+    // Pantalla: vi (capas y cola de buffers) + nvdrv (memoria de la GPU)
+    m_services.Register("vi:m",     [] { return std::make_shared<ViRoot>("vi:m", 2); });
+    m_services.Register("vi:s",     [] { return std::make_shared<ViRoot>("vi:s", 1); });
+    m_services.Register("vi:u",     [] { return std::make_shared<ViRoot>("vi:u", 0); });
+    m_services.Register("nvdrv",    [] { return std::make_shared<NvDrv>("nvdrv"); });
+    m_services.Register("nvdrv:a",  [] { return std::make_shared<NvDrv>("nvdrv:a"); });
+    m_services.Register("nvdrv:s",  [] { return std::make_shared<NvDrv>("nvdrv:s"); });
 }
 
 void Kernel::Reset() {
@@ -64,6 +73,7 @@ void Kernel::Reset() {
     m_exited = false;
     m_debugOutput.clear();
     m_handles.Clear();
+    m_display.Reset();
 }
 
 // ============================================================================
@@ -163,7 +173,26 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
         case 0x18: SvcWaitSynchronization(s); return;
         case 0x24: SetResult(s, Result::Success); s.x[1] = 0x51; return; // GetProcessId
         case 0x25: SetResult(s, Result::Success); s.x[1] = 1;    return; // GetThreadId
+        case 0x15: {
+            // CreateTransferMemory(addr = X1, size = X2, perm = W3) -> W1 = handle.
+            // La memoria sigue en el proceso; el servicio (nvdrv) solo guarda el handle.
+            if (s.x[1] % Core::Memory::PAGE_SIZE || s.x[2] % Core::Memory::PAGE_SIZE || s.x[2] == 0) {
+                SetResult(s, Result::InvalidAddress); return;
+            }
+            s.x[1] = m_handles.Create(std::make_shared<KDummyObject>("transfer memory"));
+            SetResult(s, Result::Success);
+            return;
+        }
         case 0x16: SvcCloseHandle(s);       return;
+        // --- Mutex y variables de condicion (NeXo solo tiene un hilo) ---
+        case 0x1A: SetResult(s, Result::Success); return; // ArbitrateLock: nadie mas tiene el mutex
+        case 0x1B: m_memory.Write<u32>(s.x[0], 0); SetResult(s, Result::Success); return; // ArbitrateUnlock
+        case 0x1C:
+            // WaitProcessWideKeyAtomic: suelta el mutex, espera y lo vuelve a coger. Sin otros
+            // hilos nadie va a despertarnos: devolvemos "tiempo agotado" con el mutex aun nuestro.
+            SetResult(s, Result::TimedOut);
+            return;
+        case 0x1D: SetResult(s, Result::Success); return; // SignalProcessWideKey: no hay a quien despertar
         case 0x1E: SvcGetSystemTick(s);     return;
         case 0x26: SvcBreak(s);             return;
         case 0x27: SvcOutputDebugString(s); return;
@@ -357,6 +386,11 @@ u32 Kernel::CreateSessionHandle(std::shared_ptr<ServiceObject> service) {
     auto state = std::make_shared<SessionState>();
     state->root = std::move(service);
     return m_handles.Create(std::make_shared<KClientSession>(state));
+}
+
+void Kernel::HaltWithMessage(const std::string& message) {
+    Logger::Log(Logger::Level::Warning, "[HLE] " + message);
+    m_cpu.Halt(message);
 }
 
 void Kernel::ReportUnimplemented(const std::string& service_name, u32 command_id) {

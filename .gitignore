@@ -62,3 +62,5 @@ Testing/
 
 # --- Homebrew de terceros para pruebas (no se suben al repo) ---
 tests/homebrew/
+# Tarjeta SD emulada (datos de los programas)
+sdmc/

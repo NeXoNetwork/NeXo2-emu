@@ -1,4 +1,5 @@
 #pragma once
+#include <filesystem>
 #include <memory>
 #include <string>
 #include "common/types.hpp"
@@ -6,6 +7,7 @@
 #include "memory.hpp"
 #include "kernel_objects.hpp"
 #include "service.hpp"
+#include "display.hpp"
 
 // Kernel HLE (High-Level Emulation) de Horizon.
 //
@@ -85,10 +87,19 @@ public:
 
     // Un servicio ha recibido un comando que no existe: para la CPU con el detalle.
     void ReportUnimplemented(const std::string& service_name, u32 command_id);
+    void HaltWithMessage(const std::string& message);
 
     // Atiende un mensaje IPC que esta en 'message' para la sesion 'handle'.
     // Devuelve el resultado de la SVC (no el del comando, que va dentro del mensaje).
     u32 ProcessIpcRequest(u32 handle, u64 message);
+
+    // Pantalla emulada (memoria nvmap + ultima imagen presentada)
+    Display&       GetDisplay()       { return m_display; }
+    const Display& GetDisplay() const { return m_display; }
+
+    // Carpeta del PC que hace de tarjeta SD ("sdmc:/"). Por defecto "sdmc" en el directorio actual.
+    void SetSdmcRoot(const std::filesystem::path& root) { m_sdmcRoot = root; }
+    const std::filesystem::path& GetSdmcRoot() const { return m_sdmcRoot; }
 
     // Objetos que los servicios entregan como handles "copy"
     u32 CreateEvent(const std::string& name, bool signaled = false);
@@ -124,6 +135,8 @@ private:
 
     HandleTable     m_handles;
     ServiceRegistry m_services;
+    Display         m_display;
+    std::filesystem::path m_sdmcRoot = "sdmc";
 
     u64  m_heapSize = 0;
     u64  m_imageSize = 0;

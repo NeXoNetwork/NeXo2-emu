@@ -119,6 +119,8 @@ public:
 
     // El comando no esta implementado: para la CPU con un mensaje claro.
     void Unimplemented(const std::string& service_name);
+    // Algo concreto del comando no esta soportado (un dispositivo, un ioctl...): para la CPU.
+    void Unsupported(const std::string& message);
 
     // Escribe la respuesta en 'base' (normalmente la TLS del hilo).
     // 'session' hace falta para registrar interfaces nuevas en el dominio.

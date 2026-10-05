@@ -53,13 +53,14 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ### Phase 3: Graphics Subsystem (Vulkan)
 - [ ] **Vulkan Backend:** Initialization of the Vulkan 1.3 instance and physical device selection.
-- [ ] **Windowing Integration:** Deployment of the rendering context via SDL3.
+- [x] **Windowing Integration:** SDL3 window with ImGui; the "Pantalla" window shows what the program presents.
+- [x] **Software framebuffer:** `vi` + `nvdrv` (nvmap, binder buffer queue, block-linear deswizzle). libnx console homebrew is displayed. See [docs/07-nexo-internals/display.md](docs/07-nexo-internals/display.md).
 - [ ] **VMA Integration:** Implementation of the Vulkan Memory Allocator for emulator-to-GPU mapping.
 - [ ] **Shader Pipeline:** Preliminary research into Ampere microcode-to-SPIR-V translation.
 
 ### Phase 4: OS Kernel & Services (HLE)
 - [~] **Supervisor Call Dispatcher:** HLE kernel with the first SVCs (SetHeapSize, QueryMemory, ExitProcess, OutputDebugString, GetInfo...). Homebrew ABI loader config.
-- [~] **Service Infrastructure:** IPC (HIPC/CMIF/TIPC, domains), handle table, events, shared memory. Services: `sm:`, `set:sys`, `apm`, `appletOE`, `hid`, `time`, `fsp-srv` (enough for libnx start-up). See [docs/07-nexo-internals/ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
+- [~] **Service Infrastructure:** IPC (HIPC/CMIF/TIPC, domains), handle table, events, shared memory. Services: `sm:`, `set:sys`, `apm`, `appletOE`, `hid`, `time`, `fsp-srv` (SD card on a PC folder), `vi`, `nvdrv` (screen). See [docs/07-nexo-internals/ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
 - [ ] **Scheduler:** Basic multi-core thread scheduling and synchronization primitives.
 
 ## Development Status

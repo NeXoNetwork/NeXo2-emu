@@ -69,7 +69,7 @@ SelfController::SelfController() : ServiceObject("ISelfController") {
     RegisterStub(13, "SetFocusHandlingMode");
     RegisterStub(14, "SetRestartMessageEnabled");
     RegisterStub(16, "SetOutOfFocusSuspendingEnabled");
-    RegisterStub(40, "CreateManagedDisplayLayer");
+    RegisterCommand(40, "CreateManagedDisplayLayer", Reply<u64>(1)); // id de la capa
     RegisterCommand(91, "GetAccumulatedSuspendedTickChangedEvent", NewEvent("tiempo suspendido"));
 }
 

@@ -27,7 +27,8 @@ program:  reads the response from TLS
 | `src/core/hle/services/applet.*` | `appletOE` -> IApplicationProxy and its sub-interfaces (state, self, window, functions...) |
 | `src/core/hle/services/hid.*` | `hid` - CreateAppletResource, shared memory (0x40000, no controllers yet), Activate*/SetSupported* stubs |
 | `src/core/hle/services/time.*` | `time:u/a/s` - clocks, time zone (UTC), shared memory filled with the PC's clock |
-| `src/core/hle/services/fs.*` | `fsp-srv` - SetCurrentProcess, OpenSdCardFileSystem (IFileSystem without commands yet) |
+| `src/core/hle/services/fs.*` | `fsp-srv` - SD card backed by a PC folder: IFileSystem (create/delete/rename/open files and folders, entry type, free space), IFile (read/write/size), IDirectory (list) |
+| `src/core/hle/services/vi.*`, `nvdrv.*` | Display: `vi:m/s/u` and `nvdrv` - see [display.md](display.md) |
 | `src/core/hle/firmware.hpp` | Firmware version NeXo reports (20.1.0) |
 
 Message format reference: [../03-services-ipc/hipc.md](../03-services-ipc/hipc.md).
@@ -37,7 +38,9 @@ NeXo follows the same layout as libnx (`nx/include/switch/sf/hipc.h`, `cmif.h`, 
 
 - **SVCs:** `ConnectToNamedPort` (only "sm:"), `SendSyncRequest`, `SendSyncRequestWithUserBuffer`, `CloseHandle`,
   `ClearEvent`/`ResetSignal`, `WaitSynchronization` (no threads: an endless wait halts the CPU),
-  `MapSharedMemory`/`UnmapSharedMemory` (the content is copied when mapping).
+  `MapSharedMemory`/`UnmapSharedMemory` (the content is copied when mapping), `CreateTransferMemory`
+  (handle only, the memory stays in place), and single-thread versions of `ArbitrateLock/Unlock`,
+  `WaitProcessWideKeyAtomic` (returns timed out) and `SignalProcessWideKey`.
 - **CMIF:** Request, Close, and the Control commands ConvertCurrentObjectToDomain,
   CopyFromCurrentDomain, CloneCurrentObject(Ex), QueryPointerBufferSize (0x8000).
 - **Domains:** one session holding several objects; domain Close.
@@ -80,6 +83,14 @@ sessions, SD card IFileSystem). `set:sys` is skipped thanks to the HosVersion lo
 `tests/programs/nro_libnx_init/main.c` replays those 45 calls with the same commands and
 formats as libnx; `tests/services_tests.cpp` checks them.
 
-What a real homebrew will ask for next depends on its `main()`: files (IFileSystem commands),
-the screen (`vi:m`, `nvdrv`) for console/graphics output, controllers (hid shared memory
-with real input), threads, etc. Each one shows up as a "no implementado" message.
+After start-up, the SD card (`fsp-srv` IFileSystem) and the screen (`vi:m`, `nvdrv`, see
+[display.md](display.md)) are implemented too, so a libnx console homebrew runs and draws.
+Still missing: controllers (hid shared memory with real input), threads, audio... Each one
+shows up as a "no implementado" message.
+
+## SD card (`sdmc:/`)
+
+The SD card is a normal folder on the PC: `sdmc` next to the executable (the UI shows the full
+path). `Kernel::SetSdmcRoot()` changes it. Switch paths ("/config/app.ini") are split on '/'
+and joined to that folder; any `..`, `\` or `:` part is rejected, so a program can never reach
+files outside the folder (`ResolveGuestPath`, tested in `tests/display_tests.cpp`).

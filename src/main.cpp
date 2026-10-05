@@ -7,9 +7,11 @@
 #include "system.hpp"
 #include "common/logger.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 using NeXo2::Core::BallisticJit;
@@ -49,13 +51,35 @@ static void LoadDemo(System& sys) {
     sys.LoadRawProgram(g_program, sizeof(g_program) / sizeof(g_program[0]), PROG_BASE);
 }
 
-// Ejecuta hasta que la CPU se pare y lo apunta en la consola.
-static void RunProgram(System& sys) {
+// Ejecucion continua: en cada fotograma de la interfaz la CPU emulada corre
+// durante unos milisegundos. Asi la ventana sigue respondiendo mientras tanto.
+static bool g_emuRunning = false;
+static unsigned long long g_runInstructions = 0;   // instrucciones desde que se pulso Run
+
+static void SetRunning(System& sys, bool run) {
+    if (run == g_emuRunning) return;
     auto& cpu = sys.GetCpu();
-    const unsigned long long n = cpu.Run(50'000'000);
+    if (run && cpu.IsHalted()) return;   // parada: hay que reiniciar o cargar otro programa
+    g_emuRunning = run;
+    if (run) g_runInstructions = 0;
     NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
-        "[UI] Run: " + std::to_string(n) + " instrucciones ejecutadas. " +
-        (cpu.IsHalted() ? cpu.GetHaltReason() : std::string("(limite alcanzado)")));
+        run ? std::string("[UI] Run") : "[UI] Pausa (" + std::to_string(g_runInstructions) + " instrucciones)");
+}
+
+// Ejecuta trozos de 1M instrucciones hasta gastar 'budget_ms' o hasta que la CPU se pare.
+static void RunSlice(System& sys, double budget_ms) {
+    auto& cpu = sys.GetCpu();
+    const auto start = std::chrono::steady_clock::now();
+    while (!cpu.IsHalted()) {
+        g_runInstructions += cpu.Run(1'000'000);
+        const std::chrono::duration<double, std::milli> spent = std::chrono::steady_clock::now() - start;
+        if (spent.count() >= budget_ms) break;
+    }
+    if (cpu.IsHalted()) {
+        g_emuRunning = false;
+        NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
+            "[UI] Run: " + std::to_string(g_runInstructions) + " instrucciones ejecutadas. " + cpu.GetHaltReason());
+    }
 }
 
 // Nombre legible del tipo de zona de memoria (MemoryState de Horizon)
@@ -115,6 +139,18 @@ int main(int argc, char** argv) {
     // --- La "consola" emulada ---
     System sys;
     BallisticJit jit;
+
+    // Tarjeta SD emulada: carpeta "sdmc" junto al ejecutable
+    std::string sdmcRoot = "sdmc";
+    if (const char* base = SDL_GetBasePath()) sdmcRoot = std::string(base) + "sdmc";
+    sys.GetKernel().SetSdmcRoot(std::filesystem::path(std::u8string(sdmcRoot.begin(), sdmcRoot.end())));
+
+    // Pantalla de la consola: textura que se actualiza con cada imagen nueva
+    SDL_Texture* screenTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
+                                                   NeXo2::HLE::Display::WIDTH, NeXo2::HLE::Display::HEIGHT);
+    SDL_SetTextureBlendMode(screenTexture, SDL_BLENDMODE_NONE);   // ignorar el alfa del juego
+    SDL_SetTextureScaleMode(screenTexture, SDL_SCALEMODE_LINEAR);
+    uint64_t shownFrame = ~0ull;
     int lastIrCount = -1;
 
     // Ruta del NRO: la de la linea de comandos o el homebrew de prueba
@@ -144,14 +180,19 @@ int main(int argc, char** argv) {
                 LogUi("Clic raton en (" + std::to_string((int)event.button.x) + ", " +
                       std::to_string((int)event.button.y) + ")");
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) LogUi("Tecla F5");
-            // F5 = Run
-            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5) RunProgram(sys);
+            // F5 = Run / Pausa
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F5 && !event.key.repeat)
+                SetRunning(sys, !g_emuRunning);
             // Arrastrar un .nro a la ventana lo carga
             if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) {
                 std::snprintf(nroPath, sizeof(nroPath), "%s", event.drop.data);
+                SetRunning(sys, false);
                 sys.LoadNroFile(nroPath);
             }
         }
+
+        // La CPU emulada corre ~12 ms por fotograma (el resto es para la interfaz)
+        if (g_emuRunning) RunSlice(sys, 12.0);
 
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -205,9 +246,9 @@ int main(int argc, char** argv) {
 
         if (ImGui::Button("Step CPU")) { LogUi("Boton Step CPU"); cpu.Step(); }
         ImGui::SameLine();
-        if (ImGui::Button("Reiniciar programa")) { LogUi("Boton Reiniciar programa"); sys.Restart(); }
+        if (ImGui::Button("Reiniciar programa")) { LogUi("Boton Reiniciar programa"); SetRunning(sys, false); sys.Restart(); }
         ImGui::SameLine();
-        if (ImGui::Button("Run (hasta parar)")) { LogUi("Boton Run (hasta parar)"); RunProgram(sys); }
+        if (ImGui::Button(g_emuRunning ? "Pausa (F5)" : "Run (F5)")) { LogUi("Boton Run/Pausa"); SetRunning(sys, !g_emuRunning); }
 
         ImGui::Separator();
         ImGui::Text("Ballistic JIT (traduce ARM64 -> IR; sin ejecucion todavia)");
@@ -236,17 +277,20 @@ int main(int argc, char** argv) {
         ImGui::SetNextItemWidth(-110);
         ImGui::InputText("##ruta", nroPath, sizeof(nroPath));
         ImGui::SameLine();
-        if (ImGui::Button("Cargar NRO", ImVec2(-1, 0))) { LogUi("Boton Cargar NRO"); sys.LoadNroFile(nroPath); }
-        if (ImGui::Button("Cargar demo")) { LogUi("Boton Cargar demo"); LoadDemo(sys); }
+        if (ImGui::Button("Cargar NRO", ImVec2(-1, 0))) { LogUi("Boton Cargar NRO"); SetRunning(sys, false); sys.LoadNroFile(nroPath); }
+        if (ImGui::Button("Cargar demo")) { LogUi("Boton Cargar demo"); SetRunning(sys, false); LoadDemo(sys); }
         // Controles tambien aqui, para no depender de la otra ventana
         ImGui::SameLine();
-        if (ImGui::Button("Run")) { LogUi("Boton Run"); RunProgram(sys); }
+        if (ImGui::Button(g_emuRunning ? "Pausa" : "Run")) { LogUi("Boton Run/Pausa"); SetRunning(sys, !g_emuRunning); }
         ImGui::SameLine();
         if (ImGui::Button("Step")) { LogUi("Boton Step"); cpu.Step(); }
         ImGui::SameLine();
-        if (ImGui::Button("Reiniciar")) { LogUi("Boton Reiniciar"); sys.Restart(); }
+        if (ImGui::Button("Reiniciar")) { LogUi("Boton Reiniciar"); SetRunning(sys, false); sys.Restart(); }
         if (cpu.IsHalted())
             ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "CPU parada: %s", cpu.GetHaltReason().c_str());
+        else if (g_emuRunning)
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "Ejecutando... (%llu instrucciones)",
+                               (unsigned long long)g_runInstructions);
         else
             ImGui::TextDisabled("Listo para ejecutar (%llu instrucciones)",
                                 (unsigned long long)cpu.GetInstructionCount());
@@ -271,6 +315,8 @@ int main(int argc, char** argv) {
         } else {
             ImGui::Text("Programa: %s", sys.GetProgramName().c_str());
         }
+
+        ImGui::TextDisabled("Tarjeta SD (sdmc:/): %s", sdmcRoot.c_str());
 
         ImGui::Separator();
         ImGui::Text("Salida del programa (svcOutputDebugString):");
@@ -299,6 +345,31 @@ int main(int argc, char** argv) {
         }
         ImGui::End();
 
+        // =====================================================================
+        //  Ventana 3: Pantalla de la consola (lo que el programa manda a vi)
+        // =====================================================================
+        const auto& frame = kernel.GetDisplay().Frame();
+        if (frame.count == 0) shownFrame = ~0ull;   // programa nuevo: la siguiente imagen se muestra seguro
+        if (frame.count != shownFrame && frame.count > 0 && screenTexture &&
+            frame.width == NeXo2::HLE::Display::WIDTH && frame.height == NeXo2::HLE::Display::HEIGHT) {
+            SDL_UpdateTexture(screenTexture, nullptr, frame.rgba.data(), int(frame.width * 4));
+            shownFrame = frame.count;
+        }
+        ImGui::SetNextWindowPos(ImVec2(60 * main_scale, 80 * main_scale), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(660 * main_scale, 420 * main_scale), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Pantalla");
+        if (frame.count > 0 && screenTexture) {
+            ImGui::Text("Imagenes: %llu", (unsigned long long)frame.count);
+            // Escalar a lo que quepa en la ventana manteniendo 16:9
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            float w = avail.x, h = avail.x * 9.0f / 16.0f;
+            if (h > avail.y) { h = avail.y; w = h * 16.0f / 9.0f; }
+            if (w > 1 && h > 1) ImGui::Image((ImTextureID)(intptr_t)screenTexture, ImVec2(w, h));
+        } else {
+            ImGui::TextDisabled("El programa todavia no ha mostrado nada en pantalla.");
+        }
+        ImGui::End();
+
         SDL_SetRenderDrawColor(renderer, 10, 10, 15, 255);
         SDL_RenderClear(renderer);
         ImGui::Render();
@@ -310,6 +381,7 @@ int main(int argc, char** argv) {
     }
 
     if (logoTexture) SDL_DestroyTexture(logoTexture);
+    if (screenTexture) SDL_DestroyTexture(screenTexture);
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

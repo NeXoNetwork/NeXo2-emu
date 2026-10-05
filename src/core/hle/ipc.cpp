@@ -134,6 +134,11 @@ void IpcContext::PushInterface(std::shared_ptr<ServiceObject> object) {
     m_outObjects.push_back(std::move(object));
 }
 
+void IpcContext::Unsupported(const std::string& message) {
+    m_unimplemented = true;
+    m_kernel.HaltWithMessage(message);
+}
+
 void IpcContext::Unimplemented(const std::string& service_name) {
     m_unimplemented = true;
     m_kernel.ReportUnimplemented(service_name, m_request.command_id);

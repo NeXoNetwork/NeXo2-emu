@@ -8,10 +8,27 @@ set(SRC_DIR "${CMAKE_SOURCE_DIR}/src")
 set(EXT_DIR "${CMAKE_SOURCE_DIR}/externals")
 set(IMGUI_DIR "${EXT_DIR}/imgui")
 
-# 1. Fuentes (Solo .cpp)
+option(NEXO2_BUILD_TESTS "Compilar los tests de la CPU (nexo2_tests)" ON)
+
+# 1a. Nucleo del emulador (CPU + memoria) como libreria estatica.
+#     Asi lo usan tanto el ejecutable como los tests, sin compilarlo dos veces.
+add_library(nexo2_core STATIC
+    "${SRC_DIR}/core/arm64/interpreter.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_dp_imm.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_dp_reg.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_branch.cpp"
+    "${SRC_DIR}/core/arm64/interpreter_ldst.cpp"
+)
+target_include_directories(nexo2_core PUBLIC
+    "${SRC_DIR}"
+    "${SRC_DIR}/core"
+    "${SRC_DIR}/core/arm64"
+    "${SRC_DIR}/core/memory"
+)
+
+# 1b. Fuentes del ejecutable (interfaz, JIT, icono)
 set(SOURCES
     "${SRC_DIR}/main.cpp"
-    "${SRC_DIR}/core/arm64/interpreter.cpp"
     "${SRC_DIR}/core/arm64/jit_ballistic.cpp"
     "${SRC_DIR}/core/memory/memory.hpp"
     "${SRC_DIR}/resource.rc" # <--- Esto pone el icono al .exe
@@ -59,7 +76,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 # Ballistic expone sus cabeceras (include/) de forma PUBLIC, asi que al
 # enlazarlo ya podemos hacer #include "bal_engine.h" sin añadir rutas a mano.
-target_link_libraries(${PROJECT_NAME} PRIVATE SDL3-shared Ballistic)
+target_link_libraries(${PROJECT_NAME} PRIVATE nexo2_core SDL3-shared Ballistic)
 
 # 5. Copia de DLL y Assets
 if(WIN32)
@@ -68,4 +85,14 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/assets"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/assets"
     )
+endif()
+
+# 6. Tests de la CPU (no necesitan SDL ni Ballistic)
+#    Ejecutar:  ctest -C Release --output-on-failure
+if(NEXO2_BUILD_TESTS)
+    enable_testing()
+    add_executable(nexo2_tests "${CMAKE_SOURCE_DIR}/tests/cpu_tests.cpp")
+    target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
+    target_link_libraries(nexo2_tests PRIVATE nexo2_core)
+    add_test(NAME cpu_tests COMMAND nexo2_tests)
 endif()

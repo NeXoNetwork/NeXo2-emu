@@ -23,6 +23,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 * `src/common/`: Utilities, thread-safe logging, and global types.
 * `src/core/arm64/`: CPU execution engine and state management.
+* `tests/`: CPU tests and the ARM64/C test programs they run.
 * `src/core/memory/`: Virtual Memory Manager (VMM).
 * `src/core/hle/`: High-Level Emulation (Kernel and OS Services).
 * `src/video_core/`: Vulkan implementation and hardware renderer.
@@ -31,8 +32,8 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ## Development Roadmap (2026)
 
-## Current Fhase:
-  * **Phase 0: Research**
+## Current Phase:
+  * **Phase 2: CPU Emulation (ARM64)** — integer interpreter working, covered by automated tests.
 
 ### Phase 1: Core Infrastructure
 - [ ] **Logging Framework:** Implementation of a high-performance, thread-safe logging system.
@@ -41,10 +42,11 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 - [ ] **Command Line Interface:** Robust argument parsing for debugging and trace orchestration.
 
 ### Phase 2: CPU Emulation (ARM64)
-- [ ] **State Management:** Implementation of the ARM64 register set (X0-X30, SP, PC, and PSTATE).
-- [ ] **Instruction Decoder:** Development of a disassembler for the ARMv8.2-A instruction set.
-- [ ] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
-- [ ] **JIT Integration:** Design of the execution engine backend for ballistic integration.
+- [x] **State Management:** Implementation of the ARM64 register set (X0-X30, SP, PC, and PSTATE).
+- [~] **Instruction Decoder:** Integer subset of ARMv8.2-A done (data processing, branches, loads/stores, atomics, system registers). SIMD/FP pending. See [docs/07-nexo-internals/cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md).
+- [x] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
+- [x] **CPU Tests:** `nexo2_tests` runs hand-written ARM64 programs and clang-compiled C code.
+- [~] **JIT Integration:** Ballistic front-end (ARM64 -> IR) wired in; no backend yet.
 
 ### Phase 3: Graphics Subsystem (Vulkan)
 - [ ] **Vulkan Backend:** Initialization of the Vulkan 1.3 instance and physical device selection.
@@ -59,7 +61,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 
 ## Development Status
 
-NeXo 2 is currently in **Phase 0 (Architectural Exploration)**. The project does not currently possess an executable binary capable of loading commercial software. This repository is maintained strictly for educational and research purposes.
+NeXo 2 is currently in **Phase 2 (CPU Emulation)**. The project does not currently possess an executable binary capable of loading commercial software. This repository is maintained strictly for educational and research purposes.
 
 ## Contribution
 

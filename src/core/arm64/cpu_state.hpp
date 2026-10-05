@@ -4,17 +4,26 @@
 
 namespace NeXo2::Core {
 
+// Estado visible de un nucleo ARM64 (lo que un programa puede leer/escribir).
 struct CPUState {
-    // 31 Registros de propósito general (X0-X30)
+    // 31 Registros de propósito general (X0-X30). X30 = LR (direccion de retorno).
     std::array<uint64_t, 31> x;
 
     uint64_t pc; // Program Counter (Instrucción actual)
     uint64_t sp; // Stack Pointer (Puntero de pila)
 
-    // Banderas de estado (Zero, Negative, Carry, Overflow)
+    // Banderas de estado PSTATE.NZCV:
+    //   n = resultado Negativo, z = resultado Zero (cero),
+    //   c = Carry (acarreo sin signo), v = oVerflow (desbordamiento con signo)
     struct {
         bool n, z, c, v;
     } flags;
+
+    // Registros de sistema que usan los programas en EL0 (modo usuario).
+    uint64_t tpidr_el0;   // puntero libre para el programa (TLS de usuario)
+    uint64_t tpidrro_el0; // solo lectura para el programa: Horizon guarda aqui la TLS del hilo
+    uint64_t fpcr;        // control de coma flotante (se guarda, aun no se usa)
+    uint64_t fpsr;        // estado de coma flotante (se guarda, aun no se usa)
 
     // Inicializa todo a cero
     void Reset() {
@@ -22,6 +31,22 @@ struct CPUState {
         pc = 0;
         sp = 0;
         flags = { false, false, false, false };
+        tpidr_el0 = 0;
+        tpidrro_el0 = 0;
+        fpcr = 0;
+        fpsr = 0;
+    }
+
+    // NZCV empaquetado como en el registro real (bits 31..28).
+    uint64_t GetNZCV() const {
+        return (uint64_t(flags.n) << 31) | (uint64_t(flags.z) << 30) |
+               (uint64_t(flags.c) << 29) | (uint64_t(flags.v) << 28);
+    }
+    void SetNZCV(uint64_t value) {
+        flags.n = (value >> 31) & 1;
+        flags.z = (value >> 30) & 1;
+        flags.c = (value >> 29) & 1;
+        flags.v = (value >> 28) & 1;
     }
 };
 

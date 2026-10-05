@@ -9,6 +9,10 @@ void ServiceObject::RegisterCommand(u32 id, const char* name, Handler handler) {
     m_commands[id] = Command{name, std::move(handler)};
 }
 
+void ServiceObject::RegisterStub(u32 id, const char* name) {
+    m_commands[id] = Command{std::string(name) + " [stub]", [](IpcContext& ctx) { ctx.SetResult(0); }};
+}
+
 std::string ServiceObject::CommandName(u32 id) const {
     auto it = m_commands.find(id);
     return it == m_commands.end() ? std::string() : it->second.name;

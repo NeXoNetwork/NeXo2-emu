@@ -76,15 +76,15 @@ int main(void) {
     print_rc("CloseHandle(set:sys TIPC)", svcCloseHandle(setsys2));
     print_rc("SendSyncRequest(handle cerrado)", svcSendSyncRequest(setsys2));
 
-    // 9) Un servicio que NeXo todavia no tiene: la CPU debe pararse diciendo cual
+    // 9) Un servicio que NeXo todavia no tiene (vi:m = pantalla): la CPU debe pararse diciendo cual
     raw = (u64*)cmif_request(CMIF_REQUEST, 1, 8, 0, 0, 0, 0);
-    raw[0] = service_name("fsp-srv");
+    raw[0] = service_name("vi:m");
     svcSendSyncRequest(sm);
     u32 fs = 0;
     rc = cmif_response(0, 0, 0, &fs, 0);
-    put("GetServiceHandle(fsp-srv): rc="); put_hex(rc); flush();
+    put("GetServiceHandle(vi:m): rc="); put_hex(rc); flush();
 
-    put("Llamando a fsp-srv comando 1 (deberia parar la CPU)..."); flush();
+    put("Llamando a vi:m comando 1 (deberia parar la CPU)..."); flush();
     raw = (u64*)cmif_request(CMIF_REQUEST, 1, 8, 1, 0, 0, 0);
     raw[0] = 0;
     svcSendSyncRequest(fs);

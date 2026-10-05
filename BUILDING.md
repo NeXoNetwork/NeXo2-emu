@@ -47,6 +47,7 @@ From the project root (so `assets/` and `tests/` are found):
 ```cmd
 build\Release\NeXo2.exe tests\generated\hello.nro
 build\Release\NeXo2.exe tests\generated\ipc.nro
+build\Release\NeXo2.exe tests\generated\libnx_init.nro
 ```
 
 Or start `NeXo2.exe` and drag a `.nro` file onto the window, or use the
@@ -59,5 +60,5 @@ Only needed if you change `tests/programs/`. Requires LLVM (`winget install LLVM
 
 ```cmd
 python tools/asm2cpp.py     :: tests/programs/*.S and *.c  -> tests/generated/test_programs.hpp
-python tools/make_nro.py    :: tests/programs/nro_*/       -> tests/generated/*.nro (hello, ipc)
+python tools/make_nro.py    :: tests/programs/nro_*/       -> tests/generated/*.nro (hello, ipc, libnx_init)
 ```

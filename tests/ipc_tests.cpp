@@ -50,7 +50,7 @@ TEST(Ipc_SmAndSetSys) {
     CHECK(Has(out, "TIPC GetServiceHandle(set:sys): rc=0x0"));
     CHECK(Has(out, "CloseHandle(set:sys TIPC): rc=0x0"));
     CHECK(Has(out, "SendSyncRequest(handle cerrado): rc=0xE401"));
-    CHECK(Has(out, "GetServiceHandle(fsp-srv): rc=0x0"));
+    CHECK(Has(out, "GetServiceHandle(vi:m): rc=0x0"));
     CHECK(out.find("ERROR") == std::string::npos);
 }
 
@@ -60,7 +60,7 @@ TEST(Ipc_UnimplementedServiceStopsCpuWithName) {
     sys.GetCpu().Run(10'000'000);
     CHECK(sys.GetCpu().IsHalted());
     CHECK(!sys.GetKernel().HasExited());
-    CHECK(sys.GetCpu().GetHaltReason() == "Servicio 'fsp-srv': comando 1 no implementado");
+    CHECK(sys.GetCpu().GetHaltReason() == "Servicio 'vi:m': comando 1 no implementado");
 }
 
 TEST(Ipc_ServiceNameFromU64) {

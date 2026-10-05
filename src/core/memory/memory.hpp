@@ -27,6 +27,7 @@ enum class MemoryState : u32 {
     Code         = 0x03, // .text y .rodata del programa
     CodeData     = 0x04, // .data y .bss del programa
     Normal       = 0x05, // heap (svcSetHeapSize)
+    Shared       = 0x06, // memoria compartida con un servicio (svcMapSharedMemory)
     Stack        = 0x0B, // pila
     ThreadLocal  = 0x0C, // TLS de los hilos
     Inaccessible = 0x10, // fuera del espacio de direcciones

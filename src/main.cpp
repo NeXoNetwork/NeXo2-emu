@@ -67,6 +67,7 @@ static const char* StateName(NeXo2::Core::MemoryState s) {
         case MemoryState::Code:         return "Code";
         case MemoryState::CodeData:     return "CodeData";
         case MemoryState::Normal:       return "Heap";
+        case MemoryState::Shared:       return "Compartida";
         case MemoryState::Stack:        return "Pila";
         case MemoryState::ThreadLocal:  return "TLS";
         case MemoryState::Inaccessible: return "Inaccesible";

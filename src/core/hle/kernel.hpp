@@ -42,6 +42,8 @@ namespace Result {
     constexpr u32 InvalidHandle    = 0xE401;
     constexpr u32 InvalidEnumValue = 0xF001;
     constexpr u32 NotFound         = 0xF201;
+    constexpr u32 TimedOut         = 0xEA01;
+    constexpr u32 InvalidState     = 0xFA01;
     constexpr u32 InvalidCombination = 0xE801;
 }
 
@@ -88,6 +90,11 @@ public:
     // Devuelve el resultado de la SVC (no el del comando, que va dentro del mensaje).
     u32 ProcessIpcRequest(u32 handle, u64 message);
 
+    // Objetos que los servicios entregan como handles "copy"
+    u32 CreateEvent(const std::string& name, bool signaled = false);
+    // Devuelve el handle y deja en 'out' el objeto para rellenar su contenido.
+    u32 CreateSharedMemory(const std::string& name, size_t size, std::shared_ptr<KSharedMemory>* out = nullptr);
+
 private:
     // Cada SVC lee sus argumentos de X0..X7 y deja el resultado en W0 (+ salidas en X1...).
     void SvcSetHeapSize(Core::CPUState& s);
@@ -102,6 +109,10 @@ private:
     void SvcConnectToNamedPort(Core::CPUState& s);
     void SvcSendSyncRequest(Core::CPUState& s);
     void SvcSendSyncRequestWithUserBuffer(Core::CPUState& s);
+    void SvcClearEvent(Core::CPUState& s);
+    void SvcWaitSynchronization(Core::CPUState& s);
+    void SvcMapSharedMemory(Core::CPUState& s);
+    void SvcUnmapSharedMemory(Core::CPUState& s);
 
     // Comandos "Control" de CMIF (dominios, clonar sesiones, tamano de buffer)
     void HandleControlCommand(IpcContext& ctx, const std::shared_ptr<SessionState>& state);

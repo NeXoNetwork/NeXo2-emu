@@ -183,3 +183,116 @@ static u64 service_name(const char* s) {
     for (int i = 0; i < 8 && s[i]; ++i) v |= (u64)(u8)s[i] << (i * 8);
     return v;
 }
+
+// ---------------------------------------------------------------------------
+// Llamada IPC generica (CMIF), como serviceDispatch de libnx
+// ---------------------------------------------------------------------------
+typedef struct {
+    u32 cmd;              // id del comando
+    u32 object_id;        // 0 = sesion normal; >0 = objeto de un dominio
+    const void* in;       // argumentos de entrada
+    u32 in_size;
+    int send_pid;         // enviar el PID
+    int has_copy_handle;  // enviar un handle "copy"
+    u32 copy_handle;
+    void* out;            // donde copiar los datos de salida
+    u32 out_size;
+    // Resultados
+    u32 out_handle;       // primer handle devuelto (copy o move)
+    u32 out_object;       // objeto devuelto (solo en dominios)
+} IpcCall;
+
+static u32 ipc_call(u32 session, IpcCall* c) {
+    u32* m = ipc_buffer();
+    memset(m, 0, 0x100);
+    const int special = c->send_pid || c->has_copy_handle;
+    u32 w = 2;
+    if (special) {
+        m[2] = (c->send_pid ? 1 : 0) | ((c->has_copy_handle ? 1u : 0u) << 1);
+        w = 3 + (c->send_pid ? 2 : 0);
+        if (c->has_copy_handle) m[w++] = c->copy_handle;
+    }
+    const u32 content = (c->object_id ? 16 : 0) + 16 + c->in_size;
+    const u32 num_words = (16 + content + 3) / 4;
+    m[0] = CMIF_REQUEST;
+    m[1] = num_words | (special ? 0x80000000u : 0);
+
+    u8* start = (u8*)m + align16(w * 4);
+    if (c->object_id) {
+        start[0] = 1;
+        *(u16*)(start + 2) = (u16)(16 + c->in_size);
+        *(u32*)(start + 4) = c->object_id;
+        start += 16;
+    }
+    u32* hdr = (u32*)start;
+    hdr[0] = SFCI; hdr[1] = 0; hdr[2] = c->cmd; hdr[3] = 0;
+    if (c->in_size) memcpy(hdr + 4, c->in, c->in_size);
+
+    u32 rc = svcSendSyncRequest(session);
+    if (rc) return rc;
+
+    // Respuesta
+    w = 2;
+    if (m[1] & 0x80000000u) {
+        const u32 sh = m[2];
+        const u32 num_copy = (sh >> 1) & 0xF, num_move = (sh >> 5) & 0xF;
+        w = 3 + ((sh & 1) ? 2 : 0);
+        if (num_copy + num_move) c->out_handle = m[w];
+        w += num_copy + num_move;
+    }
+    start = (u8*)m + align16(w * 4);
+    if (c->object_id) start += 16;
+    hdr = (u32*)start;
+    if (hdr[0] != SFCO) return 0xDEAD;
+    if (hdr[2]) return hdr[2];
+    if (c->out_size) memcpy(c->out, hdr + 4, c->out_size);
+    if (c->object_id) c->out_object = *(u32*)((u8*)(hdr + 4) + c->out_size);
+    return 0;
+}
+
+// Pide un servicio a sm: (GetServiceHandle)
+static u32 sm_get_service(u32 sm, const char* name, u32* out) {
+    u64 n = service_name(name);
+    IpcCall c = { .cmd = 1, .in = &n, .in_size = 8 };
+    u32 rc = ipc_call(sm, &c);
+    *out = c.out_handle;
+    return rc;
+}
+
+// Convierte una sesion en dominio y devuelve el id del objeto principal
+static u32 convert_to_domain(u32 session, u32* out_object) {
+    cmif_request(CMIF_CONTROL, 0, 0, 0, 0, 0, 0);
+    u32 rc = svcSendSyncRequest(session);
+    if (rc) return rc;
+    void* out = 0;
+    rc = cmif_response(0, 4, &out, 0, 0);
+    if (!rc) *out_object = *(u32*)out;
+    return rc;
+}
+
+// Pide al objeto 'obj' de un dominio una sub-interfaz (comando 'cmd' sin argumentos)
+static u32 domain_open(u32 session, u32 obj, u32 cmd, u32* out_obj) {
+    IpcCall c = { .cmd = cmd, .object_id = obj };
+    u32 rc = ipc_call(session, &c);
+    *out_obj = c.out_object;
+    return rc;
+}
+
+static u32 svcMapSharedMemory(u32 handle, u64 addr, u64 size, u32 perm) {
+    register u64 x0 __asm__("x0") = handle;
+    register u64 x1 __asm__("x1") = addr;
+    register u64 x2 __asm__("x2") = size;
+    register u64 x3 __asm__("x3") = perm;
+    __asm__ volatile("svc 0x13" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return (u32)x0;
+}
+
+typedef struct { u64 addr, size; u32 state, attr, perm, ipc_ref, dev_ref, pad; } MemoryInfo;
+
+static u32 svcQueryMemory(MemoryInfo* info, u64 addr) {
+    register u64 x0 __asm__("x0") = (u64)info;
+    register u64 x1 __asm__("x1");
+    register u64 x2 __asm__("x2") = addr;
+    __asm__ volatile("svc 0x6" : "+r"(x0), "=r"(x1) : "r"(x2) : "memory");
+    return (u32)x0;
+}

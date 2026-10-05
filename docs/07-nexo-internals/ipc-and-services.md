@@ -23,6 +23,11 @@ program:  reads the response from TLS
 | `src/core/hle/service.hpp/.cpp` | `ServiceObject` (command table), `UnimplementedService`, `ServiceRegistry` |
 | `src/core/hle/services/sm.*` | `sm:` - RegisterClient, GetServiceHandle, DetachClient (CMIF and TIPC) |
 | `src/core/hle/services/set.*` | `set:sys` - GetFirmwareVersion / GetFirmwareVersion2 |
+| `src/core/hle/services/apm.*` | `apm` - OpenSession, performance mode/configuration |
+| `src/core/hle/services/applet.*` | `appletOE` -> IApplicationProxy and its sub-interfaces (state, self, window, functions...) |
+| `src/core/hle/services/hid.*` | `hid` - CreateAppletResource, shared memory (0x40000, no controllers yet), Activate*/SetSupported* stubs |
+| `src/core/hle/services/time.*` | `time:u/a/s` - clocks, time zone (UTC), shared memory filled with the PC's clock |
+| `src/core/hle/services/fs.*` | `fsp-srv` - SetCurrentProcess, OpenSdCardFileSystem (IFileSystem without commands yet) |
 | `src/core/hle/firmware.hpp` | Firmware version NeXo reports (20.1.0) |
 
 Message format reference: [../03-services-ipc/hipc.md](../03-services-ipc/hipc.md).
@@ -30,7 +35,9 @@ NeXo follows the same layout as libnx (`nx/include/switch/sf/hipc.h`, `cmif.h`, 
 
 ## What is supported
 
-- **SVCs:** `ConnectToNamedPort` (only "sm:"), `SendSyncRequest`, `SendSyncRequestWithUserBuffer`, `CloseHandle`.
+- **SVCs:** `ConnectToNamedPort` (only "sm:"), `SendSyncRequest`, `SendSyncRequestWithUserBuffer`, `CloseHandle`,
+  `ClearEvent`/`ResetSignal`, `WaitSynchronization` (no threads: an endless wait halts the CPU),
+  `MapSharedMemory`/`UnmapSharedMemory` (the content is copied when mapping).
 - **CMIF:** Request, Close, and the Control commands ConvertCurrentObjectToDomain,
   CopyFromCurrentDomain, CloneCurrentObject(Ex), QueryPointerBufferSize (0x8000).
 - **Domains:** one session holding several objects; domain Close.
@@ -63,9 +70,16 @@ in the console and in `nexo2.log`, is the to-do list.
 6. Test it from a homebrew in `tests/programs/nro_<name>/` (see `nro_ipc/main.c` and
    `nro_common/nx_min.h`), regenerate with `python tools/make_nro.py`, add a TEST.
 
-## What a libnx homebrew needs next
+## libnx start-up: covered
 
-libnx's default start-up (`__appInit`) calls, in order: `sm:` (done) -> `set:sys`
-(done, or skipped thanks to the HosVersion loader entry) -> `appletOE`
-(OpenApplicationProxy and its sub-interfaces) -> `hid` -> `time:u` -> `fsp-srv`.
-Each one will show up as the next "no implementado" message.
+libnx's default start-up (`__appInit`, `nx/source/runtime/init.c`) is covered end to end:
+`sm:` -> `apm` -> `appletOE` (+ IApplicationProxy and 7 sub-interfaces) -> `hid`
+(+ shared memory) -> `time:u` (+ shared memory, calendar) -> `fsp-srv` (domain, cloned
+sessions, SD card IFileSystem). `set:sys` is skipped thanks to the HosVersion loader entry.
+
+`tests/programs/nro_libnx_init/main.c` replays those 45 calls with the same commands and
+formats as libnx; `tests/services_tests.cpp` checks them.
+
+What a real homebrew will ask for next depends on its `main()`: files (IFileSystem commands),
+the screen (`vi:m`, `nvdrv`) for console/graphics output, controllers (hid shared memory
+with real input), threads, etc. Each one shows up as a "no implementado" message.

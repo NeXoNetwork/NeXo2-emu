@@ -38,9 +38,14 @@ public:
     // Nombre de un comando registrado ("" si no existe)
     std::string CommandName(u32 id) const;
 
-protected:
     using Handler = std::function<void(IpcContext&)>;
+
+protected:
     void RegisterCommand(u32 id, const char* name, Handler handler);
+
+    // Comando que solo tiene que responder "OK" (ignora sus argumentos).
+    // Util para ajustes que todavia no afectan a nada en NeXo.
+    void RegisterStub(u32 id, const char* name);
 
 private:
     struct Command { std::string name; Handler handler; };

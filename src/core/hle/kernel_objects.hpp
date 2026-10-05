@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "common/types.hpp"
 
 // Objetos del kernel a los que apuntan los "handles".
@@ -51,6 +52,25 @@ struct KDummyObject final : KObject {
     std::string name;
     explicit KDummyObject(std::string n) : name(std::move(n)) {}
     const char* TypeName() const override { return "KDummyObject"; }
+};
+
+// Evento: un "aviso" que un servicio puede activar (signaled) y el programa esperar.
+// libnx los usa por ejemplo para los mensajes del applet.
+struct KEvent final : KObject {
+    std::string name;
+    bool signaled = false;
+    explicit KEvent(std::string n, bool s = false) : name(std::move(n)), signaled(s) {}
+    const char* TypeName() const override { return "KEvent"; }
+};
+
+// Memoria compartida: un bloque que un servicio entrega al programa (hid: estado
+// de los mandos; time: el reloj). El programa la mapea con svcMapSharedMemory.
+// De momento se copia al mapear (los cambios posteriores del servicio no se ven).
+struct KSharedMemory final : KObject {
+    std::string name;
+    std::vector<u8> data;
+    KSharedMemory(std::string n, size_t size) : name(std::move(n)), data(size, 0) {}
+    const char* TypeName() const override { return "KSharedMemory"; }
 };
 
 class HandleTable {

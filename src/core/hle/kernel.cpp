@@ -1,8 +1,13 @@
 #include "kernel.hpp"
 #include "firmware.hpp"
 #include "ipc.hpp"
+#include "services/apm.hpp"
+#include "services/applet.hpp"
+#include "services/fs.hpp"
+#include "services/hid.hpp"
 #include "services/set.hpp"
 #include "services/sm.hpp"
+#include "services/time.hpp"
 #include "common/logger.hpp"
 #include <cstdio>
 
@@ -43,7 +48,14 @@ Kernel::Kernel(Core::Memory& memory, Core::Interpreter& cpu)
 
 // Servicios que sm: sabe entregar. Cada servicio nuevo se anade aqui.
 void Kernel::RegisterDefaultServices() {
-    m_services.Register("set:sys", [] { return std::make_shared<SystemSettings>(); });
+    m_services.Register("set:sys",  [] { return std::make_shared<SystemSettings>(); });
+    m_services.Register("apm",      [] { return std::make_shared<ApmManager>(); });
+    m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
+    m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
+    m_services.Register("time:u",   [] { return std::make_shared<TimeService>("time:u"); });
+    m_services.Register("time:a",   [] { return std::make_shared<TimeService>("time:a"); });
+    m_services.Register("time:s",   [] { return std::make_shared<TimeService>("time:s"); });
+    m_services.Register("fsp-srv",  [] { return std::make_shared<FileSystemProxy>(); });
 }
 
 void Kernel::Reset() {
@@ -135,6 +147,16 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
         case 0x06: SvcQueryMemory(s);       return;
         case 0x07: SvcExitProcess(s);       return;
         case 0x0B: SvcSleepThread(s);       return;
+        case 0x0C: SetResult(s, Result::Success); s.x[1] = 0x2C; return; // GetThreadPriority: 44 (normal)
+        case 0x10: s.x[0] = 0;              return; // GetCurrentProcessorNumber: nucleo 0
+        case 0x11: SetResult(s, Result::Success); return; // SignalEvent (sin hilos que despertar)
+        case 0x12: SvcClearEvent(s);        return;
+        case 0x13: SvcMapSharedMemory(s);   return;
+        case 0x14: SvcUnmapSharedMemory(s); return;
+        case 0x17: SvcClearEvent(s);        return; // ResetSignal: igual que ClearEvent aqui
+        case 0x18: SvcWaitSynchronization(s); return;
+        case 0x24: SetResult(s, Result::Success); s.x[1] = 0x51; return; // GetProcessId
+        case 0x25: SetResult(s, Result::Success); s.x[1] = 1;    return; // GetThreadId
         case 0x16: SvcCloseHandle(s);       return;
         case 0x1E: SvcGetSystemTick(s);     return;
         case 0x26: SvcBreak(s);             return;
@@ -257,6 +279,7 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 21: value = TOTAL_MEMORY; break;                  // TotalNonSystemMemorySize
         case 22: value = m_imageSize + MAIN_STACK_SIZE + m_heapSize; break;
         case 23: value = 1; break;                             // IsApplication
+        case 28: value = 0; break;                             // AliasRegionExtraSize [18.0.0+]
         default:
             Logger::Log(Logger::Level::Warning, "[HLE] svcGetInfo: id " + std::to_string(id0) + " no implementado");
             SetResult(s, Result::InvalidEnumValue);
@@ -462,6 +485,74 @@ void Kernel::HandleControlCommand(IpcContext& ctx, const std::shared_ptr<Session
             return;
     }
     ctx.SetResult(Result::Success);
+}
+
+// ============================================================================
+//  Eventos y memoria compartida
+// ============================================================================
+
+u32 Kernel::CreateEvent(const std::string& name, bool signaled) {
+    return m_handles.Create(std::make_shared<KEvent>(name, signaled));
+}
+
+u32 Kernel::CreateSharedMemory(const std::string& name, size_t size, std::shared_ptr<KSharedMemory>* out) {
+    auto shmem = std::make_shared<KSharedMemory>(name, size);
+    if (out) *out = shmem;
+    return m_handles.Create(shmem);
+}
+
+// svcClearEvent / svcResetSignal(handle = W0)
+void Kernel::SvcClearEvent(CPUState& s) {
+    auto ev = m_handles.Get<KEvent>(static_cast<u32>(s.x[0]));
+    if (!ev) { SetResult(s, Result::InvalidHandle); return; }
+    ev->signaled = false;
+    SetResult(s, Result::Success);
+}
+
+// svcWaitSynchronization(handles = X1, cantidad = W2, timeout_ns = X3) -> W0, W1 = indice
+// Sin hilos de verdad: si ningun evento esta activo y hay que esperar, el programa
+// se quedaria bloqueado para siempre, asi que paramos la CPU para que se vea.
+void Kernel::SvcWaitSynchronization(CPUState& s) {
+    const u64 handles_ptr = s.x[1];
+    const u32 count = static_cast<u32>(s.x[2]);
+    const s64 timeout = static_cast<s64>(s.x[3]);
+    if (count > 64) { SetResult(s, 0xEE01); return; } // OutOfRange
+
+    for (u32 i = 0; i < count; ++i) {
+        const u32 h = m_memory.Read<u32>(handles_ptr + i * 4);
+        auto obj = m_handles.Get(h);
+        if (!obj) { SetResult(s, Result::InvalidHandle); return; }
+        if (auto ev = std::dynamic_pointer_cast<KEvent>(obj); ev && ev->signaled) {
+            SetResult(s, Result::Success);
+            s.x[1] = i;
+            return;
+        }
+    }
+    if (timeout == 0) { SetResult(s, Result::TimedOut); return; }
+    m_cpu.Halt("svcWaitSynchronization: el programa espera un evento que nunca llegara "
+               "(NeXo todavia no emula hilos)");
+}
+
+// svcMapSharedMemory(handle = W0, addr = X1, size = X2, permisos = W3)
+void Kernel::SvcMapSharedMemory(CPUState& s) {
+    auto shmem = m_handles.Get<KSharedMemory>(static_cast<u32>(s.x[0]));
+    const u64 addr = s.x[1], size = s.x[2];
+    if (!shmem) { SetResult(s, Result::InvalidHandle); return; }
+    if (addr % Core::Memory::PAGE_SIZE || size % Core::Memory::PAGE_SIZE) { SetResult(s, Result::InvalidAddress); return; }
+    if (size > shmem->data.size()) { SetResult(s, Result::InvalidSize); return; }
+    if (m_memory.QueryRegion(addr).state != MemoryState::Free) { SetResult(s, Result::InvalidState); return; }
+
+    m_memory.WriteBytes(addr, shmem->data.data(), size);
+    const auto perm = (s.x[3] & 2) ? MemoryPermission::ReadWrite : MemoryPermission::Read;
+    m_memory.MapRegion(addr, size, MemoryState::Shared, perm, "compartida: " + shmem->name);
+    Logger::Log(Logger::Level::Info, "[HLE] svcMapSharedMemory(" + shmem->name + ") en " + Hex(addr));
+    SetResult(s, Result::Success);
+}
+
+// svcUnmapSharedMemory(handle = W0, addr = X1, size = X2)
+void Kernel::SvcUnmapSharedMemory(CPUState& s) {
+    m_memory.UnmapRegion(s.x[1], s.x[2]);
+    SetResult(s, Result::Success);
 }
 
 } // namespace NeXo2::HLE

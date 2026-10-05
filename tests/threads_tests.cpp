@@ -45,13 +45,13 @@ TEST(Threads_FourThreadsMutexCondvar) {
     CHECK(st.context_switches > 10);
     CHECK(st.idle_ticks > 0);         // svcSleepThread con todos dormidos: el reloj salto
 
-    // 1 principal + 4 trabajadores (terminados) + 1 que nunca arranco
+    // 1 principal + 4 trabajadores + 1 que nunca arranco: al salir del proceso, todos terminados
     const auto& threads = sys.GetKernel().Threads();
     CHECK_EQ(threads.size(), 6);
     int terminated = 0;
     for (const auto& t : threads)
         if (t->state == HLE::KThread::State::Terminated) ++terminated;
-    CHECK_EQ(terminated, 4);
+    CHECK_EQ(terminated, 6);
 }
 
 TEST(Threads_SameResultWithoutDecodeCache) {

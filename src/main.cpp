@@ -8,6 +8,9 @@
 #include "common/logger.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -54,8 +57,9 @@ static void LoadDemo(System& sys) {
 
 // Ejecucion continua: en cada fotograma de la interfaz la CPU emulada corre
 // durante unos milisegundos. Asi la ventana sigue respondiendo mientras tanto.
-static bool g_emuRunning = false;
-static unsigned long long g_runInstructions = 0;   // instrucciones desde que se pulso Run
+// (atomicas: las leen la interfaz y el hilo de emulacion a la vez)
+static std::atomic<bool> g_emuRunning{false};
+static std::atomic<unsigned long long> g_runInstructions{0};   // instrucciones desde que se pulso Run
 
 // Medidor de velocidad: cada segundo calcula instrucciones/s e imagenes/s
 struct SpeedMeter {
@@ -89,21 +93,57 @@ static void SetRunning(System& sys, bool run) {
         run ? std::string("[UI] Run") : "[UI] Pausa (" + std::to_string(g_runInstructions) + " instrucciones)");
 }
 
-// Ejecuta trozos de 1M instrucciones hasta gastar 'budget_ms' o hasta que la CPU se pare.
-static void RunSlice(System& sys, double budget_ms) {
-    auto& cpu = sys.GetCpu();
-    const auto start = std::chrono::steady_clock::now();
-    while (!cpu.IsHalted()) {
-        g_runInstructions += sys.Run(1'000'000);
-        const std::chrono::duration<double, std::milli> spent = std::chrono::steady_clock::now() - start;
-        if (spent.count() >= budget_ms) break;
+// ---------------------------------------------------------------------------
+//  Hilo de emulacion
+// ---------------------------------------------------------------------------
+// La CPU emulada corre en su propio hilo del PC, sin esperar a la interfaz.
+// Un candado (mutex) protege la "consola" (System): el hilo de emulacion lo coge
+// para cada tanda de ~200 000 instrucciones (~1 ms) y la interfaz lo coge una vez
+// por fotograma para leer el estado y aplicar los botones. Mientras la interfaz
+// espera el refresco de la pantalla (vsync), la emulacion sigue corriendo.
+class EmuThread {
+public:
+    explicit EmuThread(System& sys) : m_sys(sys), m_thread([this] { Loop(); }) {}
+    ~EmuThread() {
+        m_quit = true;
+        m_thread.join();
     }
-    if (cpu.IsHalted()) {
-        g_emuRunning = false;
-        NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
-            "[UI] Run: " + std::to_string(g_runInstructions) + " instrucciones ejecutadas. " + cpu.GetHaltReason());
+
+    // La interfaz pide el candado: avisa para que el hilo de emulacion lo suelte pronto
+    std::unique_lock<std::mutex> LockForUi() {
+        m_uiWaiting = true;
+        std::unique_lock<std::mutex> lock(m_mutex);
+        m_uiWaiting = false;
+        return lock;
     }
-}
+
+private:
+    void Loop() {
+        while (!m_quit) {
+            if (!g_emuRunning || m_uiWaiting) {
+                // En pausa, o la interfaz quiere el candado: ceder un momento
+                std::this_thread::sleep_for(std::chrono::microseconds(g_emuRunning ? 0 : 2000));
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (!g_emuRunning) continue;                  // la interfaz pauso mientras esperabamos
+            auto& cpu = m_sys.GetCpu();
+            g_runInstructions += m_sys.Run(200'000);
+            if (cpu.IsHalted()) {
+                g_emuRunning = false;
+                NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
+                    "[UI] Run: " + std::to_string(g_runInstructions.load()) + " instrucciones ejecutadas. " +
+                    cpu.GetHaltReason());
+            }
+        }
+    }
+
+    System& m_sys;
+    std::mutex m_mutex;
+    std::atomic<bool> m_quit{false};
+    std::atomic<bool> m_uiWaiting{false};
+    std::thread m_thread;   // el ultimo: arranca cuando todo lo demas ya existe
+};
 
 // ---------------------------------------------------------------------------
 //  Mandos: teclado y mando del PC -> mando de la Switch
@@ -255,8 +295,14 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
+    EmuThread emu(sys);   // la CPU emulada corre en su propio hilo
+
     bool running = true;
     while (running) {
+        // Candado de la consola durante todo el fotograma de la interfaz (~1 ms);
+        // se suelta antes de dibujar y esperar el vsync
+        std::unique_lock<std::mutex> emuLock = emu.LockForUi();
+
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL3_ProcessEvent(&event);
@@ -287,12 +333,9 @@ int main(int argc, char** argv) {
             }
         }
 
-        // La CPU emulada corre ~12 ms por fotograma (el resto es para la interfaz)
-        // Antes, los mandos: el teclado solo cuenta si no se esta escribiendo en la interfaz
-        if (g_emuRunning) {
+        // Mandos: el teclado solo cuenta si no se esta escribiendo en la interfaz
+        if (g_emuRunning)
             sys.GetKernel().SetPadInput(ReadPadInput(!ImGui::GetIO().WantCaptureKeyboard));
-            RunSlice(sys, 12.0);
-        }
 
         ImGui_ImplSDLRenderer3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -538,9 +581,11 @@ int main(int argc, char** argv) {
         }
         ImGui::End();
 
+        ImGui::Render();
+        emuLock.unlock();   // a partir de aqui no se toca la consola: la emulacion sigue
+
         SDL_SetRenderDrawColor(renderer, 10, 10, 15, 255);
         SDL_RenderClear(renderer);
-        ImGui::Render();
         // Dibujar en pixeles reales (pantallas con escala != 100%)
         const ImGuiIO& io = ImGui::GetIO();
         SDL_SetRenderScale(renderer, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);

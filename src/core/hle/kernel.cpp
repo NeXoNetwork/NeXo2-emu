@@ -284,6 +284,12 @@ void Kernel::SvcQueryMemory(CPUState& s) {
 
 void Kernel::SvcExitProcess(CPUState&) {
     m_exited = true;
+    // El proceso entero termina: todos sus hilos tambien
+    for (auto& t : m_threads) {
+        if (t.get() == m_current.get()) t->ctx = m_cpu.GetState();
+        t->state = KThread::State::Terminated;
+        t->wait = KThread::Wait::None;
+    }
     m_cpu.Halt("svcExitProcess: el programa ha terminado");
 }
 

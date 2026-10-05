@@ -1,6 +1,7 @@
 #pragma once
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <string>
 
 namespace NeXo2::Common {
@@ -11,6 +12,8 @@ public:
 
     static void Log(Level level, const std::string& message) {
         if (Muted()) return;
+        // La emulacion y la interfaz corren en hilos distintos: una linea cada vez
+        std::lock_guard<std::mutex> lock(Lock());
         const char* prefix = "[INFO] ";
         switch (level) {
             case Level::Info:    prefix = "[INFO] ";  break;
@@ -36,6 +39,7 @@ public:
 
 private:
     static bool& Muted() { static bool m = false; return m; }
+    static std::mutex& Lock() { static std::mutex m; return m; }
     static std::ofstream*& FileSlot() { static std::ofstream* f = nullptr; return f; }
     static std::ofstream* File() { return FileSlot(); }
 };

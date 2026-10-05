@@ -1,6 +1,9 @@
 #pragma once
 #include <cstring>
+#include <array>
 #include <functional>
+#include <memory>
+#include <unordered_map>
 #include <string>
 #include "common/types.hpp"
 #include "common/bit_utils.hpp"
@@ -8,6 +11,22 @@
 #include "memory.hpp"
 
 namespace NeXo2::Core {
+
+class Interpreter;
+
+// Una instruccion ya decodificada (ver interpreter_fast.cpp).
+// 'fn' es la funcion que la ejecuta; el resto son sus operandos ya extraidos,
+// asi no hay que volver a mirar bits cada vez que se ejecuta.
+struct DecodedInstr {
+    using Handler = bool (*)(Interpreter&, const DecodedInstr&);
+    Handler fn = nullptr;   // al principio: Interpreter::DecodeAndRun
+    u32 raw = 0;            // la instruccion original
+    u8  rd = 0, rn = 0, rm = 0, ra = 0;
+    u8  sf = 0;             // 1 = registros X (64 bits)
+    u8  a = 0, b = 0, c = 0; // campos extra, segun la instruccion
+    u64 imm = 0;            // inmediato, mascara o destino del salto
+    u64 imm2 = 0;           // segunda mascara o direccion de retorno
+};
 
 // Interprete de la CPU ARM64 (Cortex-A78C), solo enteros por ahora.
 //
@@ -33,8 +52,12 @@ public:
     using SvcHandler = std::function<void(u32 imm, CPUState& state)>;
 
     explicit Interpreter(Memory& memory) : m_memory(memory) {
+        m_memory.SetCodeWriteFlag(&m_attention);
         Reset();
     }
+    ~Interpreter() { m_memory.SetCodeWriteFlag(nullptr); }
+    Interpreter(const Interpreter&) = delete;
+    Interpreter& operator=(const Interpreter&) = delete;
 
     void Reset();
 
@@ -46,14 +69,29 @@ public:
     // Devuelve cuantas instrucciones se ejecutaron.
     u64 Run(u64 max_steps);
 
+    // Cache de instrucciones decodificadas (activada por defecto). Desactivarla
+    // vuelve al camino lento de siempre: sirve para comparar los dos en los tests.
+    void SetDecodeCacheEnabled(bool enabled) { m_cacheEnabled = enabled; ClearDecodeCache(); }
+    bool IsDecodeCacheEnabled() const { return m_cacheEnabled; }
+    void ClearDecodeCache() { m_decodeCache.clear(); }
+    size_t DecodedPages() const { return m_decodeCache.size(); }
+
     // Para la CPU (por ejemplo desde un SvcHandler).
     void Halt(const std::string& reason);
     bool IsHalted() const { return m_halted; }
     // Quita la parada para poder seguir ejecutando (por ejemplo tras cambiar el PC).
-    void Resume() { m_halted = false; m_haltReason.clear(); }
+    void Resume() { m_halted = false; m_haltReason.clear(); m_attention = true; }
     const std::string& GetHaltReason() const { return m_haltReason; }
 
     void SetSvcHandler(SvcHandler handler) { m_svcHandler = std::move(handler); }
+
+    // Termina Run() despues de la instruccion actual, SIN parar la CPU. Lo usa el
+    // kernel cuando un hilo se bloquea (espera, duerme...) para cambiar a otro hilo.
+    void RequestStop() { m_stopRequested = true; m_attention = true; }
+    // Adelanta el reloj (CNTPCT) sin ejecutar nada: todos los hilos estan dormidos.
+    void AddTicks(u64 ticks) { m_instructionCount += ticks; }
+    // Al cambiar de hilo se pierde la reserva de LDXR (como en la CPU real).
+    void ClearExclusive() { m_exclusiveValid = false; }
 
     u64 GetInstructionCount() const { return m_instructionCount; }
 
@@ -61,6 +99,18 @@ public:
     const CPUState& GetState() const { return m_state; }
 
 private:
+    friend struct FastOps;   // las funciones rapidas de interpreter_fast.cpp
+
+    // --- Cache de instrucciones decodificadas ---
+    // Una pagina de 4 KB tiene 1024 instrucciones: una entrada por cada una.
+    struct CachePage { std::array<DecodedInstr, 1024> entries; };
+    u64  RunPlain(u64 max_steps);        // sin cache: fetch + decode + execute cada vez
+    u64  RunCached(u64 max_steps);       // con cache
+    CachePage* GetCachePage(u64 page_base);
+    void HandleCodeWrites();             // el programa escribio en paginas de codigo
+    static void Decode(u32 raw, u64 pc, DecodedInstr& out);  // interpreter_fast.cpp
+    static bool DecodeAndRun(Interpreter& it, const DecodedInstr& entry);
+
     // --- Decodificacion por grupos (cada uno en su .cpp) ---
     // Devuelven false si la instruccion no esta implementada.
     bool Execute(u32 instr);
@@ -120,11 +170,20 @@ private:
     u64  m_nextPc = 0;           // a donde ira el PC tras la instruccion actual
     u64  m_instructionCount = 0; // tambien hace de contador CNTPCT_EL0 (provisional)
     bool m_halted = false;
+    // "Hay que mirar algo": la CPU se paro o el programa escribio en codigo.
+    // Asi el bucle rapido solo comprueba una variable por instruccion.
+    bool m_attention = false;
+    bool m_stopRequested = false;   // ver RequestStop()
     std::string m_haltReason;
 
     // Monitor exclusivo para LDXR/STXR (mutex y atomicos). Version de un solo nucleo.
     bool m_exclusiveValid = false;
     u64  m_exclusiveAddr  = 0;
+
+    bool m_cacheEnabled = true;
+    std::unordered_map<u64, std::unique_ptr<CachePage>> m_decodeCache;  // base de pagina -> cache
+    u64  m_cacheGeneration = ~0ull;   // Memory::Generation() de cuando se lleno
+    u64  m_seenCodeWrites = 0;        // Memory::CodeWriteCount() ya atendidos
 };
 
 
@@ -146,13 +205,16 @@ inline bool Interpreter::Execute(u32 instr) {
 }
 
 inline u64 Interpreter::X(unsigned n, bool sf) const {
-    const u64 v = (n < 31) ? m_state.x[n] : 0; // 31 = XZR
+    const u64 v = m_state.x[n & 31];           // x[31] siempre vale 0 = XZR
     return sf ? v : (v & 0xFFFFFFFFu);
 }
 
 inline void Interpreter::SetX(unsigned n, u64 value, bool sf) {
     // Escribir un registro W pone a cero los 32 bits altos del X.
-    if (n < 31) m_state.x[n] = sf ? value : (value & 0xFFFFFFFFu);
+    // Escribir en XZR no hace nada: se escribe en x[31] y se vuelve a poner a 0
+    // (dos escrituras sin "if" son mas rapidas que una comprobacion).
+    m_state.x[n & 31] = sf ? value : (value & 0xFFFFFFFFu);
+    m_state.x[31] = 0;
 }
 
 inline u64 Interpreter::XorSP(unsigned n, bool sf) const {

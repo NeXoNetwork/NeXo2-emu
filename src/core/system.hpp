@@ -28,6 +28,10 @@ public:
     // Vuelve a cargar el ultimo programa desde el principio.
     void Restart();
 
+    // Ejecuta hasta 'budget' instrucciones (repartidas entre los hilos del programa).
+    // Usar esto en vez de GetCpu().Run(): el planificador del kernel decide que hilo corre.
+    u64 Run(u64 budget) { return m_kernel.Run(budget); }
+
     Memory&       GetMemory() { return m_memory; }
     Interpreter&  GetCpu()    { return m_cpu; }
     HLE::Kernel&  GetKernel() { return m_kernel; }

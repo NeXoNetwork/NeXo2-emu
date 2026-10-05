@@ -94,7 +94,7 @@ static void RunSlice(System& sys, double budget_ms) {
     auto& cpu = sys.GetCpu();
     const auto start = std::chrono::steady_clock::now();
     while (!cpu.IsHalted()) {
-        g_runInstructions += cpu.Run(1'000'000);
+        g_runInstructions += sys.Run(1'000'000);
         const std::chrono::duration<double, std::milli> spent = std::chrono::steady_clock::now() - start;
         if (spent.count() >= budget_ms) break;
     }
@@ -333,6 +333,15 @@ int main(int argc, char** argv) {
         if (cpu.IsHalted())
             ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "CPU parada: %s", cpu.GetHaltReason().c_str());
 
+        // Cache de instrucciones decodificadas: se puede apagar para comparar velocidades
+        bool decodeCache = cpu.IsDecodeCacheEnabled();
+        if (ImGui::Checkbox("Cache de instrucciones decodificadas", &decodeCache)) {
+            LogUi(decodeCache ? "Cache de decodificacion: activada" : "Cache de decodificacion: desactivada");
+            cpu.SetDecodeCacheEnabled(decodeCache);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%zu paginas de codigo)", cpu.DecodedPages());
+
         // Registros X0..X30 en 3 columnas
         if (ImGui::BeginTable("regs", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
             for (int i = 0; i < 31; ++i) {
@@ -417,6 +426,51 @@ int main(int argc, char** argv) {
         }
 
         ImGui::TextDisabled("Tarjeta SD (sdmc:/): %s", sdmcRoot.c_str());
+
+        // Hilos del programa (6 nucleos emulados que se turnan)
+        if (!kernel.Threads().empty() &&
+            ImGui::CollapsingHeader("Hilos", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const auto& st = kernel.Stats();
+            ImGui::TextDisabled("Cambios de hilo: %llu   esperas de mutex: %llu   condvar: %llu",
+                                (unsigned long long)st.context_switches, (unsigned long long)st.mutex_waits,
+                                (unsigned long long)st.condvar_waits);
+            if (ImGui::BeginTable("hilos", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                              ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("Id");
+                ImGui::TableSetupColumn("Nombre");
+                ImGui::TableSetupColumn("Nucleo");
+                ImGui::TableSetupColumn("Prio");
+                ImGui::TableSetupColumn("Estado");
+                ImGui::TableSetupColumn("PC");
+                ImGui::TableHeadersRow();
+                for (const auto& t : kernel.Threads()) {
+                    using TS = NeXo2::HLE::KThread::State;
+                    using TW = NeXo2::HLE::KThread::Wait;
+                    const char* state = "?";
+                    switch (t->state) {
+                        case TS::Created:    state = "Creado"; break;
+                        case TS::Ready:      state = "Listo"; break;
+                        case TS::Terminated: state = "Terminado"; break;
+                        case TS::Waiting:
+                            state = t->wait == TW::Sync    ? "Espera evento"
+                                  : t->wait == TW::Sleep   ? "Durmiendo"
+                                  : t->wait == TW::Mutex   ? "Espera mutex"
+                                  : t->wait == TW::CondVar ? "Espera condvar" : "Esperando";
+                            break;
+                    }
+                    const bool running = kernel.CurrentThread() == t.get();
+                    const unsigned long long pc = running ? cpu.GetState().pc : t->ctx.pc;
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn(); ImGui::Text("%llu", (unsigned long long)t->id);
+                    ImGui::TableNextColumn(); ImGui::Text("%s%s", t->name.c_str(), running ? " *" : "");
+                    ImGui::TableNextColumn(); ImGui::Text("%d", t->core);
+                    ImGui::TableNextColumn(); ImGui::Text("%d", t->priority);
+                    ImGui::TableNextColumn(); ImGui::Text("%s", state);
+                    ImGui::TableNextColumn(); ImGui::Text("%010llX", pc);
+                }
+                ImGui::EndTable();
+            }
+        }
 
         ImGui::Separator();
         ImGui::Text("Salida del programa (svcOutputDebugString):");

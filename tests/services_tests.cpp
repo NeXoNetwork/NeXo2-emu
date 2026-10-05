@@ -29,7 +29,7 @@ std::vector<u8> LoadTestNro(const char* name) {
 TEST(Services_LibnxStartupSequence) {
     Core::System sys;
     CHECK(sys.LoadNro(LoadTestNro("libnx_init.nro"), "libnx_init.nro"));
-    sys.GetCpu().Run(20'000'000);
+    sys.Run(20'000'000);
     const std::string& out = sys.GetKernel().GetDebugOutput();
 
     CHECK(sys.GetKernel().HasExited());
@@ -55,7 +55,7 @@ TEST(Services_LibnxStartupSequence) {
 TEST(Services_SharedMemoryIsMapped) {
     Core::System sys;
     CHECK(sys.LoadNro(LoadTestNro("libnx_init.nro"), "libnx_init.nro"));
-    sys.GetCpu().Run(20'000'000);
+    sys.Run(20'000'000);
     const auto hid = sys.GetMemory().QueryRegion(0x180000000ULL);
     CHECK_EQ(static_cast<u32>(hid.state), static_cast<u32>(Core::MemoryState::Shared));
     CHECK_EQ(hid.size, 0x40000);
@@ -92,7 +92,7 @@ TEST(Kernel_WaitSynchronizationWithoutSignalStops) {
         0xD4000301u, // svc #0x18
     };
     sys.LoadRawProgram(program, 4, HLE::Layout::CODE_BASE);
-    sys.GetCpu().Run(10);
+    sys.Run(10);
     CHECK(sys.GetCpu().IsHalted());
     CHECK(sys.GetCpu().GetHaltReason().find("svcWaitSynchronization") != std::string::npos);
 }

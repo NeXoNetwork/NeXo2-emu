@@ -26,8 +26,10 @@ struct alignas(16) V128 {
 
 // Estado visible de un nucleo ARM64 (lo que un programa puede leer/escribir).
 struct CPUState {
-    // 31 Registros de propósito general (X0-X30). X30 = LR (direccion de retorno).
-    std::array<uint64_t, 31> x;
+    // Registros de propósito general X0-X30. X30 = LR (direccion de retorno).
+    // x[31] no existe en la CPU real: vale SIEMPRE 0 y hace de XZR (registro cero),
+    // asi leer "el registro 31" no necesita una comprobacion. No escribir en el.
+    std::array<uint64_t, 32> x;
 
     // 32 registros SIMD / coma flotante (v0-v31)
     std::array<V128, 32> v;

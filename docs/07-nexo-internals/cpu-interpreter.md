@@ -89,6 +89,7 @@ Measured with NX-FixCheat (libnx console homebrew), g++ -O2, one x86-64 core:
 | :--- | :--- |
 | First working version | ~42 M |
 | Two-level page table + code page cache + inlined helpers | ~95 M |
+| + decode cache (fast handlers for hot instructions) | ~170 M |
 
 What made the difference (profiled with valgrind/callgrind):
 
@@ -109,7 +110,49 @@ What made the difference (profiled with valgrind/callgrind):
 Release builds also enable link-time optimisation (`INTERPROCEDURAL_OPTIMIZATION_RELEASE`
 in `CMakeLists.txt`). The "Pantalla" window shows the live speed (frames/s and M instr/s).
 
-The remaining cost is decoding every instruction every time it runs. The next big step is
-a cache of decoded instructions (or blocks), and after that the JIT. A typical libnx
+Measured in host instructions per emulated instruction (callgrind, exact): 243 at the
+start, 147 after the first round, ~60 with the decode cache.
+
+## Decode cache (`interpreter_fast.cpp`)
+
+Decoding means looking at the bits of an instruction to know what it is and where its
+operands are. Without a cache that happens every time an instruction runs, even inside a
+loop that runs it millions of times. The decode cache does it **once per address**:
+
+```
+Run() with cache (RunCached):
+  page of the PC -> CachePage (1024 entries, one per instruction of the 4 KB page)
+  entry.fn(entry)            first time: DecodeAndRun -> Decode() fills the entry
+                             next times: the fast handler, operands already extracted
+```
+
+- `DecodedInstr` keeps the handler pointer and pre-extracted operands: registers,
+  immediates, logical masks (`DecodeBitMasks` runs once), branch targets (absolute).
+- **Fast handlers** only for the hot instructions: ADD/SUB (imm and register), logical
+  (imm and register), MOV, MOVZ/MOVK, LSL/LSR/ASR (imm and register), bitfield, CSEL family,
+  MADD, B/BL/B.cond/CBZ/TBZ/BR/BLR/RET, LDR/STR (imm12, imm9, pre/post, register), LDP/STP.
+  Many are templates (`AddSubReg<SUB, FLAGS, SHIFTED>`, `LoadStoreFixed<MODE, STORE, BYTES>`),
+  so the common case has no runtime checks at all.
+- Everything else uses `Generic`, which calls the normal decoder (`Execute`). Rule:
+  `Decode()` only picks a fast handler when the normal code would accept that encoding,
+  so invalid encodings produce exactly the same error.
+- **Self-modifying code**: `Memory` marks pages the CPU has decoded (`MarkCode`). The first
+  write to such a page is recorded and sets the CPU's `m_attention` flag; the CPU then drops
+  the cache of that page before the next instruction. Loading another program
+  (`Memory::Clear`) changes `Generation()` and drops everything.
+- **XZR trick**: `CPUState::x` has 32 entries; `x[31]` is always 0, so reading register 31
+  as XZR needs no check.
+- One check per instruction in the loop: `m_attention` is set by `Halt()` and by code writes.
+
+**Verification** (`tests/decode_cache_tests.cpp`): two CPUs, one with and one without the
+cache, run the same random instruction (36 000 of them, every fast family plus whole random
+groups) from the same random state, and must end with identical registers, flags, PC,
+memory and halt status. Plus a self-modifying program and a full `libnx_init.nro` run.
+Deliberately breaking one handler makes the test fail with the exact instruction.
+
+The cache can be switched off in the Diagnostics window (or with
+`Interpreter::SetDecodeCacheEnabled(false)`) to compare speeds.
+
+The next big step is the JIT: translating whole blocks of ARM64 code to x86-64. A typical libnx
 console homebrew needs ~15-20 M instructions per frame, so full speed (60 frames/s)
 needs over 1 000 M instructions/s: only a JIT gets there.

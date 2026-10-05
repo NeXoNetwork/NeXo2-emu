@@ -70,7 +70,7 @@ TEST(Nro_LoadsAndMapsSegments) {
 TEST(Nro_HelloRunsToExit) {
     Core::System sys;
     CHECK(sys.LoadNro(ReadTestFile("hello.nro"), "hello.nro"));
-    sys.GetCpu().Run(10'000'000);
+    sys.Run(10'000'000);
 
     CHECK(sys.GetKernel().HasExited());
     const std::string& out = sys.GetKernel().GetDebugOutput();
@@ -90,12 +90,12 @@ TEST(Nro_HelloRunsToExit) {
 TEST(Nro_RestartRunsAgain) {
     Core::System sys;
     CHECK(sys.LoadNro(ReadTestFile("hello.nro"), "hello.nro"));
-    sys.GetCpu().Run(10'000'000);
+    sys.Run(10'000'000);
     CHECK(sys.GetKernel().HasExited());
     sys.Restart();
     CHECK(!sys.GetKernel().HasExited());
     CHECK(sys.GetKernel().GetDebugOutput().empty());
-    sys.GetCpu().Run(10'000'000);
+    sys.Run(10'000'000);
     CHECK(sys.GetKernel().HasExited());
     // .data vuelve a su valor original: el contador sigue saliendo 42, no 43
     CHECK(Contains(sys.GetKernel().GetDebugOutput(), "Contador (.data): 42"));
@@ -120,11 +120,11 @@ TEST(Nro_RejectsInvalidFiles) {
 
 TEST(Kernel_UnknownSvcStopsCpu) {
     Core::System sys;
-    const u32 program[] = { 0xD4000101u /* svc #0x08 */ };
+    const u32 program[] = { 0xD4000581u /* svc #0x2C */ };
     sys.LoadRawProgram(program, 1, HLE::Layout::CODE_BASE);
-    sys.GetCpu().Run(10);
+    sys.Run(10);
     CHECK(sys.GetCpu().IsHalted());
-    CHECK(sys.GetCpu().GetHaltReason().find("CreateThread") != std::string::npos);
+    CHECK(sys.GetCpu().GetHaltReason().find("MapPhysicalMemory") != std::string::npos);
     CHECK(std::string(HLE::Kernel::SvcName(0x29)) == "GetInfo");
     CHECK(std::string(HLE::Kernel::SvcName(0x6F)) == "GetSystemInfo");
     CHECK(std::string(HLE::Kernel::SvcName(0x7F)) == "CallSecureMonitor");

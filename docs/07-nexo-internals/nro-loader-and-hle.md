@@ -53,23 +53,20 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 | 0x03 | SetMemoryAttribute | Only checks alignment (no caches to emulate). |
 | 0x06 | QueryMemory | Fills `MemoryInfo` from the region map (free gaps included). |
 | 0x07 | ExitProcess | Halts the CPU. |
-| 0x0B | SleepThread | No-op (single thread). |
-| 0x0C | GetThreadPriority | Always 44 (normal). |
-| 0x10 | GetCurrentProcessorNumber | Always core 0. |
-| 0x11 | SignalEvent | Success (no threads to wake). |
+| 0x08-0x0F | CreateThread, StartThread, ExitThread, SleepThread, Get/SetThreadPriority, Get/SetThreadCoreMask | Real threads: see [threads.md](threads.md). |
+| 0x10 | GetCurrentProcessorNumber | Emulated core of the current thread (0-5). |
+| 0x11 | SignalEvent | Wakes threads waiting for it. |
 | 0x12 / 0x17 | ClearEvent / ResetSignal | Clears a `KEvent`. |
 | 0x13 / 0x14 | MapSharedMemory / UnmapSharedMemory | Copies the content in and remembers the address (hid updates it live). |
 | 0x15 | CreateTransferMemory | Returns a handle; the memory stays in place (used by nvdrv). |
 | 0x16 | CloseHandle | Removes the handle from the handle table. |
-| 0x18 | WaitSynchronization | Returns at once if an event is signaled; an endless wait halts the CPU. |
-| 0x1A / 0x1B | ArbitrateLock / ArbitrateUnlock | Single thread: lock always succeeds, unlock clears the mutex word. |
-| 0x1C | WaitProcessWideKeyAtomic | Returns "timed out" with the mutex still owned (nobody else can signal). |
-| 0x1D | SignalProcessWideKey | Success (no threads to wake). |
+| 0x18 / 0x19 | WaitSynchronization / CancelSynchronization | Blocks the thread (events, threads); a wait nobody can end is reported as a deadlock. |
+| 0x1A-0x1D | ArbitrateLock/Unlock, WaitProcessWideKeyAtomic, SignalProcessWideKey | Real mutex and condition variables: see [threads.md](threads.md). |
 | 0x1E | GetSystemTick | Same counter as `CNTPCT_EL0` (instructions executed). |
 | 0x1F | ConnectToNamedPort | Only "sm:". See [ipc-and-services.md](ipc-and-services.md). |
 | 0x21 | SendSyncRequest | IPC message in TLS. |
 | 0x22 | SendSyncRequestWithUserBuffer | IPC message in a user buffer. |
-| 0x24 / 0x25 | GetProcessId / GetThreadId | Fixed ids. |
+| 0x24 / 0x25 | GetProcessId / GetThreadId | Process id fixed; thread ids 1, 2, 3... |
 | 0x26 | Break | Halts the CPU (program aborted). |
 | 0x27 | OutputDebugString | Text shown in the "Programa" window and the console. |
 | 0x29 | GetInfo | Region addresses/sizes, memory totals, core mask, entropy, program id. |
@@ -88,9 +85,7 @@ checks every line it prints.
 ## Next steps
 
 1. Speed: decode cache in the interpreter, then the Ballistic JIT.
-2. Real threads: `CreateThread`/`StartThread`, a scheduler, and proper waits in the
-   synchronization SVCs above (today they assume a single thread).
-3. Permission checks on memory access (today the region map is informational).
+2. Permission checks on memory access (today the region map is informational).
 
 Done since this page was first written: IPC and services, SIMD/FP, display, SD card and
 controllers (see the other pages in this folder).

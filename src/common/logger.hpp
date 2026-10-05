@@ -10,6 +10,7 @@ public:
     enum class Level { Info, Warning, Error, Debug };
 
     static void Log(Level level, const std::string& message) {
+        if (Muted()) return;
         const char* prefix = "[INFO] ";
         switch (level) {
             case Level::Info:    prefix = "[INFO] ";  break;
@@ -30,7 +31,11 @@ public:
         FileSlot() = file ? &file : nullptr;
     }
 
+    // Silencia todo (lo usan los tests que ejecutan miles de instrucciones al azar)
+    static void SetMuted(bool muted) { Muted() = muted; }
+
 private:
+    static bool& Muted() { static bool m = false; return m; }
     static std::ofstream*& FileSlot() { static std::ofstream* f = nullptr; return f; }
     static std::ofstream* File() { return FileSlot(); }
 };

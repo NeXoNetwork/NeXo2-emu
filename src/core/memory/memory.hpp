@@ -58,6 +58,8 @@ public:
         m_pages.clear();
         for (auto& l2 : m_table) l2.reset();
         m_regions.clear();
+        m_codeWrites = 0;
+        m_pendingCount = 0;
         ++m_generation;
     }
 
@@ -65,12 +67,38 @@ public:
     // (la cache de instrucciones de la CPU) sabe asi que ya no valen.
     u64 Generation() const { return m_generation; }
 
+    // ---------------------------------------------------------------------
+    // Paginas de codigo. La CPU guarda instrucciones ya decodificadas por pagina;
+    // si el programa escribe en una de esas paginas, hay que tirar esa cache.
+    //   MarkCode(addr)    -> la CPU avisa: "tengo esta pagina decodificada"
+    //   CodeWriteCount()  -> sube cada vez que se escribe en una pagina marcada
+    //   TakeCodeWrites()  -> que paginas eran (y se olvida de ellas)
+    // ---------------------------------------------------------------------
+    void MarkCode(VAddr addr) {
+        if (addr >= ADDRESS_SPACE) return;
+        GetOrCreatePage(addr / PAGE_SIZE)->code = true;
+    }
+    u64 CodeWriteCount() const { return m_codeWrites; }
+    // Variable que se pone a true en cada escritura en codigo (la CPU la mira en su bucle)
+    void SetCodeWriteFlag(bool* flag) { m_codeWriteFlag = flag; }
+
+    // Copia en 'out' las paginas de codigo escritas (direccion base de cada una).
+    // Devuelve false si fueron demasiadas para recordarlas: entonces hay que tirarlo todo.
+    template <size_t N>
+    bool TakeCodeWrites(std::array<VAddr, N>& out, size_t& count) {
+        const bool overflow = m_pendingCount > m_pending.size();
+        count = std::min(m_pendingCount, std::min(N, m_pending.size()));
+        for (size_t i = 0; i < count; ++i) out[i] = m_pending[i];
+        m_pendingCount = 0;
+        return !overflow;
+    }
+
     // Puntero a los 4 KB de la pagina que contiene 'addr', o nullptr si no existe.
     // Valido hasta el siguiente Clear().
     u8* PagePointer(VAddr addr) {
         if (addr >= ADDRESS_SPACE) return nullptr;
         Page* page = FindPage(addr / PAGE_SIZE);
-        return page ? page->data() : nullptr;
+        return page ? page->bytes.data() : nullptr;
     }
 
     // ---------------------------------------------------------------------
@@ -139,7 +167,7 @@ public:
         const u64 offset = addr & (PAGE_SIZE - 1);
         if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
             if (const Page* page = FindPage(addr / PAGE_SIZE))
-                std::memcpy(&value, page->data() + offset, sizeof(T));
+                std::memcpy(&value, page->bytes.data() + offset, sizeof(T));
             return value;
         }
         ReadBytes(addr, &value, sizeof(T));
@@ -150,7 +178,9 @@ public:
     void Write(VAddr addr, T value) {
         const u64 offset = addr & (PAGE_SIZE - 1);
         if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
-            std::memcpy(GetOrCreatePage(addr / PAGE_SIZE)->data() + offset, &value, sizeof(T));
+            Page* page = GetOrCreatePage(addr / PAGE_SIZE);
+            if (page->code) [[unlikely]] NoteCodeWrite(page, addr);
+            std::memcpy(page->bytes.data() + offset, &value, sizeof(T));
             return;
         }
         WriteBytes(addr, &value, sizeof(T));
@@ -165,7 +195,7 @@ public:
             const u64 offset = addr % PAGE_SIZE;
             const size_t chunk = std::min<size_t>(size, PAGE_SIZE - offset);
             if (Page* page = FindPage(index))
-                std::memcpy(out, page->data() + offset, chunk);
+                std::memcpy(out, page->bytes.data() + offset, chunk);
             else
                 std::memset(out, 0, chunk);
             addr += chunk; out += chunk; size -= chunk;
@@ -181,13 +211,27 @@ public:
             const u64 offset = addr % PAGE_SIZE;
             const size_t chunk = std::min<size_t>(size, PAGE_SIZE - offset);
             Page* page = GetOrCreatePage(index);
-            std::memcpy(page->data() + offset, in, chunk);
+            if (page->code) [[unlikely]] NoteCodeWrite(page, addr);
+            std::memcpy(page->bytes.data() + offset, in, chunk);
             addr += chunk; in += chunk; size -= chunk;
         }
     }
 
 private:
-    using Page = std::array<u8, PAGE_SIZE>;
+    struct Page {
+        std::array<u8, PAGE_SIZE> bytes{};   // los 4 KB (a cero al crearla)
+        bool code = false;                   // la CPU tiene instrucciones decodificadas de aqui
+    };
+
+    // Primera escritura en una pagina de codigo: se apunta y se desmarca (las
+    // siguientes escrituras ya no cuentan hasta que la CPU la vuelva a decodificar).
+    void NoteCodeWrite(Page* page, VAddr addr) {
+        page->code = false;
+        if (m_pendingCount < m_pending.size()) m_pending[m_pendingCount] = addr & ~(PAGE_SIZE - 1);
+        ++m_pendingCount;
+        ++m_codeWrites;
+        if (m_codeWriteFlag) *m_codeWriteFlag = true;
+    }
 
     // Tabla de paginas de dos niveles (como la de una CPU real):
     //   nivel 1: un hueco por cada 2 MB  (12 GB / 2 MB = 6144 huecos)
@@ -218,6 +262,10 @@ private:
     std::vector<std::unique_ptr<Page>> m_pages;                      // duenas de las paginas
     std::array<std::unique_ptr<L2Table>, L1_SIZE> m_table{};
     u64 m_generation = 0;
+    u64 m_codeWrites = 0;                       // escrituras en paginas de codigo
+    std::array<VAddr, 8> m_pending{};           // que paginas eran
+    size_t m_pendingCount = 0;
+    bool* m_codeWriteFlag = nullptr;
     std::map<VAddr, MemoryRegion> m_regions; // ordenadas por direccion
 };
 

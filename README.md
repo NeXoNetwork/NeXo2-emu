@@ -62,7 +62,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 ### Phase 4: OS Kernel & Services (HLE)
 - [~] **Supervisor Call Dispatcher:** HLE kernel with ~30 SVCs (memory, events, shared/transfer memory, IPC, single-thread mutex/condvar, GetInfo...). Homebrew ABI loader config. See [docs/07-nexo-internals/nro-loader-and-hle.md](docs/07-nexo-internals/nro-loader-and-hle.md).
 - [~] **Service Infrastructure:** IPC (HIPC/CMIF/TIPC, domains), handle table, events, shared memory. Services: `sm:`, `set:sys`, `apm`, `appletOE`, `hid`, `time`, `fsp-srv` (SD card on a PC folder), `vi`, `nvdrv` (screen), controllers via hid shared memory (PC keyboard and gamepad, see [docs/07-nexo-internals/input.md](docs/07-nexo-internals/input.md)). See [docs/07-nexo-internals/ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
-- [ ] **Scheduler:** Basic multi-core thread scheduling and synchronization primitives.
+- [~] **Scheduler:** Real guest threads on 6 emulated cores (time-sliced on one host thread), libnx-compatible mutex and condition variables, deadlock detection. Parallel host threads next. See [docs/07-nexo-internals/threads.md](docs/07-nexo-internals/threads.md).
 
 ## Development Status
 

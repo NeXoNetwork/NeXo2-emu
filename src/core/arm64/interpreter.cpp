@@ -20,6 +20,8 @@ void Interpreter::Reset() {
     m_halted = false;
     m_haltReason.clear();
     m_exclusiveValid = false;
+    m_stopRequested = false;
+    m_decodeCache.clear();
     Logger::Log(Logger::Level::Info, "[CPU] Reset: PC = 0x80000000");
 }
 
@@ -28,15 +30,19 @@ bool Interpreter::Step() {
     return Run(1) == 1 && !m_halted;
 }
 
-// Bucle principal. Para ir rapido guarda un puntero a la pagina de codigo actual
-// (4 KB): mientras el PC siga dentro de ella, leer la instruccion es un acceso
-// directo a array, sin buscar la pagina en la tabla cada vez.
 u64 Interpreter::Run(u64 max_steps) {
+    m_state.x[31] = 0;   // por si alguien lo cambio desde fuera (GetState())
+    m_stopRequested = false;  // una peticion que llego justo al final del Run() anterior ya no vale
+    return m_cacheEnabled ? RunCached(max_steps) : RunPlain(max_steps);
+}
+
+// Bucle sin cache. Guarda un puntero a la pagina de codigo actual (4 KB): mientras
+// el PC siga dentro de ella, leer la instruccion es un acceso directo a array.
+u64 Interpreter::RunPlain(u64 max_steps) {
     u64 executed = 0;
     u64 page_base = ~0ull;               // direccion de la pagina guardada
     const u8* page = nullptr;            // se pide de nuevo en cada Run(): la memoria solo
                                          // se borra (Memory::Clear) fuera de Run, al cargar otro programa
-
     while (executed < max_steps && !m_halted) {
         const u64 pc = m_state.pc;
 
@@ -63,13 +69,101 @@ u64 Interpreter::Run(u64 max_steps) {
         m_state.pc = m_nextPc;
         ++m_instructionCount;
         ++executed;
-
+        if (m_stopRequested) { m_stopRequested = false; break; }
     }
     return executed;
 }
 
+// ============================================================================
+//  Cache de instrucciones decodificadas
+// ============================================================================
+//
+// La primera vez que se ejecuta una direccion, Decode() mira sus bits una sola vez
+// y guarda la funcion que la ejecuta y sus operandos. Las siguientes veces se
+// salta toda la decodificacion. Si el programa escribe en una pagina de codigo,
+// Memory lo apunta y aqui se tira la cache de esa pagina.
+
+Interpreter::CachePage* Interpreter::GetCachePage(u64 page_base) {
+    auto& slot = m_decodeCache[page_base];
+    if (!slot) {
+        slot = std::make_unique<CachePage>();
+        // Todas las entradas empiezan apuntando a "decodificame y ejecutame"
+        for (auto& e : slot->entries) e.fn = &DecodeAndRun;
+        m_memory.MarkCode(page_base);           // avisame si escriben aqui
+    }
+    return slot.get();
+}
+
+void Interpreter::HandleCodeWrites() {
+    std::array<u64, 8> pages;
+    size_t count = 0;
+    if (m_memory.TakeCodeWrites(pages, count)) {
+        for (size_t i = 0; i < count; ++i) m_decodeCache.erase(pages[i]);
+    } else {
+        m_decodeCache.clear();                  // demasiadas paginas: empezar de cero
+    }
+    m_seenCodeWrites = m_memory.CodeWriteCount();
+}
+
+u64 Interpreter::RunCached(u64 max_steps) {
+    // Otro programa cargado (Memory::Clear): nada de lo guardado vale
+    if (m_cacheGeneration != m_memory.Generation()) {
+        m_decodeCache.clear();
+        m_cacheGeneration = m_memory.Generation();
+        m_seenCodeWrites = m_memory.CodeWriteCount();
+    }
+
+    const u64 start = m_instructionCount;
+    const u64 end = start + max_steps;           // el contador de instrucciones hace de contador del bucle
+    u64 page_base = ~0ull;
+    CachePage* page = nullptr;
+    m_attention = true;                          // revisar todo antes de la primera instruccion
+
+    while (m_instructionCount < end) {
+        // Una sola comprobacion por instruccion: Halt() y las escrituras en codigo la activan
+        if (m_attention) [[unlikely]] {
+            if (m_halted) break;
+            if (m_stopRequested) { m_stopRequested = false; m_attention = false; break; }
+            m_attention = false;
+            if (m_memory.CodeWriteCount() != m_seenCodeWrites) HandleCodeWrites();
+            page_base = ~0ull;                   // la pagina actual puede haberse tirado
+        }
+
+        const u64 pc = m_state.pc;
+        // Cambio de pagina o PC desalineado (los 2 bits bajos tambien cuentan en la comparacion)
+        if ((pc & (~(Memory::PAGE_SIZE - 1) | 3)) != page_base) [[unlikely]] {
+            if (pc & 3) {                        // PC desalineado: camino lento
+                RunPlain(1);
+                break;
+            }
+            page_base = pc & ~(Memory::PAGE_SIZE - 1);
+            page = GetCachePage(page_base);
+        }
+
+        const DecodedInstr& d = page->entries[(pc & (Memory::PAGE_SIZE - 1)) >> 2];
+        m_nextPc = pc + 4;
+        if (!d.fn(*this, d)) [[unlikely]] {
+            LogUnimplemented(d.raw);
+            break;
+        }
+        m_state.pc = m_nextPc;
+        ++m_instructionCount;
+    }
+    return m_instructionCount - start;
+}
+
+// Primera vez que se ejecuta una entrada: decodificar, guardar y ejecutar.
+// (LogUnimplemented usa d.raw, asi que hay que guardarlo aunque falle.)
+bool Interpreter::DecodeAndRun(Interpreter& it, const DecodedInstr& entry) {
+    const u64 pc = it.m_state.pc;
+    DecodedInstr& d = const_cast<DecodedInstr&>(entry);
+    Decode(it.m_memory.Read<u32>(pc), pc, d);
+    return d.fn(it, d);
+}
+
 void Interpreter::Halt(const std::string& reason) {
     m_halted = true;
+    m_attention = true;
     m_haltReason = reason;
     Logger::Log(Logger::Level::Info, "[CPU] Parada: " + reason);
 }

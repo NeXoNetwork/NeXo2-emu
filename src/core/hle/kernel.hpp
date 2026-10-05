@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 #include "common/types.hpp"
 #include "arm64/interpreter.hpp"
 #include "memory.hpp"
@@ -33,6 +34,9 @@ namespace Layout {
     constexpr u64 MAIN_STACK_SIZE   = 0x0000'0000'0010'0000; // 1 MB
     constexpr u64 LOADER_PAGE       = 0x0000'0001'FFFE'0000; // stub de salida + config del loader
     constexpr u64 TLS_PAGE          = 0x0000'0001'FFFF'0000; // TLS del hilo principal
+    // TLS de los demas hilos: paginas hacia abajo desde TLS_PAGE (8 hilos por pagina)
+    constexpr u64 TLS_SLOT_SIZE     = 0x200;
+    constexpr u64 TLS_MAX_PAGES     = 15;
     constexpr u64 TOTAL_MEMORY      = HEAP_REGION_SIZE;      // lo que "tiene" el proceso
 }
 
@@ -48,6 +52,12 @@ namespace Result {
     constexpr u32 TimedOut         = 0xEA01;
     constexpr u32 InvalidState     = 0xFA01;
     constexpr u32 InvalidCombination = 0xE801;
+    constexpr u32 InvalidPriority  = 0xE001;
+    constexpr u32 InvalidCoreId    = 0xE201;
+    constexpr u32 OutOfResource    = 0xD201;
+    constexpr u32 Cancelled        = 0xEC01;
+    constexpr u32 OutOfRange       = 0xEE01;
+    constexpr u32 InvalidCurrentMemory = 0xD401;
 }
 
 // Handles "falsos" que entregamos al programa.
@@ -55,10 +65,18 @@ constexpr u32 CURRENT_THREAD_PSEUDO_HANDLE  = 0xFFFF8000;
 constexpr u32 CURRENT_PROCESS_PSEUDO_HANDLE = 0xFFFF8001;
 constexpr u32 MAIN_THREAD_HANDLE            = 0x00010001;
 
+// Nucleos que ve el programa (CoreMask 0x3F). La Switch 2 tiene 8; 2 son del sistema.
+constexpr s32 NUM_CORES = 6;
+// Instrucciones que corre un hilo antes de pasar al siguiente nucleo
+constexpr u64 SCHEDULER_SLICE = 10'000;
+// Bit del mutex de libnx/Horizon: "hay hilos esperando este mutex"
+constexpr u32 MUTEX_HAS_WAITERS = 0x40000000;
+
 class Kernel {
 public:
     // Se registra como manejador de SVC del interprete.
     Kernel(Core::Memory& memory, Core::Interpreter& cpu);
+    ~Kernel() { for (auto& t : m_threads) t->wait_objects.clear(); }
 
     // Vuelve al estado inicial (sin heap, sin salida de texto).
     void Reset();
@@ -70,6 +88,24 @@ public:
 
     // Llamada desde el interprete al ejecutar "svc #imm".
     void HandleSvc(u32 imm, Core::CPUState& state);
+
+    // --- Hilos y planificador (kernel_threads.cpp) ---
+    // Ejecuta hasta 'budget' instrucciones repartidas entre los hilos listos
+    // (6 nucleos emulados que se turnan). Devuelve las instrucciones ejecutadas.
+    u64 Run(u64 budget);
+    const std::vector<std::shared_ptr<KThread>>& Threads() const { return m_threads; }
+    const KThread* CurrentThread() const { return m_current.get(); }
+
+    // Contadores para la interfaz y los tests
+    struct SchedulerStats {
+        u64 context_switches = 0;   // cambios de hilo en la CPU
+        u64 mutex_waits = 0;        // hilos que tuvieron que esperar un mutex
+        u64 condvar_waits = 0;      // esperas en variables de condicion
+        u64 sync_waits = 0;         // esperas en svcWaitSynchronization que bloquearon
+        u64 idle_ticks = 0;         // ticks saltados porque todos dormian
+    };
+    const SchedulerStats& Stats() const { return m_stats; }
+    s32 CurrentCore() const { return m_currentCore; }
 
     // Texto que el programa ha enviado con svcOutputDebugString.
     const std::string& GetDebugOutput() const { return m_debugOutput; }
@@ -132,6 +168,37 @@ private:
     void SvcMapSharedMemory(Core::CPUState& s);
     void SvcUnmapSharedMemory(Core::CPUState& s);
 
+    // --- Hilos (kernel_threads.cpp) ---
+    void SvcCreateThread(Core::CPUState& s);
+    void SvcStartThread(Core::CPUState& s);
+    void SvcExitThread(Core::CPUState& s);
+    void SvcGetThreadPriority(Core::CPUState& s);
+    void SvcSetThreadPriority(Core::CPUState& s);
+    void SvcGetThreadCoreMask(Core::CPUState& s);
+    void SvcSetThreadCoreMask(Core::CPUState& s);
+    void SvcGetThreadId(Core::CPUState& s);
+    void SvcSignalEvent(Core::CPUState& s);
+    void SvcCancelSynchronization(Core::CPUState& s);
+    void SvcArbitrateLock(Core::CPUState& s);
+    void SvcArbitrateUnlock(Core::CPUState& s);
+    void SvcWaitProcessWideKeyAtomic(Core::CPUState& s);
+    void SvcSignalProcessWideKey(Core::CPUState& s);
+
+    std::shared_ptr<KThread> CreateMainThread(u64 tls);
+    std::shared_ptr<KThread> ThreadFromHandle(u32 handle);   // acepta 0xFFFF8000 (hilo actual)
+    Core::CPUState& Ctx(KThread& t);       // registros del hilo (en la CPU si es el actual)
+    void Block(KThread& t, KThread::Wait kind, s64 timeout_ns);
+    void Wake(KThread& t, u32 result);
+    void ReleaseMutex(u64 addr);           // da el mutex al siguiente que lo espera (o lo deja libre)
+    void AcquireMutexAfterWait(KThread& t, u32 result);
+    void UpdateWaits();                    // plazos vencidos y objetos activados
+    KThread* PickNext();
+    void SwitchTo(const std::shared_ptr<KThread>& t);
+    u64  AllocateTls();
+    void FreeTls(u64 tls);
+    u64  Now() const { return m_cpu.GetInstructionCount(); }
+    static u64 NsToTicks(s64 ns);
+
     // Comandos "Control" de CMIF (dominios, clonar sesiones, tamano de buffer)
     void HandleControlCommand(IpcContext& ctx, const std::shared_ptr<SessionState>& state);
     void RegisterDefaultServices();
@@ -145,6 +212,17 @@ private:
     InputState      m_input;
     std::shared_ptr<KSharedMemory> m_hidMemory;
     std::filesystem::path m_sdmcRoot = "sdmc";
+
+    std::vector<std::shared_ptr<KThread>> m_threads;
+    std::shared_ptr<KThread> m_current;    // el hilo cuyos registros estan en la CPU
+    s32  m_currentCore = 0;
+    u64  m_nextThreadId = 1;
+    u64  m_waitCounter = 0;
+    u64  m_runCounter = 0;
+    std::vector<u64> m_freeTls;
+    u64  m_tlsPagesUsed = 0;
+    u64  m_tlsNextSlot = 0;
+    SchedulerStats m_stats;
 
     u64  m_heapSize = 0;
     u64  m_imageSize = 0;

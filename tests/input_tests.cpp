@@ -85,7 +85,7 @@ TEST(Input_ReachesProgramMemory) {
     std::vector<u8> nro((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     Core::System sys;
     CHECK(sys.LoadNro(nro, "libnx_init.nro"));
-    sys.GetCpu().Run(5'000'000);
+    sys.Run(5'000'000);
 
     u64 hid_addr = 0;
     for (const auto& [base, r] : sys.GetMemory().Regions())

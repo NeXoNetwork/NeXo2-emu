@@ -76,6 +76,18 @@ void Kernel::Reset() {
     m_display.Reset();
     m_input.Reset();
     m_hidMemory.reset();
+    // Un hilo puede estar esperando a otro (o a si mismo): romper esos ciclos de punteros
+    for (auto& t : m_threads) t->wait_objects.clear();
+    m_threads.clear();
+    m_current.reset();
+    m_currentCore = 0;
+    m_nextThreadId = 1;
+    m_waitCounter = 0;
+    m_runCounter = 0;
+    m_freeTls.clear();
+    m_tlsPagesUsed = 0;
+    m_tlsNextSlot = 0;
+    m_stats = {};
 }
 
 // ============================================================================
@@ -108,8 +120,10 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
     const u64 argv_str = LOADER_PAGE + 0x200;
     const u64 config   = LOADER_PAGE + 0x400;
 
-    m_memory.Write<u32>(stub + 0, 0xD40000E1u); // svc #0x7  (ExitProcess)
+    m_memory.Write<u32>(stub + 0, 0xD40000E1u); // svc #0x7  (ExitProcess): main() ha vuelto
     m_memory.Write<u32>(stub + 4, 0xD4200000u); // brk #0    (no deberia llegar)
+    m_memory.Write<u32>(stub + 8, 0xD4000141u); // svc #0xA  (ExitThread): la funcion de un hilo ha vuelto
+    m_memory.Write<u32>(stub + 12, 0xD4200000u);
 
     const std::string info = "NeXo 2 HLE loader";
     m_memory.WriteBytes(info_str, info.c_str(), info.size() + 1);
@@ -132,8 +146,8 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
     add_entry(ConfigKey::HosVersion, 0, Firmware::HOS_VERSION, 0);
     add_entry(ConfigKey::EndOfList, 0, info_str, info.size());
 
-    // El hilo principal existe como handle (aun no emulamos hilos de verdad)
-    m_handles.Insert(MAIN_THREAD_HANDLE, std::make_shared<KDummyObject>("hilo principal"));
+    // El hilo principal (sus registros se ponen justo debajo, en la CPU)
+    CreateMainThread(TLS_PAGE);
 
     // Registros de entrada
     CPUState& s = m_cpu.GetState();
@@ -164,17 +178,24 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
             return;
         case 0x06: SvcQueryMemory(s);       return;
         case 0x07: SvcExitProcess(s);       return;
+        case 0x08: SvcCreateThread(s);      return;
+        case 0x09: SvcStartThread(s);       return;
+        case 0x0A: SvcExitThread(s);        return;
         case 0x0B: SvcSleepThread(s);       return;
-        case 0x0C: SetResult(s, Result::Success); s.x[1] = 0x2C; return; // GetThreadPriority: 44 (normal)
-        case 0x10: s.x[0] = 0;              return; // GetCurrentProcessorNumber: nucleo 0
-        case 0x11: SetResult(s, Result::Success); return; // SignalEvent (sin hilos que despertar)
+        case 0x0C: SvcGetThreadPriority(s); return;
+        case 0x0D: SvcSetThreadPriority(s); return;
+        case 0x0E: SvcGetThreadCoreMask(s); return;
+        case 0x0F: SvcSetThreadCoreMask(s); return;
+        case 0x10: s.x[0] = static_cast<u64>(m_currentCore); return; // GetCurrentProcessorNumber
+        case 0x11: SvcSignalEvent(s);       return;
         case 0x12: SvcClearEvent(s);        return;
         case 0x13: SvcMapSharedMemory(s);   return;
         case 0x14: SvcUnmapSharedMemory(s); return;
         case 0x17: SvcClearEvent(s);        return; // ResetSignal: igual que ClearEvent aqui
         case 0x18: SvcWaitSynchronization(s); return;
         case 0x24: SetResult(s, Result::Success); s.x[1] = 0x51; return; // GetProcessId
-        case 0x25: SetResult(s, Result::Success); s.x[1] = 1;    return; // GetThreadId
+        case 0x25: SvcGetThreadId(s);       return;
+        case 0x19: SvcCancelSynchronization(s); return;
         case 0x15: {
             // CreateTransferMemory(addr = X1, size = X2, perm = W3) -> W1 = handle.
             // La memoria sigue en el proceso; el servicio (nvdrv) solo guarda el handle.
@@ -187,14 +208,11 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
         }
         case 0x16: SvcCloseHandle(s);       return;
         // --- Mutex y variables de condicion (NeXo solo tiene un hilo) ---
-        case 0x1A: SetResult(s, Result::Success); return; // ArbitrateLock: nadie mas tiene el mutex
-        case 0x1B: m_memory.Write<u32>(s.x[0], 0); SetResult(s, Result::Success); return; // ArbitrateUnlock
-        case 0x1C:
-            // WaitProcessWideKeyAtomic: suelta el mutex, espera y lo vuelve a coger. Sin otros
-            // hilos nadie va a despertarnos: devolvemos "tiempo agotado" con el mutex aun nuestro.
-            SetResult(s, Result::TimedOut);
-            return;
-        case 0x1D: SetResult(s, Result::Success); return; // SignalProcessWideKey: no hay a quien despertar
+        // --- Mutex y variables de condicion (kernel_threads.cpp) ---
+        case 0x1A: SvcArbitrateLock(s);     return;
+        case 0x1B: SvcArbitrateUnlock(s);   return;
+        case 0x1C: SvcWaitProcessWideKeyAtomic(s); return;
+        case 0x1D: SvcSignalProcessWideKey(s); return;
         case 0x1E: SvcGetSystemTick(s);     return;
         case 0x26: SvcBreak(s);             return;
         case 0x27: SvcOutputDebugString(s); return;
@@ -269,8 +287,12 @@ void Kernel::SvcExitProcess(CPUState&) {
     m_cpu.Halt("svcExitProcess: el programa ha terminado");
 }
 
-void Kernel::SvcSleepThread(CPUState&) {
-    // Con un solo hilo no hay nada que hacer: seguimos ejecutando.
+// svcSleepThread(ns = X0). 0, -1 y -2 significan "cede el turno" (yield).
+void Kernel::SvcSleepThread(CPUState& s) {
+    const s64 ns = static_cast<s64>(s.x[0]);
+    if (!m_current) return;                       // programa sin proceso: nada que hacer
+    if (ns <= 0) { m_cpu.RequestStop(); return; } // yield: el planificador elige otro
+    Block(*m_current, KThread::Wait::Sleep, ns);
 }
 
 // svcCloseHandle(handle = W0)
@@ -578,30 +600,6 @@ void Kernel::SvcClearEvent(CPUState& s) {
     if (!ev) { SetResult(s, Result::InvalidHandle); return; }
     ev->signaled = false;
     SetResult(s, Result::Success);
-}
-
-// svcWaitSynchronization(handles = X1, cantidad = W2, timeout_ns = X3) -> W0, W1 = indice
-// Sin hilos de verdad: si ningun evento esta activo y hay que esperar, el programa
-// se quedaria bloqueado para siempre, asi que paramos la CPU para que se vea.
-void Kernel::SvcWaitSynchronization(CPUState& s) {
-    const u64 handles_ptr = s.x[1];
-    const u32 count = static_cast<u32>(s.x[2]);
-    const s64 timeout = static_cast<s64>(s.x[3]);
-    if (count > 64) { SetResult(s, 0xEE01); return; } // OutOfRange
-
-    for (u32 i = 0; i < count; ++i) {
-        const u32 h = m_memory.Read<u32>(handles_ptr + i * 4);
-        auto obj = m_handles.Get(h);
-        if (!obj) { SetResult(s, Result::InvalidHandle); return; }
-        if (auto ev = std::dynamic_pointer_cast<KEvent>(obj); ev && ev->signaled) {
-            SetResult(s, Result::Success);
-            s.x[1] = i;
-            return;
-        }
-    }
-    if (timeout == 0) { SetResult(s, Result::TimedOut); return; }
-    m_cpu.Halt("svcWaitSynchronization: el programa espera un evento que nunca llegara "
-               "(NeXo todavia no emula hilos)");
 }
 
 // svcMapSharedMemory(handle = W0, addr = X1, size = X2, permisos = W3)

@@ -36,7 +36,7 @@ bool Has(const std::string& text, const std::string& what) {
 TEST(Ipc_SmAndSetSys) {
     Core::System sys;
     CHECK(sys.LoadNro(ReadNro("ipc.nro"), "ipc.nro"));
-    sys.GetCpu().Run(10'000'000);
+    sys.Run(10'000'000);
     const std::string& out = sys.GetKernel().GetDebugOutput();
 
     CHECK(Has(out, "ConnectToNamedPort(sm:): rc=0x0"));
@@ -57,7 +57,7 @@ TEST(Ipc_SmAndSetSys) {
 TEST(Ipc_UnimplementedServiceStopsCpuWithName) {
     Core::System sys;
     CHECK(sys.LoadNro(ReadNro("ipc.nro"), "ipc.nro"));
-    sys.GetCpu().Run(10'000'000);
+    sys.Run(10'000'000);
     CHECK(sys.GetCpu().IsHalted());
     CHECK(!sys.GetKernel().HasExited());
     CHECK(sys.GetCpu().GetHaltReason() == "Servicio 'vi:m': comando 1 no implementado");
@@ -72,7 +72,7 @@ TEST(Ipc_ServiceNameFromU64) {
 TEST(Ipc_HandlesAreClearedOnRestart) {
     Core::System sys;
     CHECK(sys.LoadNro(ReadNro("ipc.nro"), "ipc.nro"));
-    sys.GetCpu().Run(10'000'000);
+    sys.Run(10'000'000);
     CHECK(sys.GetKernel().Handles().Count() > 1);
     sys.Restart();
     CHECK_EQ(sys.GetKernel().Handles().Count(), 1); // solo el hilo principal

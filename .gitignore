@@ -64,3 +64,5 @@ Testing/
 tests/homebrew/
 # Tarjeta SD emulada (datos de los programas)
 sdmc/
+
+Claude outputs/

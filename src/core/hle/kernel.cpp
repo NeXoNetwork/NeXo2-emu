@@ -74,6 +74,8 @@ void Kernel::Reset() {
     m_debugOutput.clear();
     m_handles.Clear();
     m_display.Reset();
+    m_gpu.Reset();
+    for (auto& e : m_nvEvents) e.reset();
     m_input.Reset();
     m_hidMemory.reset();
     // Un hilo puede estar esperando a otro (o a si mismo): romper esos ciclos de punteros

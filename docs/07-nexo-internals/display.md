@@ -87,7 +87,7 @@ The UI ignores alpha (`SDL_BLENDMODE_NONE`), like the real screen.
 ## Limitations (next steps)
 
 - No vsync: DEQUEUE_BUFFER never waits, so a program draws as fast as the interpreter runs.
-- Only `/dev/nvmap` and `/dev/nvhost-ctrl`. Real GPU work (`/dev/nvhost-gpu`, `nvhost-as-gpu`)
-  needs the GPU command processor and the Vulkan backend (Phase 3).
+- GPU work (`/dev/nvhost-gpu`, `nvhost-as-gpu`...) goes to the emulated GPU: clears, copies and
+  blits into swapchain images show up here. Drawing with shaders is the next phase: see [gpu.md](gpu.md).
 - One display (1280x720, handheld). Docked 1920x1080 is not reported yet.
-- Fences are always "already signaled".
+- Fences: the emulated GPU finishes work when it is submitted, so they are already reached.

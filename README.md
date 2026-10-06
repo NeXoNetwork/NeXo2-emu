@@ -53,6 +53,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 - [x] **JIT Integration:** dynarmic translates ARM64 to x86-64 (~1 100 M instr/s, x6 the interpreter); every test also runs under the JIT. See [jit.md](docs/07-nexo-internals/jit.md).
 
 ### Phase 3: Graphics Subsystem (Vulkan)
+- [~] **GPU (Maxwell) phase 1:** nvhost devices, channels, GPFIFO/pushbuffers, macros (MME), clears, DMA copies, 2D blits, syncpoints and semaphores. No shaders yet. See [gpu.md](docs/07-nexo-internals/gpu.md).
 - [ ] **Vulkan Backend:** Initialization of the Vulkan 1.3 instance and physical device selection.
 - [x] **Windowing Integration:** SDL3 window with ImGui; the "Pantalla" window shows what the program presents.
 - [x] **Software framebuffer:** `vi` + `nvdrv` (nvmap, binder buffer queue, block-linear deswizzle). libnx console homebrew is displayed. See [docs/07-nexo-internals/display.md](docs/07-nexo-internals/display.md).

@@ -355,6 +355,7 @@ int main(int argc, char** argv) {
         Tick("NRO Loader + HLE Kernel (SVC basicas)", true);
         Tick("JIT: dynarmic (ARM64 -> x86-64)", NeXo2::Core::Interpreter::JitAvailable());
         Tick("SDL3 Graphics Driver", true);
+        Tick("GPU Maxwell: canales, borrados, copias, macros (fase 1, sin shaders)", true);
         Tick("Vulkan Core", false);
 
         ImGui::Separator();
@@ -412,6 +413,18 @@ int main(int argc, char** argv) {
             }
         } else {
             ImGui::TextDisabled("JIT no disponible (compilado sin externals/dynarmic)");
+        }
+
+        // GPU emulada: lo que ha hecho desde que se cargo el programa
+        {
+            auto& gs = sys.GetKernel().GetGpu().GetStats();
+            ImGui::Text("GPU: envios %llu | metodos %llu | borrados %llu | copias %llu | macros %llu",
+                        (unsigned long long)gs.submits, (unsigned long long)gs.methods,
+                        (unsigned long long)gs.clears, (unsigned long long)gs.copies,
+                        (unsigned long long)gs.macros);
+            if (gs.draws_skipped)
+                ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "GPU: %llu dibujos ignorados (los shaders llegan en la fase 2)",
+                                   (unsigned long long)gs.draws_skipped);
         }
 
         if (logoTexture) {

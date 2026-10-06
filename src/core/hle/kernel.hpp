@@ -10,6 +10,8 @@
 #include "service.hpp"
 #include "display.hpp"
 #include "input.hpp"
+#include "video_core/gpu.hpp"
+#include <array>
 
 // Kernel HLE (High-Level Emulation) de Horizon.
 //
@@ -134,6 +136,11 @@ public:
     Display&       GetDisplay()       { return m_display; }
     const Display& GetDisplay() const { return m_display; }
 
+    // GPU emulada (canales, memoria de la GPU, syncpoints): video_core/gpu.hpp
+    GPU::Gpu& GetGpu() { return m_gpu; }
+    // Eventos de nvhost-ctrl (EVENT_WAIT_ASYNC): uno por "slot", los crea QueryEvent
+    std::shared_ptr<KEvent>& NvEventSlot(u32 slot) { return m_nvEvents[slot & 0xFF]; }
+
     // Carpeta del PC que hace de tarjeta SD ("sdmc:/"). Por defecto "sdmc" en el directorio actual.
     void SetSdmcRoot(const std::filesystem::path& root) { m_sdmcRoot = root; }
     const std::filesystem::path& GetSdmcRoot() const { return m_sdmcRoot; }
@@ -209,6 +216,8 @@ private:
     HandleTable     m_handles;
     ServiceRegistry m_services;
     Display         m_display;
+    GPU::Gpu        m_gpu{m_memory};
+    std::array<std::shared_ptr<KEvent>, 256> m_nvEvents{};
     InputState      m_input;
     std::shared_ptr<KSharedMemory> m_hidMemory;
     std::filesystem::path m_sdmcRoot = "sdmc";

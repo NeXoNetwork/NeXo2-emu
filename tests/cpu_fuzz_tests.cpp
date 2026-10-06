@@ -162,6 +162,7 @@ TEST(CpuFuzz_AgainstReferenceArm) {
     };
     run_all(true, stats);
     std::vector<FamilyStats> plain(names.size());
+    for (size_t i = 0; i < names.size(); ++i) plain[i].name = names[i];
     run_all(false, plain);
     cpu.SetDecodeCacheEnabled(true);
     int plain_bad = 0;

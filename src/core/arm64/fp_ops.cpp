@@ -535,14 +535,16 @@ u64 RecipEstimate(u64 a, unsigned w, Env& e) {
     if (u.type == Type::Zero) { e.fpsr |= FPSR_DZC; return Infinity(u.sign, w); }
 
     const double av = std::fabs(ValueOf(a, w));
-    const double tiny = w == 16 ? std::ldexp(1.0, -16) : w == 32 ? std::ldexp(1.0, -128) : std::ldexp(1.0, -1024);
+    // Constantes escritas tal cual: calcular 2^-1024 con ldexp marca "underflow" en la FPU
+    // del PC con la libreria de MSVC, y ese flag acabaria en el FPSR del programa.
+    const double tiny = w == 16 ? 0x1p-16 : w == 32 ? 0x1p-128 : 0x1p-1024;
     if (av < tiny) {
         const u32 rm = RoundingMode(e.fpcr);
         const bool to_inf = rm == RN || (rm == RP && !u.sign) || (rm == RM && u.sign);
         e.fpsr |= FPSR_OFC | FPSR_IXC;
         return to_inf ? Infinity(u.sign, w) : MaxNormal(u.sign, w);
     }
-    const double big = w == 16 ? std::ldexp(1.0, 14) : w == 32 ? std::ldexp(1.0, 126) : std::ldexp(1.0, 1022);
+    const double big = w == 16 ? 0x1p14 : w == 32 ? 0x1p126 : 0x1p1022;
     if (FlushOn(w, e.fpcr) && av >= big) {
         e.fpsr |= FPSR_UFC;
         return Zero(u.sign, w);

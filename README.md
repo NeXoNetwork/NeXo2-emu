@@ -30,13 +30,13 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 * `src/core/hle/`: High-Level Emulation: kernel SVCs, IPC, system services (`services/`), display and input.
 * `src/video_core/`: Vulkan implementation and hardware renderer.
 * `docs/`: Hardware and OS documentation — start at [docs/README.md](docs/README.md).
-* `externals/`: Third-party dependencies (ballistic, SDL3, etc.).
+* `externals/`: Third-party dependencies (dynarmic, SDL3, ImGui...).
 
 ## Development Roadmap (2026)
 
 ## Current Phase:
   * **Homebrew running** — libnx homebrew boots, draws on screen and reads the controller.
-    Current focus: **speed** (interpreter optimisation, then JIT).
+    Current focus: **speed** (JIT done; next: threads on several host cores).
 
 ### Phase 1: Core Infrastructure
 - [x] **Logging Framework:** Thread-safe logger to console and `nexo2.log` (`src/common/logger.hpp`).
@@ -50,7 +50,7 @@ NeXo 2 is an open-source research project focused on the study and analysis of t
 - [x] **Instruction Decoder:** All of ARMv8.2-A for EL0: integer, scalar FP (half/single/double with exact ARM NaN, FPCR and FPSR rules), all Advanced SIMD/NEON groups, crypto (AES/SHA1/SHA256), CRC32, LSE atomics. 100 % of ~15 600 random valid instructions match a reference ARM (QEMU). See [cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md) and [cpu-fuzzing.md](docs/07-nexo-internals/cpu-fuzzing.md).
 - [x] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
 - [x] **CPU Tests:** `nexo2_tests` runs hand-written ARM64 programs and clang-compiled C code.
-- [~] **JIT Integration:** Ballistic front-end (ARM64 -> IR) wired in; no backend yet.
+- [x] **JIT Integration:** dynarmic translates ARM64 to x86-64 (~1 100 M instr/s, x6 the interpreter); every test also runs under the JIT. See [jit.md](docs/07-nexo-internals/jit.md).
 
 ### Phase 3: Graphics Subsystem (Vulkan)
 - [ ] **Vulkan Backend:** Initialization of the Vulkan 1.3 instance and physical device selection.

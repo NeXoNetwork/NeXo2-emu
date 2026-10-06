@@ -6,18 +6,23 @@ Instructions to build the emulator using the MSVC v143 toolset.
 * Visual Studio 2022/2026 with the "Desktop development with C++" workload.
 * MSVC v143 build tools installed.
 * CMake 3.25 or higher.
-* Python 3 (required by the Ballistic submodule to generate its ARM64 decoder tables at build time).
+* Python 3 (only for the optional tools in `tools/`).
 
 ## 2. File Structure
 * `src/main.cpp`
 * `src/core/memory/memory.hpp`
 * `src/core/arm64/` (CPU interpreter, split by instruction group)
 * `tests/` (CPU tests and the programs they run)
-* `externals/` (SDL3, ImGui and Ballistic)
+* `externals/` (SDL3, ImGui, dynarmic and ext-boost). After cloning run
+  `git submodule update --init --recursive` (dynarmic has submodules of its own).
 * `assets/` (logo.bmp, icon.ico)
 
 > Use the **Release** build to run homebrew. Debug works, but the interpreter is many
 > times slower there.
+
+> **JIT**: `externals/dynarmic` (ARM64 -> x86-64 recompiler) and `externals/ext-boost`
+> (Boost headers it needs; nothing of Boost is compiled) are built automatically. The first
+> build takes a few minutes more. To build without them: `-DNEXO2_ENABLE_JIT=OFF`.
 
 ## 3. Build Commands (CMD)
 

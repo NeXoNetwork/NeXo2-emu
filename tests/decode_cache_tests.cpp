@@ -101,6 +101,9 @@ TEST(DecodeCache_SameResultAsInterpreter) {
     Common::Logger::SetMuted(true);   // miles de instrucciones al azar: muchas no existen
     std::mt19937_64 rng(12345);
     Cpu slow, fast;
+    // "slow" = interprete sin cache. "fast" = cache de decodificacion o, si los tests
+    // se ejecutan en modo JIT, el JIT: asi este test compara tambien JIT contra interprete.
+    slow.cpu.SetJitEnabled(false);
     slow.cpu.SetDecodeCacheEnabled(false);
     fast.cpu.SetDecodeCacheEnabled(true);
 
@@ -136,7 +139,7 @@ TEST(DecodeCache_SameResultAsInterpreter) {
     }
     Common::Logger::SetMuted(false);
     CHECK_EQ(failures, 0);
-    CHECK(fast.cpu.DecodedPages() > 0);
+    if (!fast.cpu.IsJitEnabled()) CHECK(fast.cpu.DecodedPages() > 0);
 }
 
 TEST(DecodeCache_SelfModifyingCode) {
@@ -170,6 +173,7 @@ TEST(DecodeCache_RealProgramIdentical) {
     std::ifstream f(std::string(NEXO2_TEST_DATA_DIR) + "/libnx_init.nro", std::ios::binary);
     std::vector<u8> nro((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     Core::System a, b;
+    a.GetCpu().SetJitEnabled(false);          // a = interprete sin cache; b = cache o JIT
     a.GetCpu().SetDecodeCacheEnabled(false);
     CHECK(a.LoadNro(nro, "libnx_init.nro"));
     CHECK(b.LoadNro(nro, "libnx_init.nro"));
@@ -180,5 +184,5 @@ TEST(DecodeCache_RealProgramIdentical) {
     CHECK_EQ(na, nb);
     CHECK(SameState(a.GetCpu().GetState(), b.GetCpu().GetState()));
     CHECK(a.GetKernel().GetDebugOutput() == b.GetKernel().GetDebugOutput());
-    CHECK(b.GetCpu().DecodedPages() > 0);
+    if (!b.GetCpu().IsJitEnabled()) CHECK(b.GetCpu().DecodedPages() > 0);
 }

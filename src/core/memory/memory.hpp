@@ -57,6 +57,7 @@ public:
     void Clear() {
         m_pages.clear();
         for (auto& l2 : m_table) l2.reset();
+        if (m_flat) std::fill_n(m_flat.get(), FLAT_ENTRIES, nullptr);
         m_regions.clear();
         m_codeWrites = 0;
         m_pendingCount = 0;
@@ -76,7 +77,32 @@ public:
     // ---------------------------------------------------------------------
     void MarkCode(VAddr addr) {
         if (addr >= ADDRESS_SPACE) return;
-        GetOrCreatePage(addr / PAGE_SIZE)->code = true;
+        const u64 index = addr / PAGE_SIZE;
+        GetOrCreatePage(index)->code = true;
+        if (m_flat) m_flat[index] = nullptr;   // el JIT escribira por Write(): asi nos enteramos
+    }
+
+    // ---------------------------------------------------------------------
+    // Tabla de paginas "plana" para el JIT: un puntero por pagina de 4 KB
+    // (2^22 entradas = 16 GB de direcciones). El codigo generado por el JIT la
+    // consulta directamente: si la entrada no es nullptr, lee/escribe la memoria
+    // sin llamar a ninguna funcion. Entradas a nullptr (pagina que no existe, o
+    // pagina con codigo ya traducido) -> el JIT llama a Read()/Write().
+    // ---------------------------------------------------------------------
+    static constexpr unsigned FLAT_BITS = 34;                       // bits de direccion cubiertos
+    static constexpr u64 FLAT_ENTRIES = 1ull << (FLAT_BITS - 12);
+    void** EnableFlatPageTable() {
+        if (!m_flat) {
+            m_flat = std::make_unique<void*[]>(FLAT_ENTRIES);      // todo a nullptr
+            for (u64 l1 = 0; l1 < L1_SIZE; ++l1) {
+                if (!m_table[l1]) continue;
+                for (u64 i = 0; i < L2_SIZE; ++i) {
+                    Page* p = (*m_table[l1])[i];
+                    if (p && !p->code) m_flat[(l1 << L2_BITS) | i] = p->bytes.data();
+                }
+            }
+        }
+        return m_flat.get();
     }
     u64 CodeWriteCount() const { return m_codeWrites; }
     // Variable que se pone a true en cada escritura en codigo (la CPU la mira en su bucle)
@@ -227,6 +253,7 @@ private:
     // siguientes escrituras ya no cuentan hasta que la CPU la vuelva a decodificar).
     void NoteCodeWrite(Page* page, VAddr addr) {
         page->code = false;
+        if (m_flat) m_flat[addr / PAGE_SIZE] = page->bytes.data();   // ya no es codigo traducido
         if (m_pendingCount < m_pending.size()) m_pending[m_pendingCount] = addr & ~(PAGE_SIZE - 1);
         ++m_pendingCount;
         ++m_codeWrites;
@@ -254,6 +281,7 @@ private:
         if (!slot) {
             auto page = std::make_unique<Page>(); // página nueva inicializada a 0
             slot = page.get();
+            if (m_flat) m_flat[index] = page->bytes.data();
             m_pages.push_back(std::move(page));
         }
         return slot;
@@ -266,6 +294,7 @@ private:
     std::array<VAddr, 8> m_pending{};           // que paginas eran
     size_t m_pendingCount = 0;
     bool* m_codeWriteFlag = nullptr;
+    std::unique_ptr<void*[]> m_flat;            // tabla plana para el JIT (solo si se pide)
     std::map<VAddr, MemoryRegion> m_regions; // ordenadas por direccion
 };
 

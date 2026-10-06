@@ -8,6 +8,7 @@
 #include "common/types.hpp"
 #include "common/bit_utils.hpp"
 #include "cpu_state.hpp"
+#include "jit_dynarmic.hpp"
 #include "memory.hpp"
 
 namespace NeXo2::Core {
@@ -51,11 +52,8 @@ public:
     // En la Fase 4 aqui ira el kernel HLE. Por defecto solo se registra en el log.
     using SvcHandler = std::function<void(u32 imm, CPUState& state)>;
 
-    explicit Interpreter(Memory& memory) : m_memory(memory) {
-        m_memory.SetCodeWriteFlag(&m_attention);
-        Reset();
-    }
-    ~Interpreter() { m_memory.SetCodeWriteFlag(nullptr); }
+    explicit Interpreter(Memory& memory);
+    ~Interpreter();
     Interpreter(const Interpreter&) = delete;
     Interpreter& operator=(const Interpreter&) = delete;
 
@@ -87,11 +85,21 @@ public:
 
     // Termina Run() despues de la instruccion actual, SIN parar la CPU. Lo usa el
     // kernel cuando un hilo se bloquea (espera, duerme...) para cambiar a otro hilo.
-    void RequestStop() { m_stopRequested = true; m_attention = true; }
+    void RequestStop() { m_stopRequested = true; m_attention = true; if (m_jit) NotifyJitStop(); }
     // Adelanta el reloj (CNTPCT) sin ejecutar nada: todos los hilos estan dormidos.
     void AddTicks(u64 ticks) { m_instructionCount += ticks; }
     // Al cambiar de hilo se pierde la reserva de LDXR (como en la CPU real).
-    void ClearExclusive() { m_exclusiveValid = false; }
+    void ClearExclusive() { m_exclusiveValid = false; if (m_jit) ClearJitExclusive(); }
+
+    // --- JIT (dynarmic, jit_dynarmic.cpp) ---
+    // Con el JIT activado, Run() traduce el codigo a x86-64 en vez de interpretarlo.
+    // Todo lo demas (GetState(), SVC, Halt...) funciona igual.
+    static bool JitAvailable();                        // NeXo se compilo con dynarmic
+    void SetJitEnabled(bool enabled);
+    bool IsJitEnabled() const { return m_jitEnabled; }
+    const JitBackend* GetJit() const { return m_jit.get(); }
+    // Valor inicial para las CPUs que se creen despues (los tests lo cambian con NEXO2_TEST_JIT)
+    static void SetDefaultJitEnabled(bool enabled);
 
     u64 GetInstructionCount() const { return m_instructionCount; }
 
@@ -99,6 +107,12 @@ public:
     const CPUState& GetState() const { return m_state; }
 
 private:
+    friend class JitImpl;     // el JIT usa el estado, el SVC y el interprete para lo que no sabe
+    void NotifyJitStop();
+    void ClearJitExclusive();
+    std::unique_ptr<JitBackend> m_jit;
+    bool m_jitEnabled = false;
+
     friend struct FastOps;   // las funciones rapidas de interpreter_fast.cpp
     friend struct SimdOps;   // las instrucciones SIMD de interpreter_simd.cpp
 

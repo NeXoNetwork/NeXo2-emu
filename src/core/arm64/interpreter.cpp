@@ -11,6 +11,34 @@ using namespace NeXo2::Common;
 //  Bucle principal
 // ============================================================================
 
+namespace {
+bool g_defaultJit = false;   // ver SetDefaultJitEnabled()
+}
+
+Interpreter::Interpreter(Memory& memory) : m_memory(memory) {
+    m_memory.SetCodeWriteFlag(&m_attention);
+    Reset();
+    if (g_defaultJit) SetJitEnabled(true);
+}
+Interpreter::~Interpreter() {
+    m_jit.reset();
+    m_memory.SetCodeWriteFlag(nullptr);
+}
+
+bool Interpreter::JitAvailable() { return JitBackend::Available(); }
+void Interpreter::SetDefaultJitEnabled(bool enabled) { g_defaultJit = enabled && JitAvailable(); }
+
+void Interpreter::SetJitEnabled(bool enabled) {
+    enabled = enabled && JitAvailable();
+    if (enabled == m_jitEnabled) return;
+    m_jitEnabled = enabled;
+    m_decodeCache.clear();
+    if (enabled && !m_jit) m_jit = std::make_unique<JitBackend>(*this, m_memory);  // se crea al usarlo
+    else if (m_jit) m_jit->ClearCache();
+}
+void Interpreter::NotifyJitStop() { m_jit->RequestHalt(); }
+void Interpreter::ClearJitExclusive() { m_jit->ClearExclusive(); }
+
 void Interpreter::Reset() {
     m_state.Reset();
     // Direccion de arranque de ejemplo (donde main.cpp carga el programa).
@@ -22,6 +50,7 @@ void Interpreter::Reset() {
     m_exclusiveValid = false;
     m_stopRequested = false;
     m_decodeCache.clear();
+    if (m_jit) { m_jit->ClearCache(); m_jit->ClearExclusive(); }
     Logger::Log(Logger::Level::Info, "[CPU] Reset: PC = 0x80000000");
 }
 
@@ -33,6 +62,7 @@ bool Interpreter::Step() {
 u64 Interpreter::Run(u64 max_steps) {
     m_state.x[31] = 0;   // por si alguien lo cambio desde fuera (GetState())
     m_stopRequested = false;  // una peticion que llego justo al final del Run() anterior ya no vale
+    if (m_jitEnabled) return m_halted ? 0 : m_jit->Run(max_steps);
     return m_cacheEnabled ? RunCached(max_steps) : RunPlain(max_steps);
 }
 
@@ -165,6 +195,7 @@ void Interpreter::Halt(const std::string& reason) {
     m_halted = true;
     m_attention = true;
     m_haltReason = reason;
+    if (m_jit) m_jit->RequestHalt();
     Logger::Log(Logger::Level::Info, "[CPU] Parada: " + reason);
 }
 

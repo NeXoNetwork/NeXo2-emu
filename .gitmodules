@@ -1,6 +1,3 @@
-[submodule "externals/ballistic"]
-	path = externals/ballistic
-	url = https://github.com/pound-emu/ballistic
 [submodule "externals/SDL"]
 	path = externals/SDL
 	url = https://github.com/libsdl-org/SDL.git
@@ -10,3 +7,9 @@
 [submodule "externals/glad"]
 	path = externals/glad
 	url = https://github.com/Dav1dde/glad.git
+[submodule "externals/dynarmic"]
+	path = externals/dynarmic
+	url = https://github.com/azahar-emu/dynarmic.git
+[submodule "externals/ext-boost"]
+	path = externals/ext-boost
+	url = https://github.com/azahar-emu/ext-boost.git

@@ -27,7 +27,9 @@ for each encoding group ("family"):               for each record of cpu_fuzz.bi
   rounding mode, FZ, DN, AHP and FZ16.
 - **Hash**: FNV-1a of x0-x30, SP, NZCV, v0-v31 and the 4 KB data area. FPSR is compared
   separately.
-- Both NeXo paths are checked: **with** the decode cache (fast handlers) and **without** it.
+- Both interpreter paths are checked: **with** the decode cache (fast handlers) and **without** it.
+  In the JIT round of the tests the same records run under dynarmic: results must match
+  (100 %), FPSR differences and accepted invalid encodings are only reported.
 
 ## How QEMU runs one instruction
 

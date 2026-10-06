@@ -3,7 +3,6 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
-#include "arm64/jit_ballistic.hpp"
 #include "system.hpp"
 #include "common/logger.hpp"
 
@@ -18,7 +17,6 @@
 #include <filesystem>
 #include <string>
 
-using NeXo2::Core::BallisticJit;
 using NeXo2::Core::System;
 
 // Programa ARM64 de ejemplo (se usa si no se abre ningun NRO).
@@ -45,11 +43,6 @@ static const uint32_t g_program[] = {
     0xD65F03C0u, // 3:   ret
 };
 static constexpr uint64_t PROG_BASE = 0x80000000ull;
-
-// Demo para el JIT (3x MOVZ), alineado a 16 bytes.
-alignas(16) static const uint32_t g_demo_program[] = {
-    0xD2824680u, 0xD2800841u, 0xD29FE002u,
-};
 
 static void LoadDemo(System& sys) {
     sys.LoadRawProgram(g_program, sizeof(g_program) / sizeof(g_program[0]), PROG_BASE);
@@ -263,7 +256,8 @@ int main(int argc, char** argv) {
 
     // --- La "consola" emulada ---
     System sys;
-    BallisticJit jit;
+    // JIT activado por defecto (si NeXo se compilo con dynarmic). Se puede apagar en Diagnostics.
+    sys.GetCpu().SetJitEnabled(true);
 
     // Tarjeta SD emulada: carpeta "sdmc" junto al ejecutable
     std::string sdmcRoot = "sdmc";
@@ -276,7 +270,6 @@ int main(int argc, char** argv) {
     SDL_SetTextureBlendMode(screenTexture, SDL_BLENDMODE_NONE);   // ignorar el alfa del juego
     SDL_SetTextureScaleMode(screenTexture, SDL_SCALEMODE_LINEAR);
     uint64_t shownFrame = ~0ull;
-    int lastIrCount = -1;
 
     // Ruta del NRO: la de la linea de comandos o el homebrew de prueba
     char nroPath[512] = "tests/generated/hello.nro";
@@ -360,7 +353,7 @@ int main(int argc, char** argv) {
         Tick("ARM64 Interpreter", true);
         Tick("Memory (paged VMM)", mem.IsReady());
         Tick("NRO Loader + HLE Kernel (SVC basicas)", true);
-        Tick("JIT: Ballistic (IR front-end)", jit.IsReady());
+        Tick("JIT: dynarmic (ARM64 -> x86-64)", NeXo2::Core::Interpreter::JitAvailable());
         Tick("SDL3 Graphics Driver", true);
         Tick("Vulkan Core", false);
 
@@ -402,15 +395,24 @@ int main(int argc, char** argv) {
         ImGui::SameLine();
         if (ImGui::Button(g_emuRunning ? "Pausa (F5)" : "Run (F5)")) { LogUi("Boton Run/Pausa"); SetRunning(sys, !g_emuRunning); }
 
+        // JIT: traduce el codigo ARM64 a x86-64 (mucho mas rapido que interpretar)
         ImGui::Separator();
-        ImGui::Text("Ballistic JIT (traduce ARM64 -> IR; sin ejecucion todavia)");
-        if (ImGui::Button("Traducir demo (3x MOVZ)")) {
-            const std::size_t n = sizeof(g_demo_program) / sizeof(g_demo_program[0]);
-            lastIrCount = jit.TranslateFlat(g_demo_program, n);
+        if (NeXo2::Core::Interpreter::JitAvailable()) {
+            bool useJit = cpu.IsJitEnabled();
+            if (ImGui::Checkbox("JIT (dynarmic)", &useJit)) {
+                LogUi(useJit ? "JIT: activado" : "JIT: desactivado (interprete)");
+                cpu.SetJitEnabled(useJit);
+            }
+            if (const auto* j = cpu.GetJit(); j && cpu.IsJitEnabled()) {
+                const auto& js = j->GetStats();
+                ImGui::SameLine();
+                ImGui::TextDisabled("SVC %llu | interprete %llu instr | codigo reescrito %llu",
+                                    (unsigned long long)js.svc_calls, (unsigned long long)js.fallbacks,
+                                    (unsigned long long)js.invalidations);
+            }
+        } else {
+            ImGui::TextDisabled("JIT no disponible (compilado sin externals/dynarmic)");
         }
-        ImGui::SameLine();
-        if (lastIrCount >= 0) ImGui::Text("IR generada: %d instrucciones", lastIrCount);
-        else                  ImGui::TextDisabled("(sin traducir aun)");
 
         if (logoTexture) {
             ImGui::Separator();

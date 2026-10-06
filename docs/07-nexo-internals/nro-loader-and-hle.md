@@ -84,7 +84,7 @@ checks every line it prints.
 
 ## Next steps
 
-1. Speed: decode cache in the interpreter, then the Ballistic JIT.
+1. Speed: decode cache in the interpreter and the dynarmic JIT (done).
 2. Permission checks on memory access (today the region map is informational).
 
 Done since this page was first written: IPC and services, SIMD/FP, display, SD card and

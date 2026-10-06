@@ -11,7 +11,9 @@ Collected: 2026-10-04.
 - Arm A64 ISA XML (machine-readable encodings, useful for decoder generation): developer.arm.com -> "A64 Instruction Set Architecture".
 
 ## JIT / recompilers
-- [pound-emu/ballistic](https://github.com/pound-emu/ballistic) — ARM64 recompiler (rewrite of dynarmic), CMake + LuaJIT, clang/clang-cl. Already a submodule in `externals/ballistic`.
+- [azahar-emu/dynarmic](https://github.com/azahar-emu/dynarmic) — ARM -> x86-64/ARM64 recompiler (0BSD). Our JIT, submodule in `externals/dynarmic`.
+- [azahar-emu/ext-boost](https://github.com/azahar-emu/ext-boost) — Boost headers subset needed by dynarmic, submodule in `externals/ext-boost`.
+- [pound-emu/ballistic](https://github.com/pound-emu/ballistic) — ARM64 recompiler (rewrite of dynarmic), early stage (no backend yet). Was used before dynarmic.
 
 ## NVIDIA T234 (Orin) as the closest public relative of T239
 - [Jetson Linux Developer Guide (Orin)](https://docs.nvidia.com/jetson/archives/r36.5.2/DeveloperGuide/HR/JetsonModuleAdaptationAndBringUp/JetsonOrinNxNanoSeries.html)

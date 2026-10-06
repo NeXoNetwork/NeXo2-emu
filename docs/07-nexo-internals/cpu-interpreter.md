@@ -2,8 +2,8 @@
 
 The interpreter executes guest ARM64 code one instruction at a time
 (Fetch -> Decode -> Execute). It is the reference CPU: simple and easy to debug.
-The Ballistic JIT will later run the same code faster, and the tests here will
-check that both give the same results.
+The JIT ([jit.md](jit.md)) runs the same code faster, and the tests check that both give
+the same results.
 
 ## Files
 

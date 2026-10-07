@@ -183,6 +183,13 @@ TEST(DecodeCache_RealProgramIdentical) {
     Common::Logger::SetMuted(false);
     CHECK_EQ(na, nb);
     CHECK(SameState(a.GetCpu().GetState(), b.GetCpu().GetState()));
-    CHECK(a.GetKernel().GetDebugOutput() == b.GetKernel().GetDebugOutput());
+    // La salida incluye la hora del PC ("hora unix=..."): si entre las dos ejecuciones
+    // cambia el segundo, esa linea es distinta. Se compara todo lo demas.
+    auto without_clock = [](std::string s) {
+        const size_t p = s.find("hora unix=");
+        if (p != std::string::npos) s.erase(p, s.find('\n', p) - p);
+        return s;
+    };
+    CHECK(without_clock(a.GetKernel().GetDebugOutput()) == without_clock(b.GetKernel().GetDebugOutput()));
     if (!b.GetCpu().IsJitEnabled()) CHECK(b.GetCpu().DecodedPages() > 0);
 }

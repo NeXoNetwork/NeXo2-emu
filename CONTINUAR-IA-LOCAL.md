@@ -65,7 +65,7 @@ Para compilar sin JIT: `-DNEXO2_ENABLE_JIT=OFF`.
 
 ### Tests
 
-- `nexo2_tests` ejecuta **cada test dos veces**: una con el intérprete y otra con el JIT. Hoy son **68 × 2 = 136 tests**.
+- `nexo2_tests` ejecuta **cada test dos veces**: una con el intérprete y otra con el JIT. Hoy son **77 × 2 = 154 tests**.
 - Para usar un solo modo: `--interp` o `--jit`.
 - Usa siempre **Release**: en Debug el intérprete es muchísimo más lento.
 
@@ -109,7 +109,11 @@ src/
       ipc.*, service.*      HIPC / CMIF / TIPC, dominios, ServiceObject
       display.*, input.*    Cola de buffers del binder; LIFOs de hid (teclado y mando SDL)
       services/             sm, set, apm, applet, hid, time, fs (SD = carpeta sdmc), vi, nvdrv
-  video_core/               GPU (fase 1, síncrona)
+  video_core/               GPU (síncrona)
+    shader.hpp, shader_decode.cpp, shader_exec.cpp
+                            Decodificador e intérprete de shaders Maxwell (un hilo cada vez)
+    rasterizer.*            Dibujo por software: vértices, recorte, viewport, culling, píxeles,
+                            profundidad, mezcla
     gpu.*                   GpuMemoryManager, Syncpoints, Channel (GPFIFO + pushbuffers), Gpu
     engines.*               Maxwell3D (0xB197), DMA (0xB0B5), Fermi2D (0x902D),
                             KeplerCompute (0xB1C0), InlineToMemory (0xA140), MacroInterpreter (MME)
@@ -154,35 +158,27 @@ Están en `docs/07-nexo-internals/`:
 | Hilos (6 núcleos emulados que se turnan en 1 hilo del PC) | ✅ fase 1 |
 | Kernel HLE, IPC, servicios del arranque de libnx | ✅ |
 | Pantalla (vi + nvdrv + binder), mandos, tarjeta SD | ✅ |
-| GPU fase 1 | ✅ hecha y probada, **⚠️ SIN COMMIT** (ver abajo) |
-| Web en estilo Switch 2 | ✅ hecha, **⚠️ SIN COMMIT** |
-| GPU fase 2 (shaders, dibujar, Vulkan) | ❌ |
+| GPU fase 1 (comandos, borrados, copias, macros) | ✅ commit `02d0616` |
+| GPU fase 2: shaders Maxwell + rasterizador por software | ✅ (ver `docs/07-nexo-internals/gpu-shaders.md` y `gpu-rasterizer.md`) |
+| GPU fase 2b: texturas | ❌ siguiente paso |
+| GPU fase 3: Vulkan | ❌ |
 | Audio | ❌ |
 | Formatos de juego (NSO, NCA, RomFS) | ❌ |
 
 ### Lo primero que hay que hacer (pendiente)
 
-**1. Compilar y probar la GPU fase 1** en Windows. Si sale todo bien, hacer su commit:
+**Compilar y probar la GPU fase 2** (shaders + dibujo) en Windows; si todo va bien, commit:
 
 ```cmd
 cd C:\Users\Jous\Documents\NeXo\NeXo2-emu
 cmake --build build --config Release
 build\Release\nexo2_tests.exe
 git add -A
-git commit -m "GPU phase 1: nvhost devices, channels, pushbuffers, MME macros, clears, DMA/2D/inline, syncpoints"
+git commit -m "GPU phase 2: Maxwell shader interpreter, software rasterizer, first triangle"
 git push
 ```
 
-Lo esperado es **136 tests y 0 fallos**. Si MSVC da errores o avisos en `src/video_core/`, esos archivos solo se han compilado con GCC/Clang, así que puede faltar algún `#include` o haber algún cast.
-
-**2. Subir la web:**
-
-```cmd
-cd C:\Users\Jous\Documents\NeXo\www
-git add -A
-git commit -m "Web: Switch 2 style, JIT, threads and GPU phase 1"
-git push
-```
+Lo esperado es **154 tests y 0 fallos**. Los archivos nuevos (`shader_*.cpp`, `rasterizer.cpp`) solo se han compilado con GCC: si MSVC se queja, suele ser un `#include` que falta.
 
 ---
 
@@ -260,12 +256,14 @@ git push
 
 ## 7. Próximos pasos (en orden recomendado)
 
-### 1. GPU fase 2: dibujar de verdad
+### 1. GPU fase 2b: texturas
 
-1. Guardar el estado 3D completo: vertex buffers, índices, viewport, scissor, blend, depth y render targets (ya están en 0x200).
-2. Traducir los shaders de Maxwell (SM 5.x) a SPIR-V. Es lo más grande. Empieza por un decodificador y un IR propios, con tests unitarios por instrucción.
-3. Backend Vulkan (en el PC): caché de pipelines, texturas (block linear → lineal), sincronización con los syncpoints.
-4. Test de extremo a extremo: un NRO con deko3d que dibuje un triángulo, comparado con una imagen esperada.
+1. Leer los descriptores TIC (imagen) y TSC (sampler) de los pools (0x557 sampler pool, 0x55D header pool) con el handle de `c[SetBindlessTexture]`.
+2. Instrucciones TEX, TEXS, TLDS en `shader_exec.cpp` (ahora fallan con "las texturas llegan en la GPU fase 2b").
+3. Formatos de textura (RGBA8, BGRA8, RGB565, BC1-BC3...) y filtrado (nearest, linear), en `ShaderEnv::SampleTexture`.
+4. Añadir un shader con `sampler2D` a `tests/shaders` y casos al fuzzer.
+
+Después: Vulkan (fase 3), traduciendo el mismo decodificador a SPIR-V.
 
 ### 2. Audio
 

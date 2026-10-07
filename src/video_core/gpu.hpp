@@ -169,7 +169,11 @@ public:
         u64 clears = 0;           // borrados de render target
         u64 copies = 0;           // copias (DMA, 2D, inline)
         u64 macros = 0;           // macros ejecutadas
-        u64 draws_skipped = 0;    // dibujos ignorados (sin shaders todavia)
+        u64 draws = 0;            // dibujos hechos (rasterizador por software)
+        u64 triangles = 0;
+        u64 pixels = 0;           // pixeles sombreados
+        u64 draws_skipped = 0;    // dibujos ignorados (algo no soportado todavia)
+        u64 shader_errors = 0;    // shaders con instrucciones que aun no sabemos ejecutar
         u64 unknown_methods = 0;
     };
     Stats& GetStats() { return m_stats; }

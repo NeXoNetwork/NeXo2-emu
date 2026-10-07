@@ -200,7 +200,7 @@ void MacroInterpreter::Execute(const std::vector<u32>& code, u32 start, const st
 //  3D
 // ============================================================================
 
-Maxwell3D::Maxwell3D(Gpu& gpu, u32 /*channel_syncpoint*/) : m_gpu(gpu), m_i2m(gpu) {}
+Maxwell3D::Maxwell3D(Gpu& gpu, u32 /*channel_syncpoint*/) : m_gpu(gpu), m_i2m(gpu), m_raster(gpu) {}
 
 void Maxwell3D::CallMethod(u32 method, u32 arg, bool last) {
     if (method >= NUM_REGS) {   // llamada a macro: metodo par = empezar, impar = mas parametros
@@ -241,14 +241,33 @@ void Maxwell3D::WriteReg(u32 method, u32 arg) {
             break;
         case 0x674: ClearBuffers(arg); break;
         case 0x6C3: ReportSemaphore(); break;
-        case 0x35E: case 0x5F8: case 0x585:   // dibujos: hacen falta shaders (fase 2)
-            if (method != 0x585) {
-                ++m_gpu.GetStats().draws_skipped;
-                m_gpu.Warn("draw", "dibujo ignorado: los shaders llegan en la fase 2 de la GPU");
-            }
+        // --- Dibujos (rasterizer.cpp) ---
+        case 0x586:   // VertexBeginGl: empieza una primitiva; bits 26/27 = instancia siguiente / misma
+            if ((arg >> 26) & 1) ++m_instance;
+            else if (!((arg >> 27) & 1)) m_instance = 0;
             break;
+        case 0x35E:   // DrawArraysCount: dibujar 'arg' vertices desde DrawArraysFirst
+            DoDraw(false, m_regs[0x35D], arg, m_regs[0x586] & 0xFFFF);
+            break;
+        case 0x5F8:   // DrawElementsCount: dibujar 'arg' indices desde DrawElementsFirst
+            DoDraw(true, m_regs[0x5F7], arg, m_regs[0x586] & 0xFFFF);
+            break;
+        case 0x485: case 0x486:   // DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_FIRST/SUBSEQUENT
+            m_instance = method == 0x485 ? 0 : m_instance + 1;
+            DoDraw(false, arg & 0xFFFF, (arg >> 16) & 0xFFF, arg >> 28);
+            break;
+        case 0x5F9: case 0x5FA: case 0x5FB: case 0x5FC: case 0x5FD: case 0x5FE: {
+            // DRAW_INDEX_BUFFER32/16/8_BEGIN_END_INSTANCE_FIRST/SUBSEQUENT
+            const u32 k = method - 0x5F9;
+            m_regs[0x5F6] = 2 - (k % 3);   // tamano del indice: 32, 16, 8 bits
+            m_instance = k < 3 ? 0 : m_instance + 1;
+            DoDraw(true, arg & 0xFFFF, (arg >> 16) & 0xFFF, arg >> 28);
+            break;
+        }
         default:
             if (method >= 0x8E4 && method <= 0x8F3) LoadConstbuf(arg);
+            else if (method >= 0x904 && method < 0x904 + 5 * 8 && ((method - 0x904) & 7) == 0)
+                BindConstbuf((method - 0x904) / 8, arg);
             break;
     }
 }
@@ -366,6 +385,30 @@ void Maxwell3D::ReportSemaphore() {
         if (!one_word) { mm.Write<u32>(addr + 4, 0); mm.Write<u64>(addr + 8, 0); }
     }
     // acquire / trap: la GPU es sincrona, no hay nada que esperar
+}
+
+void Maxwell3D::BindConstbuf(u32 stage, u32 arg) {
+    // Enlaza el constbuf elegido con ConstbufSelector (0x8E0..0x8E2) al hueco c[indice]
+    const u32 index = (arg >> 4) & 0x1F;
+    if (stage >= 5 || index >= 18) return;
+    ConstbufBinding& b = m_constbufs[stage][index];
+    b.valid = arg & 1;
+    b.address = Iova(m_regs[0x8E1], m_regs[0x8E2]);
+    b.size = m_regs[0x8E0] & 0x1FFFF;
+}
+
+void Maxwell3D::DoDraw(bool indexed, u32 first, u32 count, u32 topology) {
+    if (count == 0) return;
+    DrawCall dc;
+    dc.topology = topology;
+    dc.indexed = indexed;
+    dc.first = first;
+    dc.count = count;
+    dc.vertex_offset = s32(m_regs[0x446]);                            // VertexIdBase
+    dc.vertex_id_base = ((m_regs[0x593] >> 12) & 1) ? first : 0;      // DrawArraysAddStart
+    dc.instance = m_instance;
+    dc.base_instance = m_regs[0x50E];                                 // DrawBaseInstance
+    m_raster.Draw(m_regs.data(), m_constbufs, dc);
 }
 
 void Maxwell3D::LoadConstbuf(u32 arg) {

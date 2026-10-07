@@ -422,9 +422,12 @@ int main(int argc, char** argv) {
                         (unsigned long long)gs.submits, (unsigned long long)gs.methods,
                         (unsigned long long)gs.clears, (unsigned long long)gs.copies,
                         (unsigned long long)gs.macros);
-            if (gs.draws_skipped)
-                ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "GPU: %llu dibujos ignorados (los shaders llegan en la fase 2)",
-                                   (unsigned long long)gs.draws_skipped);
+            ImGui::Text("GPU: dibujos %llu | triangulos %llu | pixeles %llu",
+                        (unsigned long long)gs.draws, (unsigned long long)gs.triangles,
+                        (unsigned long long)gs.pixels);
+            if (gs.draws_skipped || gs.shader_errors)
+                ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "GPU: %llu dibujos ignorados, %llu errores de shader (ver registro)",
+                                   (unsigned long long)gs.draws_skipped, (unsigned long long)gs.shader_errors);
         }
 
         if (logoTexture) {

@@ -1,9 +1,11 @@
-# GPU (phase 1: command processor, no shaders yet)
+# GPU (command processor and engines)
 
 All existing homebrew draws with the **Maxwell GM20B** GPU of the Switch 1 (through deko3d or
 nouveau), which the Switch 2 runs in compatibility mode. Phase 1 emulates everything a program
 needs to *talk* to that GPU and the engines that do not need shaders: memory, channels,
-command buffers, clears, copies, blits, macros, syncpoints and semaphores. Results are written
+command buffers, clears, copies, blits, macros, syncpoints and semaphores. Phase 2 adds
+**draws**: shaders ([gpu-shaders.md](gpu-shaders.md)) and a software rasterizer
+([gpu-rasterizer.md](gpu-rasterizer.md)). Results are written
 straight into the program's memory, so whatever the GPU clears or copies into a swapchain image
 appears in the "Pantalla" window through the existing `vi` path ([display.md](display.md)).
 
@@ -70,7 +72,7 @@ not implemented stops the CPU with its number, so it is easy to see what a progr
 
 | Class | Engine | Implemented |
 | :--- | :--- | :--- |
-| 0xB197 | 3D | all registers stored; **clears** of colour targets (all formats, write mask, scissor, screen scissor, layers) and depth/stencil; macro upload and execution; syncpoint increment (`SyncptAction`); report semaphores; constant buffer upload; inline-to-memory. Draws are counted and skipped |
+| 0xB197 | 3D | all registers stored; **clears** of colour targets (all formats, write mask, scissor, screen scissor, layers) and depth/stencil; macro upload and execution; syncpoint increment (`SyncptAction`); report semaphores; constant buffer upload and binding; inline-to-memory; **draws** with the software rasterizer ([gpu-rasterizer.md](gpu-rasterizer.md)) |
 | 0xB0B5 | DMA copy | pitch <-> block linear copies, multi-line, component remap (memset-style fills, swizzles), semaphore release |
 | 0x902D | 2D | blits between surfaces with point-sampled scaling, RGBA8 <-> BGRA8 |
 | 0xA140 | Inline to memory | uploads from the pushbuffer, pitch or block linear |
@@ -114,8 +116,9 @@ makes these tests fail.
 
 ## Next phases
 
-1. **Shaders**: decode Maxwell shader binaries and run them (first in software, later as
-   SPIR-V on Vulkan), plus textures (TIC/TSC descriptors), vertex fetch and rasterisation.
-   Draws are already counted (`draws_skipped`) in the Diagnostics window.
-2. **Vulkan backend**: render targets and textures as Vulkan images instead of software.
-3. The Switch 2's own GPU (Ampere, T239) for native games.
+1. ~~Shaders and rasterisation~~ (phase 2, done: see [gpu-shaders.md](gpu-shaders.md) and
+   [gpu-rasterizer.md](gpu-rasterizer.md)).
+2. **Textures** (phase 2b): TIC/TSC descriptors, TEX/TEXS/TLDS, texture formats.
+3. **Vulkan backend** (phase 3): translate the decoded shaders to SPIR-V; render targets and
+   textures as Vulkan images instead of software.
+4. The Switch 2's own GPU (Ampere, T239) for native games.

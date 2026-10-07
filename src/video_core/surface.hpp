@@ -40,9 +40,15 @@ bool EncodeColor(u32 format, const float rgba[4], u8* out);
 // Si el formato no tiene componentes separables por byte, devuelve todos.
 u32 ColorWriteByteMask(u32 format, u32 component_mask);
 
+// Lee un pixel en el formato y lo convierte a 4 floats RGBA (para mezclar colores).
+// Devuelve false si el formato no se sabe leer.
+bool DecodeColor(u32 format, const u8* px, float rgba[4]);
+
 // --- Formatos de profundidad / stencil ---
 u32  DepthFormatBytes(u32 format);
 // Escribe profundidad y/o stencil (segun write_depth/write_stencil) en el pixel 'px'
 bool EncodeDepthStencil(u32 format, float depth, u8 stencil, bool write_depth, bool write_stencil, u8* px);
+// Lee la profundidad (0..1) de un pixel. false si el formato no tiene profundidad.
+bool DecodeDepth(u32 format, const u8* px, float& depth);
 
 } // namespace NeXo2::GPU

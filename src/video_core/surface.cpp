@@ -203,4 +203,70 @@ bool EncodeDepthStencil(u32 f, float depth, u8 stencil, bool wd, bool ws, u8* px
     }
 }
 
+namespace {
+inline float FromUnorm(u32 v, u32 bits) { return float(v) / float((1u << bits) - 1); }
+inline float FromSnorm(u32 v, u32 bits) {
+    const s32 sv = s32(v << (32 - bits)) >> (32 - bits);
+    return std::max(float(sv) / float((1u << (bits - 1)) - 1), -1.0f);
+}
+inline float FromSrgb(float v) { return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f); }
+inline float FromHalf(u16 h) {
+    const u32 sign = u32(h >> 15) << 31, e = (h >> 10) & 0x1F, m = h & 0x3FF;
+    u32 x;
+    if (e == 0) {
+        if (m == 0) x = sign;
+        else { const float f = std::ldexp(float(m), -24); return sign ? -f : f; }
+    } else if (e == 31) x = sign | 0x7F800000u | (m << 13);
+    else x = sign | ((e + 112) << 23) | (m << 13);
+    float f; std::memcpy(&f, &x, 4); return f;
+}
+template <typename T> T Get(const u8* p) { T v; std::memcpy(&v, p, sizeof(T)); return v; }
+} // namespace
+
+bool DecodeColor(u32 f, const u8* p, float c[4]) {
+    c[0] = c[1] = c[2] = 0.0f; c[3] = 1.0f;
+    switch (f) {
+        case 0xC0: case 0xC3: for (int i = 0; i < 4; ++i) c[i] = Get<float>(p + 4 * i); return true;
+        case 0xC6: for (int i = 0; i < 4; ++i) c[i] = FromUnorm(Get<u16>(p + 2 * i), 16); return true;
+        case 0xC7: for (int i = 0; i < 4; ++i) c[i] = FromSnorm(Get<u16>(p + 2 * i), 16); return true;
+        case 0xCA: case 0xCE: for (int i = 0; i < 4; ++i) c[i] = FromHalf(Get<u16>(p + 2 * i)); return true;
+        case 0xCB: c[0] = Get<float>(p); c[1] = Get<float>(p + 4); return true;
+        case 0xD5: case 0xF9: for (int i = 0; i < 4; ++i) c[i] = FromUnorm(p[i], 8); return true;
+        case 0xD6: case 0xFA: for (int i = 0; i < 3; ++i) c[i] = FromSrgb(FromUnorm(p[i], 8)); c[3] = FromUnorm(p[3], 8); return true;
+        case 0xD7: for (int i = 0; i < 4; ++i) c[i] = FromSnorm(p[i], 8); return true;
+        case 0xCF: case 0xE6: case 0xFD: case 0xFE:
+            c[0] = FromUnorm(p[2], 8); c[1] = FromUnorm(p[1], 8); c[2] = FromUnorm(p[0], 8); c[3] = FromUnorm(p[3], 8); return true;
+        case 0xD0: case 0xE7:
+            c[0] = FromSrgb(FromUnorm(p[2], 8)); c[1] = FromSrgb(FromUnorm(p[1], 8)); c[2] = FromSrgb(FromUnorm(p[0], 8)); c[3] = FromUnorm(p[3], 8); return true;
+        case 0xD1: { const u32 v = Get<u32>(p); c[0] = FromUnorm(v & 0x3FF, 10); c[1] = FromUnorm((v >> 10) & 0x3FF, 10); c[2] = FromUnorm((v >> 20) & 0x3FF, 10); c[3] = FromUnorm(v >> 30, 2); return true; }
+        case 0xDF: { const u32 v = Get<u32>(p); c[2] = FromUnorm(v & 0x3FF, 10); c[1] = FromUnorm((v >> 10) & 0x3FF, 10); c[0] = FromUnorm((v >> 20) & 0x3FF, 10); c[3] = FromUnorm(v >> 30, 2); return true; }
+        case 0xDA: c[0] = FromUnorm(Get<u16>(p), 16); c[1] = FromUnorm(Get<u16>(p + 2), 16); return true;
+        case 0xDB: c[0] = FromSnorm(Get<u16>(p), 16); c[1] = FromSnorm(Get<u16>(p + 2), 16); return true;
+        case 0xDE: c[0] = FromHalf(Get<u16>(p)); c[1] = FromHalf(Get<u16>(p + 2)); return true;
+        case 0xE5: c[0] = Get<float>(p); return true;
+        case 0xE8: { const u16 v = Get<u16>(p); c[0] = FromUnorm(v & 31, 5); c[1] = FromUnorm((v >> 5) & 63, 6); c[2] = FromUnorm(v >> 11, 5); return true; }
+        case 0xE9: { const u16 v = Get<u16>(p); c[0] = FromUnorm(v & 31, 5); c[1] = FromUnorm((v >> 5) & 31, 5); c[2] = FromUnorm((v >> 10) & 31, 5); c[3] = float(v >> 15); return true; }
+        case 0xF8: case 0xFB: case 0xFC: { const u16 v = Get<u16>(p); c[0] = FromUnorm(v & 31, 5); c[1] = FromUnorm((v >> 5) & 31, 5); c[2] = FromUnorm((v >> 10) & 31, 5); return true; }
+        case 0xEA: c[0] = FromUnorm(p[0], 8); c[1] = FromUnorm(p[1], 8); return true;
+        case 0xEB: c[0] = FromSnorm(p[0], 8); c[1] = FromSnorm(p[1], 8); return true;
+        case 0xEE: c[0] = FromUnorm(Get<u16>(p), 16); return true;
+        case 0xEF: c[0] = FromSnorm(Get<u16>(p), 16); return true;
+        case 0xF2: c[0] = FromHalf(Get<u16>(p)); return true;
+        case 0xF3: c[0] = FromUnorm(p[0], 8); return true;
+        case 0xF4: c[0] = FromSnorm(p[0], 8); return true;
+        case 0xF7: c[3] = FromUnorm(p[0], 8); return true;
+        default: return false;   // formatos enteros (no se mezclan) y raros
+    }
+}
+
+bool DecodeDepth(u32 f, const u8* px, float& depth) {
+    switch (f) {
+        case 0x0A: case 0x19: depth = Get<float>(px); return true;                         // Z32F
+        case 0x13: depth = FromUnorm(Get<u16>(px), 16); return true;                        // Z16
+        case 0x14: case 0x15: case 0x18: depth = FromUnorm(Get<u32>(px) & 0xFFFFFF, 24); return true;   // S8Z24 / X8Z24
+        case 0x16: depth = FromUnorm(Get<u32>(px) >> 8, 24); return true;                   // Z24S8
+        default: return false;
+    }
+}
+
 } // namespace NeXo2::GPU

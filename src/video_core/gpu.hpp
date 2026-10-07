@@ -42,7 +42,7 @@ public:
     static constexpr u64 BIG_REGION_END     = 0x00FF'FFFF'0000;   // (40 bits)
 
     explicit GpuMemoryManager(Core::Memory& memory) : m_memory(memory) {}
-    void Reset() { m_reserved.clear(); m_maps.clear(); }
+    void Reset() { m_reserved.clear(); m_maps.clear(); m_generation = NextGeneration(); }
 
     // Reserva un hueco de 'size' bytes (alineado a 'align') y devuelve su direccion; 0 = no hay
     u64  Allocate(u64 size, u64 align, bool big_pages);
@@ -58,6 +58,9 @@ public:
 
     void ReadBlock(u64 va, void* dst, size_t size) const;
     void WriteBlock(u64 va, const void* src, size_t size);
+    // Crea ya las paginas de memoria de [va, va+size) sin cambiar su contenido. Antes de
+    // dibujar con varios hilos: asi ninguno crea paginas a la vez que otro.
+    void Touch(u64 va, u64 size);
     template <typename T> T Read(u64 va) const { T v{}; ReadBlock(va, &v, sizeof(T)); return v; }
     template <typename T> void Write(u64 va, T v) { WriteBlock(va, &v, sizeof(T)); }
 
@@ -71,6 +74,10 @@ private:
     Core::Memory& m_memory;
     std::map<u64, u64> m_reserved;        // inicio -> tamano (espacio de direcciones ocupado)
     std::map<u64, Mapping> m_maps;        // inicio -> proyeccion
+    // Cambia cada vez que cambian las proyecciones (invalida la cache de Find de cada hilo).
+    // Sale de un contador global: un gestor nuevo nunca repite el numero de uno ya borrado.
+    static u64 NextGeneration();
+    u64 m_generation = NextGeneration();
 };
 
 // ----------------------------------------------------------------------------

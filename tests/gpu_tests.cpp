@@ -438,5 +438,6 @@ TEST(Gpu_ShadowRamFirmwareCallAndMsaaClear) {
     CHECK_EQ(r.Reg(0x3E0), 5u);                     // replay devolvio el valor guardado
     CHECK_EQ(r.Reg(0x8C4), 0x418800u);              // FirmwareCall[4] con el registro de PGRAPH
     CHECK_EQ(r.Reg(0xD00), 1u);                     // "hecho": la macro no se queda en bucle
+    CHECK_EQ(r.Reg(0x3EB), 1u);                     // SetCtMrtEnable empieza a 1 (deko3d no lo escribe)
     CHECK_EQ(f.Read32(RT + GPU::BlockLinearOffset(31 * 4, 15, 32 * 4, 0)), 0xFF0000FFu);   // ultima muestra
 }

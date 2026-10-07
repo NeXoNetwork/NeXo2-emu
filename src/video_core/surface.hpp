@@ -27,6 +27,13 @@ struct Surface {
     u32 pitch = 0;            // bytes por fila (solo lineal)
     u32 block_height_log2 = 0;
 
+    // Bytes que ocupa en memoria (block linear: bloques enteros, con el relleno)
+    u64 SizeBytes() const {
+        if (linear) return u64(pitch) * height;
+        const u64 gobs_x = (u64(width) * bytes_per_pixel + 63) / 64;
+        const u64 rows = 8ull << block_height_log2;
+        return gobs_x * ((height + rows - 1) / rows) * (512ull << block_height_log2);
+    }
     // Desplazamiento en bytes del pixel (x, y)
     u64 Offset(u32 x, u32 y) const {
         return linear ? u64(y) * pitch + u64(x) * bytes_per_pixel

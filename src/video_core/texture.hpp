@@ -11,6 +11,7 @@
 // TEXHEAD_PITCH y TEXSAMP). Ver docs/07-nexo-internals/gpu-textures.md.
 #include <array>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 #include "gpu.hpp"
@@ -72,6 +73,10 @@ public:
     void Sample(u32 handle, const TextureRequest& req, u32 out[4]);
     // textureSize: ancho, alto, profundidad/capas y numero de niveles del nivel 'lod'
     void Query(u32 handle, u32 lod, u32 out[4]);
+    // Otro muestreador de las mismas tablas, vacio (para otro hilo: cada uno con su cache)
+    std::unique_ptr<TextureSampler> CloneEmpty() const {
+        return std::make_unique<TextureSampler>(m_gpu, m_ticPool, m_ticMax, m_tscPool, m_tscMax);
+    }
 
 private:
     struct Level {

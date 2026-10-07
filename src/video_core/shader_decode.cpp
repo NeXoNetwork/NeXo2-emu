@@ -202,7 +202,7 @@ ShaderProgram::ShaderProgram(u64 address, ReadFn read) : m_address(address), m_r
     m_read(address, m_header.words, sizeof(m_header.words));
 }
 
-const ShaderInstr& ShaderProgram::At(u32 offset) {
+const ShaderInstr& ShaderProgram::AtSlow(u32 offset) {
     static const ShaderInstr invalid{};
     if (offset >= MAX_CODE || (offset & 7)) return invalid;
     const u32 index = offset / 8;
@@ -210,7 +210,7 @@ const ShaderInstr& ShaderProgram::At(u32 offset) {
         // Crecer de 4 KB en 4 KB
         const size_t want = (size_t(index) / 512 + 1) * 512;
         m_code.resize(want);
-        m_decoded.resize(want, false);
+        m_decoded.resize(want, 0);
     }
     if (!m_decoded[index]) {
         // Leer el grupo de 32 bytes entero (planificacion + 3 instrucciones)
@@ -219,11 +219,11 @@ const ShaderInstr& ShaderProgram::At(u32 offset) {
         m_read(m_address + 0x50 + u64(group) * 8, words, sizeof(words));
         for (u32 i = 1; i < 4; ++i) {
             m_code[group + i] = DecodeShaderInstr(words[i]);
-            m_decoded[group + i] = true;
+            m_decoded[group + i] = 1;
         }
         m_code[group] = ShaderInstr{};    // la palabra de planificacion no se ejecuta
         m_code[group].op = ShOp::Nop;
-        m_decoded[group] = true;
+        m_decoded[group] = 1;
     }
     return m_code[index];
 }

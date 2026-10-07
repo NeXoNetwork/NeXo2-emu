@@ -228,6 +228,13 @@ public:
         }
     }
 
+    // Crea las paginas de [addr, addr+size) que aun no existan (a cero), sin escribir nada
+    void TouchPages(VAddr addr, u64 size) {
+        if (!size || addr >= ADDRESS_SPACE) return;
+        const u64 last = std::min<u64>(addr + size - 1, ADDRESS_SPACE - 1) / PAGE_SIZE;
+        for (u64 i = addr / PAGE_SIZE; i <= last; ++i) GetOrCreatePage(i);
+    }
+
     // Escribe 'size' bytes, creando las páginas necesarias.
     void WriteBytes(VAddr addr, const void* src, size_t size) {
         auto in = static_cast<const u8*>(src);

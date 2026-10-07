@@ -78,6 +78,9 @@ if(NEXO2_ENABLE_JIT)
     target_compile_definitions(nexo2_core PRIVATE NEXO2_HAS_JIT)
     message(STATUS "NeXo 2: JIT dynarmic activado")
 endif()
+# El dibujo por software reparte los pixeles entre varios hilos (std::thread)
+find_package(Threads REQUIRED)
+target_link_libraries(nexo2_core PUBLIC Threads::Threads)
 
 # fp_ops.cpp cambia el modo de redondeo de la FPU del PC: el compilador no debe
 # calcular nada en tiempo de compilacion ni reordenar las operaciones alrededor.

@@ -146,7 +146,13 @@ public:
     const ShaderHeader& Header() const { return m_header; }
     u64 Address() const { return m_address; }
     // Instruccion en el offset (en bytes, desde el inicio del codigo = address + 0x50)
-    const ShaderInstr& At(u32 offset);
+    // Instruccion en 'offset' (decodificada la primera vez). Camino rapido en linea: es lo
+    // que mas se llama (una vez por instruccion y pixel).
+    const ShaderInstr& At(u32 offset) {
+        const u32 index = offset >> 3;
+        if (!(offset & 7) && index < m_decoded.size() && m_decoded[index]) return m_code[index];
+        return AtSlow(offset);
+    }
     // Numero de registros que usa como mucho (para no limpiar los 256 cada vez)
     static constexpr u32 MAX_CODE = 0x40000;   // 256 KB: un shader nunca es tan grande
 
@@ -155,7 +161,8 @@ private:
     ReadFn m_read;
     ShaderHeader m_header;
     std::vector<ShaderInstr> m_code;     // indexado por offset / 8
-    std::vector<bool> m_decoded;
+    std::vector<u8> m_decoded;
+    const ShaderInstr& AtSlow(u32 offset);
 };
 
 // ----------------------------------------------------------------------------

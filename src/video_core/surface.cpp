@@ -30,7 +30,7 @@ u64 BlockLinearOffset(u32 x_bytes, u32 y, u32 width_bytes, u32 block_height_log2
 namespace {
 inline u32 Unorm(float v, u32 bits) {
     v = std::clamp(v, 0.0f, 1.0f);
-    return u32(std::lround(v * float((1u << bits) - 1)));
+    return u32(double(v) * double((1u << bits) - 1) + 0.5);   // v >= 0: redondear sumando 0.5 (double: 24 bits no caben en float)
 }
 inline u32 Snorm(float v, u32 bits) {
     v = std::clamp(v, -1.0f, 1.0f);

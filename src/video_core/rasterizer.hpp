@@ -13,6 +13,7 @@
 // la documentacion publica de NVIDIA (open-gpu-doc, clb197.h) dividida entre 4.
 // Ver docs/07-nexo-internals/gpu-rasterizer.md.
 #include <array>
+#include <memory>
 #include <vector>
 #include "gpu.hpp"
 #include "shader.hpp"
@@ -43,7 +44,8 @@ struct DrawCall {
 
 class SoftwareRasterizer {
 public:
-    explicit SoftwareRasterizer(Gpu& gpu) : m_gpu(gpu) {}
+    explicit SoftwareRasterizer(Gpu& gpu);
+    ~SoftwareRasterizer();
 
     // Dibuja con el estado actual del motor 3D. 'regs' son sus registros.
     void Draw(const u32* regs, const ConstbufTable& cbs, const DrawCall& dc);
@@ -60,14 +62,28 @@ private:
         float x, y, z;      // coordenadas de ventana (pixeles) y profundidad
         float inv_w;        // 1 / w (para interpolar con perspectiva)
     };
+    // Un triangulo ya en pantalla, listo para recorrer sus pixeles
+    struct RasterTri {
+        ScreenVertex sv[3];
+        const Vertex* provoking;
+        bool front;
+    };
     // Estado comun de un draw (se calcula una vez)
     struct DrawState;
+    // Lo que cada hilo necesita para sus pixeles (interprete, programa, texturas...)
+    struct Worker;
+    // Hilos que se reparten las filas de la pantalla
+    class ThreadPool;
 
     bool RunVertexShader(DrawState& st, u32 index, u32 vertex_id, Vertex& out);
     void ProcessTriangle(DrawState& st, const Vertex& a, const Vertex& b, const Vertex& c, const Vertex& provoking);
-    void RasterizeTriangle(DrawState& st, const ScreenVertex sv[3], const Vertex& provoking, bool front);
+    // Recorre los pixeles de todos los triangulos (st.tris), repartidos entre los hilos
+    void RasterizeAll(DrawState& st);
+    // Pixeles de un triangulo en las filas de este hilo: bandas de 4 filas, una de cada 'bands'
+    void RasterizeTriangle(DrawState& st, Worker& w, const RasterTri& t, u32 band, u32 bands);
 
     Gpu& m_gpu;
+    std::unique_ptr<ThreadPool> m_pool;
 };
 
 } // namespace NeXo2::GPU

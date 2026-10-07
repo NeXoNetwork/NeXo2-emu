@@ -200,7 +200,11 @@ void MacroInterpreter::Execute(const std::vector<u32>& code, u32 start, const st
 //  3D
 // ============================================================================
 
-Maxwell3D::Maxwell3D(Gpu& gpu, u32 /*channel_syncpoint*/) : m_gpu(gpu), m_i2m(gpu), m_raster(gpu) {}
+Maxwell3D::Maxwell3D(Gpu& gpu, u32 /*channel_syncpoint*/) : m_gpu(gpu), m_i2m(gpu), m_raster(gpu) {
+    // Valores iniciales del hardware que deko3d da por hechos (no los escribe nunca):
+    // SetCtMrtEnable (0x3EB) = 1, cada salida del shader de pixeles va a su render target
+    m_regs[0x3EB] = m_shadow[0x3EB] = 1;
+}
 
 void Maxwell3D::CallMethod(u32 method, u32 arg, bool last) {
     if (method >= NUM_REGS) {   // llamada a macro: metodo par = empezar, impar = mas parametros
@@ -298,6 +302,16 @@ Surface Maxwell3D::RenderTarget(u32 index) const {
     return s;
 }
 
+// Rellena una superficie entera con el mismo pixel. Como todos los pixeles son iguales,
+// el orden block linear no importa: se escribe la memoria seguida, en trozos grandes.
+static void FillSurface(GpuMemoryManager& mm, const Surface& s, const u8* px) {
+    std::vector<u8> buf(64 * 1024);
+    for (size_t i = 0; i < buf.size(); i += s.bytes_per_pixel) std::memcpy(&buf[i], px, s.bytes_per_pixel);
+    const u64 total = s.SizeBytes();
+    for (u64 off = 0; off < total; off += buf.size())
+        mm.WriteBlock(s.address + off, buf.data(), size_t(std::min<u64>(buf.size(), total - off)));
+}
+
 void Maxwell3D::ClearBuffers(u32 arg) {
     const bool clear_z = arg & 1, clear_s = (arg >> 1) & 1;
     const u32 comp_mask = (arg >> 2) & 0xF;
@@ -340,11 +354,17 @@ void Maxwell3D::ClearBuffers(u32 arg) {
             const bool full = byte_mask == (1u << bpp) - 1;
             if (x1 > x0 && y1 > y0) {
                 std::vector<u8> row(size_t(x1 - x0) * bpp);
-                for (u32 y = y0; y < y1; ++y) {
-                    if (!full) ReadRow(mm, rt, x0 * bpp, y, row.data(), u32(row.size()));
+                auto fill = [&]() {
                     for (u32 x = 0; x < x1 - x0; ++x)
                         for (u32 b = 0; b < bpp; ++b)
                             if (byte_mask & (1u << b)) row[size_t(x) * bpp + b] = px[b];
+                };
+                if (full) fill();   // todos los bytes: la fila es la misma en todas las lineas
+                const bool whole_surface = full && !rt.linear && x0 == 0 && y0 == 0 && x1 == rt.width && y1 == rt.height &&
+                                           (bpp == 4 || bpp == 8 || bpp == 16);
+                if (whole_surface) { FillSurface(mm, rt, px); y1 = y0; }   // todo de golpe
+                for (u32 y = y0; y < y1; ++y) {
+                    if (!full) { ReadRow(mm, rt, x0 * bpp, y, row.data(), u32(row.size())); fill(); }
                     WriteRow(mm, rt, x0 * bpp, y, row.data(), u32(row.size()));
                 }
             }
@@ -373,10 +393,23 @@ void Maxwell3D::ClearBuffers(u32 arg) {
             const u32 bpp = zt.bytes_per_pixel;
             if (x1 > x0 && y1 > y0) {
                 std::vector<u8> row(size_t(x1 - x0) * bpp);
+                // Profundidad y stencil a la vez: todos los pixeles iguales, sin leer antes
+                const bool whole = clear_z && clear_s;
+                if (whole) {
+                    EncodeDepthStencil(format, depth, stencil, true, true, row.data());
+                    for (u32 x = 1; x < x1 - x0; ++x) std::memcpy(&row[size_t(x) * bpp], row.data(), bpp);
+                }
+                if (whole && !zt.linear && x0 == 0 && y0 == 0 && x1 == zt.width && y1 == zt.height &&
+                    (bpp == 2 || bpp == 4 || bpp == 8)) {
+                    FillSurface(mm, zt, row.data());   // todo de golpe
+                    y1 = y0;
+                }
                 for (u32 y = y0; y < y1; ++y) {
-                    ReadRow(mm, zt, x0 * bpp, y, row.data(), u32(row.size()));
-                    for (u32 x = 0; x < x1 - x0; ++x)
-                        EncodeDepthStencil(format, depth, stencil, clear_z, clear_s, &row[size_t(x) * bpp]);
+                    if (!whole) {
+                        ReadRow(mm, zt, x0 * bpp, y, row.data(), u32(row.size()));
+                        for (u32 x = 0; x < x1 - x0; ++x)
+                            EncodeDepthStencil(format, depth, stencil, clear_z, clear_s, &row[size_t(x) * bpp]);
+                    }
                     WriteRow(mm, zt, x0 * bpp, y, row.data(), u32(row.size()));
                 }
             }

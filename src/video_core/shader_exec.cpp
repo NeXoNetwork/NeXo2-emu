@@ -17,7 +17,12 @@ inline float F(u32 v) { float f; std::memcpy(&f, &v, 4); return f; }
 inline u32 U(float f) { u32 v; std::memcpy(&v, &f, 4); return v; }
 
 // "Flush to zero": los numeros desnormalizados (muy pequenos) se vuelven 0
-inline float Ftz(float x) { return std::fpclassify(x) == FP_SUBNORMAL ? std::copysign(0.0f, x) : x; }
+inline float Ftz(float x) {   // subnormal -> 0 con su signo (exponente 0 y mantisa != 0)
+    u32 b; std::memcpy(&b, &x, 4);
+    if ((b & 0x7F800000u) == 0 && (b & 0x007FFFFFu)) b &= 0x80000000u;
+    std::memcpy(&x, &b, 4);
+    return x;
+}
 inline float Sat(float x) { return std::isnan(x) ? 0.0f : std::clamp(x, 0.0f, 1.0f); }
 inline float AbsNeg(float x, bool abs, bool neg) { if (abs) x = std::fabs(x); return neg ? -x : x; }
 

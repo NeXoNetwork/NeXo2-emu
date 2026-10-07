@@ -1,3 +1,4 @@
+#include <atomic>
 #include "gpu.hpp"
 #include "engines.hpp"
 #include "memory.hpp"
@@ -51,7 +52,13 @@ void GpuMemoryManager::Free(u64 va, u64 size) {
     m_reserved.erase(va);
 }
 
+u64 GpuMemoryManager::NextGeneration() {
+    static std::atomic<u64> counter{0};
+    return ++counter;
+}
+
 void GpuMemoryManager::Map(u64 va, u64 cpu_addr, u64 size) {
+    m_generation = NextGeneration();
     // Quitar lo que se solape (una proyeccion nueva sustituye a la vieja)
     auto it = m_maps.lower_bound(va);
     if (it != m_maps.begin() && std::prev(it)->first + std::prev(it)->second.size > va) --it;
@@ -60,6 +67,7 @@ void GpuMemoryManager::Map(u64 va, u64 cpu_addr, u64 size) {
 }
 
 u64 GpuMemoryManager::Unmap(u64 va) {
+    m_generation = NextGeneration();
     auto it = m_maps.find(va);
     if (it == m_maps.end()) return 0;
     const u64 size = it->second.size;
@@ -68,11 +76,20 @@ u64 GpuMemoryManager::Unmap(u64 va) {
 }
 
 const std::pair<const u64, GpuMemoryManager::Mapping>* GpuMemoryManager::Find(u64 va) const {
+    // Ultima proyeccion encontrada (una por hilo): casi todos los accesos seguidos caen en la misma
+    thread_local const GpuMemoryManager* t_owner = nullptr;
+    thread_local u64 t_generation = 0;
+    thread_local const std::pair<const u64, Mapping>* t_last = nullptr;
+    if (t_owner == this && t_generation == m_generation && va >= t_last->first && va - t_last->first < t_last->second.size)
+        return t_last;
     auto it = m_maps.upper_bound(va);
     if (it == m_maps.begin()) return nullptr;
     --it;
     if (va >= it->first + it->second.size) return nullptr;
-    return &*it;
+    t_owner = this;
+    t_generation = m_generation;
+    t_last = &*it;
+    return t_last;
 }
 
 std::optional<u64> GpuMemoryManager::Translate(u64 va) const {
@@ -90,6 +107,17 @@ void GpuMemoryManager::ReadBlock(u64 va, void* dst, size_t size) const {
         const size_t chunk = size_t(std::min<u64>(size, m->second.size - off));
         m_memory.ReadBytes(m->second.cpu + off, out, chunk);
         va += chunk; out += chunk; size -= chunk;
+    }
+}
+
+void GpuMemoryManager::Touch(u64 va, u64 size) {
+    while (size > 0) {
+        const auto* m = Find(va);
+        if (!m) return;
+        const u64 off = va - m->first;
+        const u64 chunk = std::min<u64>(size, m->second.size - off);
+        m_memory.TouchPages(m->second.cpu + off, chunk);
+        va += chunk; size -= chunk;
     }
 }
 

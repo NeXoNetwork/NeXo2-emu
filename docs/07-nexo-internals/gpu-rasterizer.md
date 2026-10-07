@@ -82,9 +82,21 @@ averages the samples) gives the right image. Clears follow the same rule.
 
 ## Speed
 
-The pixel shader is interpreted for each pixel. A full 1280x720 screen of a simple shader
-takes about 130 ms on a desktop CPU, so small objects are fine but full-screen effects are
-slow. Possible improvements: several threads (rows of the image), and later the Vulkan backend.
+The pixel shader is interpreted for each pixel, so this is the slow part. Two things help:
+
+- **Threads.** Vertices are shaded on one thread; then the screen is split into bands of 4
+  rows, and each CPU thread takes every N-th band and walks *all* triangles of the draw in
+  order. A pixel is always written by the same thread and in the same order as on the GPU,
+  so depth tests and blending give exactly the same result as with one thread. Each thread
+  has its own interpreter, its own copy of the decoded shader and its own texture cache;
+  constant buffers and the memory pages of the targets are loaded before the threads start.
+  Draws smaller than about 1000 pixels stay on one thread. `NEXO2_GPU_THREADS=1` (environment
+  variable) forces one thread, to compare or debug.
+- **Fast clears.** Clearing a whole surface with one colour writes the memory in large
+  blocks (the block linear order doesn't matter when every pixel is the same).
+
+Rough numbers on a 2-core cloud machine: deko3d's lit teapot with 4x MSAA went from 0.6 s
+to 0.23 s per frame. Expect more with more cores; the Vulkan backend (phase 3) is the real fix.
 
 ## Not yet
 

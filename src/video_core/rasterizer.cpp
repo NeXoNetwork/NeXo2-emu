@@ -5,12 +5,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 namespace NeXo2::GPU {
 
@@ -218,10 +222,10 @@ struct SoftwareRasterizer::DrawState {
     s32 depth_reg = -1;
     bool flip_y = false;
     u32 msx = 1, msy = 1;         // muestras por pixel (MSAA) en horizontal y vertical
-    std::vector<u8> ms_tmp;
     float y_direction = 1.0f;
     ShaderInterpreter interp;
     std::deque<Vertex> scratch;   // vertices creados al recortar
+    std::vector<RasterTri> tris;  // triangulos del draw, ya recortados y en pantalla
     u64 pixels = 0, triangles = 0;
     bool failed = false;
     std::string error;
@@ -357,6 +361,130 @@ bool SoftwareRasterizer::RunVertexShader(DrawState& st, u32 index, u32 vertex_id
 // ============================================================================
 //  Draw
 // ============================================================================
+
+// ============================================================================
+//  Hilos: cada uno se queda con unas filas de la pantalla (bandas de 4 filas
+//  alternas) y recorre TODOS los triangulos del draw en orden. Asi cada pixel lo
+//  escribe siempre el mismo hilo, en el mismo orden que en la GPU: la profundidad y
+//  la mezcla dan exactamente lo mismo que con un solo hilo.
+// ============================================================================
+
+class SoftwareRasterizer::ThreadPool {
+public:
+    explicit ThreadPool(u32 threads) {
+        for (u32 i = 1; i < threads; ++i) m_threads.emplace_back([this, i] { Loop(i); });
+    }
+    ~ThreadPool() {
+        { std::lock_guard lock(m_mutex); m_quit = true; }
+        m_wake.notify_all();
+        for (auto& t : m_threads) t.join();
+    }
+    u32 Size() const { return u32(m_threads.size()) + 1; }
+    // Ejecuta job(0..n-1): el 0 en este hilo, el resto en los otros. Espera a que acaben.
+    void Run(u32 n, const std::function<void(u32)>& job) {
+        n = std::min(n, Size());
+        {
+            std::lock_guard lock(m_mutex);
+            m_job = &job;
+            m_count = n;
+            m_pending = n - 1;
+            ++m_round;
+        }
+        m_wake.notify_all();
+        job(0);
+        std::unique_lock lock(m_mutex);
+        m_done.wait(lock, [this] { return m_pending == 0; });
+        m_job = nullptr;
+    }
+private:
+    void Loop(u32 index) {
+        u64 seen = 0;
+        while (true) {
+            const std::function<void(u32)>* job;
+            {
+                std::unique_lock lock(m_mutex);
+                m_wake.wait(lock, [&] { return m_quit || m_round != seen; });
+                if (m_quit) return;
+                seen = m_round;
+                if (index >= m_count) continue;   // esta vez no hace falta este hilo
+                job = m_job;
+            }
+            (*job)(index);
+            std::lock_guard lock(m_mutex);
+            if (--m_pending == 0) m_done.notify_one();
+        }
+    }
+    std::vector<std::thread> m_threads;
+    std::mutex m_mutex;
+    std::condition_variable m_wake, m_done;
+    const std::function<void(u32)>* m_job = nullptr;
+    u32 m_count = 0, m_pending = 0;
+    u64 m_round = 0;
+    bool m_quit = false;
+};
+
+struct SoftwareRasterizer::Worker {
+    ShaderInterpreter interp;
+    std::unique_ptr<ShaderProgram> fs;          // cada hilo decodifica su copia
+    TextureSampler* tex = nullptr;
+    std::unique_ptr<TextureSampler> own_tex;    // texturas decodificadas por este hilo
+    std::vector<u8> ms_tmp;
+    std::vector<std::vector<u8>> rows;
+    std::vector<u8> zrow;
+    u64 pixels = 0;
+    bool failed = false;
+    std::string error;
+};
+
+namespace {
+u32 GpuThreads() {
+    // NEXO2_GPU_THREADS=1 para un solo hilo (comparar o depurar)
+    if (const char* e = std::getenv("NEXO2_GPU_THREADS")) return std::clamp(std::atoi(e), 1, 64);
+    return std::clamp<u32>(std::thread::hardware_concurrency(), 1, 16);
+}
+} // namespace
+
+SoftwareRasterizer::SoftwareRasterizer(Gpu& gpu) : m_gpu(gpu), m_pool(std::make_unique<ThreadPool>(GpuThreads())) {}
+SoftwareRasterizer::~SoftwareRasterizer() = default;
+
+void SoftwareRasterizer::RasterizeAll(DrawState& st) {
+    // Area total aproximada: con pocos pixeles no merece la pena despertar a los hilos
+    double area = 0;
+    for (const auto& t : st.tris)
+        area += std::fabs(double(t.sv[1].x - t.sv[0].x) * (t.sv[2].y - t.sv[0].y) -
+                          double(t.sv[2].x - t.sv[0].x) * (t.sv[1].y - t.sv[0].y)) * 0.5;
+    const u32 n = area < 1024 ? 1 : m_pool->Size();
+    if (n > 1) {
+        // Lo que se carga "la primera vez" se carga ya, antes de repartir el trabajo
+        for (u32 i = 0; i < 18; ++i) st.ReadConst(st.fs_group, i, 0);
+        for (const auto& t : st.targets) st.mm->Touch(t.surf.address, t.surf.SizeBytes());
+        if (st.depth_enabled) st.mm->Touch(st.zsurf.address, st.zsurf.SizeBytes());
+    }
+    auto read = [mm = st.mm](u64 a, void* d, size_t sz) { mm->ReadBlock(a, d, sz); };
+    std::vector<Worker> workers(n);
+    for (u32 k = 0; k < n; ++k) {
+        Worker& w = workers[k];
+        w.interp.max_steps = st.interp.max_steps;
+        w.fs = std::make_unique<ShaderProgram>(st.fs->Address(), read);
+        if (k == 0) w.tex = st.textures.get();
+        else {
+            w.own_tex = st.textures->CloneEmpty();
+            w.tex = w.own_tex.get();
+        }
+        w.rows.resize(st.targets.size());
+    }
+    m_pool->Run(n, [&](u32 k) {
+        Worker& w = workers[k];
+        for (const auto& t : st.tris) {
+            RasterizeTriangle(st, w, t, k, n);
+            if (w.failed) break;
+        }
+    });
+    for (auto& w : workers) {
+        st.pixels += w.pixels;
+        if (w.failed && !st.failed) { st.failed = true; st.error = w.error; }
+    }
+}
 
 void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const DrawCall& dc) {
     auto& stats = m_gpu.GetStats();
@@ -572,6 +700,7 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
         }
         start = end + 1;
     }
+    if (!st.failed && !st.tris.empty()) RasterizeAll(st);
     if (st.failed) {
         m_gpu.Warn("fs:" + st.error, st.error);
         ++stats.shader_errors;
@@ -658,11 +787,7 @@ void SoftwareRasterizer::ProcessTriangle(DrawState& st, const Vertex& a, const V
         const u32 cull = r[CULL_FACE];
         if (cull == 0x408 || (cull == 0x404 && front) || (cull == 0x405 && !front)) return;
     }
-    for (size_t i = 1; i + 1 < sv.size(); ++i) {
-        const ScreenVertex t[3] = {sv[0], sv[i], sv[i + 1]};
-        RasterizeTriangle(st, t, provoking, front);
-        if (st.failed) return;
-    }
+    for (size_t i = 1; i + 1 < sv.size(); ++i) st.tris.push_back({{sv[0], sv[i], sv[i + 1]}, &provoking, front});
     ++st.triangles;
 }
 
@@ -712,7 +837,8 @@ public:
 };
 } // namespace
 
-void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[3], const Vertex& provoking, bool front) {
+void SoftwareRasterizer::RasterizeTriangle(DrawState& st, Worker& w, const RasterTri& tri, u32 band, u32 bands) {
+    const ScreenVertex* sv = tri.sv;
     // Coordenadas en punto fijo (1/256 de pixel): las aristas compartidas entre dos
     // triangulos dan exactamente los mismos valores, sin huecos ni pixeles repetidos.
     s64 X[3], Y[3];
@@ -747,10 +873,10 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
     PixelEnv env;
     env.read_const = [&st](u32 i, u32 o2) { return st.ReadConst(st.fs_group, i, o2); };
     for (int i = 0; i < 3; ++i) { env.v[i] = sv[o[i]].v; env.inv_w[i] = sv[o[i]].inv_w; }
-    env.provoking = &provoking;
-    env.tex = st.textures.get();
+    env.provoking = tri.provoking;
+    env.tex = w.tex;
     env.tex_cb = st.tex_cb;
-    env.front = front;
+    env.front = tri.front;
     env.y_direction = st.y_direction;
     const float z0 = sv[o[0]].z, z1 = sv[o[1]].z, z2 = sv[o[2]].z;
     const double inv_area = 1.0 / double(area);
@@ -758,9 +884,10 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
     const float bconst[4] = {F(st.regs[BLEND_CONST]), F(st.regs[BLEND_CONST + 1]), F(st.regs[BLEND_CONST + 2]),
                              F(st.regs[BLEND_CONST + 3])};
 
-    std::vector<std::vector<u8>> rows(st.targets.size());
-    std::vector<u8> zrow;
-    for (s64 py = miny; py < maxy && !st.failed; ++py) {
+    auto& rows = w.rows;
+    auto& zrow = w.zrow;
+    for (s64 py = miny; py < maxy && !w.failed; ++py) {
+        if (bands > 1 && u32(py >> 2) % bands != band) continue;   // fila de otro hilo
         const s64 cy = py * 256 + 128;
         // Que pixeles de esta fila estan dentro (para no leer/escribir filas vacias)
         s64 first = -1, lastx = -1;
@@ -775,11 +902,11 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
         const u32 fx = u32(first), n = u32(lastx - first + 1);
         for (size_t t = 0; t < st.targets.size(); ++t) {
             rows[t].resize(size_t(n) * st.targets[t].surf.bytes_per_pixel);
-            ReadPixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), st.ms_tmp);
+            ReadPixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), w.ms_tmp);
         }
         if (st.depth_enabled) {
             zrow.resize(size_t(n) * st.zsurf.bytes_per_pixel);
-            ReadPixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), st.ms_tmp);
+            ReadPixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), w.ms_tmp);
         }
         bool zdirty = false;
         for (s64 px = first; px <= lastx; ++px) {
@@ -802,11 +929,11 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
                 DecodeDepth(st.zformat, zpx, stored);
                 if (!CompareFunc(st.depth_func, std::clamp(z, 0.0f, 1.0f), stored)) continue;
             }
-            const auto res = st.interp.Run(*st.fs, env);
-            if (!res.ok) { st.failed = true; st.error = "shader de pixeles: " + res.error; break; }
+            const auto res = w.interp.Run(*w.fs, env);
+            if (!res.ok) { w.failed = true; w.error = "shader de pixeles: " + res.error; break; }
             if (res.killed) continue;
-            ++st.pixels;
-            if (st.depth_reg >= 0) z = st.interp.RegF(u32(st.depth_reg));
+            ++w.pixels;
+            if (st.depth_reg >= 0) z = w.interp.RegF(u32(st.depth_reg));
             z = std::clamp(z, 0.0f, 1.0f);
             if (st.depth_enabled) {
                 if (st.depth_test && !early) {
@@ -821,7 +948,7 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
                 float src[4];
                 for (u32 c = 0; c < 4; ++c) {
                     const s32 reg = st.out_reg[out][c];
-                    src[c] = reg >= 0 ? st.interp.RegF(u32(reg)) : (c == 3 ? 1.0f : 0.0f);
+                    src[c] = reg >= 0 ? w.interp.RegF(u32(reg)) : (c == 3 ? 1.0f : 0.0f);
                 }
                 u8* dst_px = &rows[t][size_t(i) * tg.surf.bytes_per_pixel];
                 if (tg.blend) {
@@ -846,8 +973,8 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
             }
         }
         for (size_t t = 0; t < st.targets.size(); ++t)
-            WritePixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), st.ms_tmp);
-        if (zdirty) WritePixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), st.ms_tmp);
+            WritePixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), w.ms_tmp);
+        if (zdirty) WritePixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), w.ms_tmp);
         (void)span;
     }
 }

@@ -53,6 +53,7 @@ static void LoadDemo(System& sys) {
 // (atomicas: las leen la interfaz y el hilo de emulacion a la vez)
 static std::atomic<bool> g_emuRunning{false};
 static std::atomic<unsigned long long> g_runInstructions{0};   // instrucciones desde que se pulso Run
+static std::atomic<u64> g_runGeneration{0};   // sube con cada Run: el reloj real empieza de nuevo
 
 // Medidor de velocidad: cada segundo calcula instrucciones/s e imagenes/s
 struct SpeedMeter {
@@ -81,7 +82,7 @@ static void SetRunning(System& sys, bool run) {
     auto& cpu = sys.GetCpu();
     if (run && cpu.IsHalted()) return;   // parada: hay que reiniciar o cargar otro programa
     g_emuRunning = run;
-    if (run) g_runInstructions = 0;
+    if (run) { g_runInstructions = 0; ++g_runGeneration; }
     NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
         run ? std::string("[UI] Run") : "[UI] Pausa (" + std::to_string(g_runInstructions) + " instrucciones)");
 }
@@ -118,20 +119,59 @@ private:
                 std::this_thread::sleep_for(std::chrono::microseconds(g_emuRunning ? 0 : 2000));
                 continue;
             }
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (!g_emuRunning) continue;                  // la interfaz pauso mientras esperabamos
-            auto& cpu = m_sys.GetCpu();
-            g_runInstructions += m_sys.Run(200'000);
-            if (cpu.IsHalted()) {
-                g_emuRunning = false;
-                NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
-                    "[UI] Run: " + std::to_string(g_runInstructions.load()) + " instrucciones ejecutadas. " +
-                    cpu.GetHaltReason());
+            u64 sleep_ns = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (!g_emuRunning) continue;              // la interfaz pauso mientras esperabamos
+                auto& cpu = m_sys.GetCpu();
+                g_runInstructions += m_sys.Run(200'000);
+                sleep_ns = PaceToRealTime(cpu);
+                if (cpu.IsHalted()) {
+                    g_emuRunning = false;
+                    NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
+                        "[UI] Run: " + std::to_string(g_runInstructions.load()) + " instrucciones ejecutadas. " +
+                        cpu.GetHaltReason());
+                }
             }
+            // Fuera del candado, para no hacer esperar a la interfaz
+            if (sleep_ns) std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
         }
     }
 
+    // Reloj emulado = reloj real. El contador de la CPU (CNTPCT, svcGetSystemTick, esperas
+    // de los hilos) avanza con las instrucciones. Si la emulacion va mas lenta que la consola
+    // (por ejemplo esperando a la GPU por software), se adelanta el contador hasta la hora
+    // real; si va mas rapida (o el programa solo espera), se duerme. Asi las animaciones
+    // y los temporizadores van a la velocidad correcta.
+    // Devuelve cuanto hay que dormir (ns) si la emulacion va adelantada.
+    u64 PaceToRealTime(NeXo2::Core::Interpreter& cpu) {
+        using Clock = std::chrono::steady_clock;
+        const u64 ticks = cpu.GetInstructionCount();
+        if (!m_paceValid || ticks < m_paceLast || m_paceRun != g_runGeneration) {   // empezar de nuevo
+            m_paceValid = true;
+            m_paceRun = g_runGeneration;
+            m_paceStart = Clock::now();
+            m_paceTicks0 = ticks;
+            m_paceLast = ticks;
+            return 0;
+        }
+        constexpr double TICKS_PER_NS = double(NeXo2::Core::Interpreter::TICK_FREQUENCY) / 1e9;
+        const double ns = double(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - m_paceStart).count());
+        const u64 wall = m_paceTicks0 + u64(ns * TICKS_PER_NS);
+        u64 sleep_ns = 0;
+        if (ticks < wall) {
+            cpu.AddTicks(wall - ticks);                       // la emulacion va lenta: alcanzar la hora real
+        } else if (ticks > wall + u64(2e6 * TICKS_PER_NS)) { // va mas de 2 ms adelantada: esperar
+            sleep_ns = u64(std::min(double(ticks - wall) / TICKS_PER_NS, 20e6));
+        }
+        m_paceLast = cpu.GetInstructionCount();
+        return sleep_ns;
+    }
+
     System& m_sys;
+    bool m_paceValid = false;
+    u64 m_paceRun = 0, m_paceTicks0 = 0, m_paceLast = 0;
+    std::chrono::steady_clock::time_point m_paceStart;
     std::mutex m_mutex;
     std::atomic<bool> m_quit{false};
     std::atomic<bool> m_uiWaiting{false};

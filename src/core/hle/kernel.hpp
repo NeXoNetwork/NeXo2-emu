@@ -144,6 +144,14 @@ public:
     // Carpeta del PC que hace de tarjeta SD ("sdmc:/"). Por defecto "sdmc" en el directorio actual.
     void SetSdmcRoot(const std::filesystem::path& root) { m_sdmcRoot = root; }
     const std::filesystem::path& GetSdmcRoot() const { return m_sdmcRoot; }
+    // El propio .nro, visible en la SD como "/switch/<nombre>.nro" (solo lectura). Asi
+    // romfsInit() de libnx lo encuentra con argv[0], como cuando lo lanza el hbmenu.
+    void SetSelfNro(std::string guest_path, std::vector<u8> data) {
+        m_selfNroPath = std::move(guest_path);
+        m_selfNro = std::make_shared<const std::vector<u8>>(std::move(data));
+    }
+    const std::string& GetSelfNroPath() const { return m_selfNroPath; }
+    std::shared_ptr<const std::vector<u8>> GetSelfNro() const { return m_selfNro; }
 
     // Mandos: memoria compartida de hid (una por proceso) y estado nuevo de los botones
     u32  GetHidSharedMemoryHandle();
@@ -221,6 +229,8 @@ private:
     InputState      m_input;
     std::shared_ptr<KSharedMemory> m_hidMemory;
     std::filesystem::path m_sdmcRoot = "sdmc";
+    std::string m_selfNroPath;
+    std::shared_ptr<const std::vector<u8>> m_selfNro;
 
     std::vector<std::shared_ptr<KThread>> m_threads;
     std::shared_ptr<KThread> m_current;    // el hilo cuyos registros estan en la CPU

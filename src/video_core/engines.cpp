@@ -222,13 +222,16 @@ void Maxwell3D::RunMacro() {
     ++m_gpu.GetStats().macros;
     m_mme.Execute(m_macroCode, m_macroStart[index], m_macroParams,
                   [this](u32 m, u32 v) { WriteReg(m, v); },
-                  [this](u32 m) { return Reg(m); });
+                  [this](u32 m) { return m < NUM_REGS ? m_shadow[m] : 0u; });   // el MME lee la shadow RAM
     if (!m_mme.last_error.empty()) m_gpu.Warn("mme:" + m_mme.last_error, "macro " + std::to_string(index) + ": " + m_mme.last_error);
     m_macroParams.clear();
 }
 
 void Maxwell3D::WriteReg(u32 method, u32 arg) {
     if (method >= NUM_REGS) { CallMethod(method, arg, true); return; }
+    if (method == 0x049) m_shadowMode = arg & 3;                 // MmeShadowRamControl
+    else if (m_shadowMode == 3) arg = m_shadow[method];          // replay: valor guardado
+    else if (m_shadowMode != 2) m_shadow[method] = arg;          // track: guardar
     m_regs[method] = arg;
     if (method >= 0x60 && method <= 0x6D) { m_i2m.CallMethod(m_regs.data(), method, arg); return; }
     switch (method) {
@@ -265,7 +268,12 @@ void Maxwell3D::WriteReg(u32 method, u32 arg) {
             break;
         }
         default:
-            if (method >= 0x8E4 && method <= 0x8F3) LoadConstbuf(arg);
+            // FirmwareCall[0..31] (0x8C0..0x8DF): llamadas al firmware del motor (por ejemplo la
+            // macro WriteHardwareReg de deko3d, que escribe un registro interno de PGRAPH). No
+            // tenemos ese firmware: lo damos por hecho y, como el de verdad, ponemos
+            // MmeFirmwareArgs[0] (0xD00) = 1, que es lo que la macro espera en un bucle.
+            if (method >= 0x8C0 && method < 0x8E0) m_regs[0xD00] = m_shadow[0xD00] = 1;
+            else if (method >= 0x8E4 && method <= 0x8F3) LoadConstbuf(arg);
             else if (method >= 0x904 && method < 0x904 + 5 * 8 && ((method - 0x904) & 7) == 0)
                 BindConstbuf((method - 0x904) / 8, arg);
             break;
@@ -297,8 +305,11 @@ void Maxwell3D::ClearBuffers(u32 arg) {
     const u32 layer = (arg >> 10) & 0x7FF;
     auto& mm = m_gpu.MemoryManager();
 
-    // Zona a borrar: tamano del destino, recortado por el "screen scissor" y (si se pide) el scissor 0
-    auto clip = [&](u32 w, u32 h, u32& x0, u32& y0, u32& x1, u32& y1) {
+    // Zona a borrar: tamano del destino, recortado por el "screen scissor" y (si se pide) el scissor 0.
+    // Con MSAA el destino mide en muestras y los scissors en pixeles.
+    u32 msx, msy;
+    MsaaSampleGrid(m_regs[0x574], msx, msy);
+    auto clip_px = [&](u32 w, u32 h, u32& x0, u32& y0, u32& x1, u32& y1) {
         x0 = 0; y0 = 0; x1 = w; y1 = h;
         const u32 sh = m_regs[0x3FD], sv = m_regs[0x3FE];
         if (sh >> 16) { x0 = std::max(x0, sh & 0xFFFF); x1 = std::min(x1, (sh & 0xFFFF) + (sh >> 16)); }
@@ -308,6 +319,10 @@ void Maxwell3D::ClearBuffers(u32 arg) {
             x0 = std::max(x0, h0 & 0xFFFF); x1 = std::min(x1, h0 >> 16);
             y0 = std::max(y0, v0 & 0xFFFF); y1 = std::min(y1, v0 >> 16);
         }
+    };
+    auto clip = [&](u32 w, u32 h, u32& x0, u32& y0, u32& x1, u32& y1) {
+        clip_px(w / msx, h / msy, x0, y0, x1, y1);
+        x0 *= msx; x1 *= msx; y0 *= msy; y1 *= msy;
     };
 
     if (comp_mask && target < 8) {

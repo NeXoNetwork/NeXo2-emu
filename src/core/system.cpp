@@ -53,7 +53,13 @@ bool System::LoadNro(const std::vector<u8>& data, const std::string& name) {
     m_lastNro = data;
     m_lastRaw.clear();
 
-    m_kernel.SetupHomebrewProcess(m_nroInfo.entry, m_nroInfo.base, m_nroInfo.image_size, name);
+    // Como el hbmenu: argv[0] = ruta del .nro en la SD. El .nro se ve en esa ruta aunque no
+    // este de verdad en la SD, para que romfsInit() pueda leer su RomFS.
+    const std::string guest = "/switch/" + name;
+    const std::string argv0 = "sdmc:" + guest;
+    m_kernel.SetSelfNro(guest, data);
+    m_kernel.SetupHomebrewProcess(m_nroInfo.entry, m_nroInfo.base, m_nroInfo.image_size,
+                                  name.find(' ') == std::string::npos ? argv0 : "\"" + argv0 + "\"");
     Logger::Log(Logger::Level::Info, "[Loader] NRO cargado: " + name +
                 (m_nroInfo.title.empty() ? "" : " (" + m_nroInfo.title + ")"));
     return true;

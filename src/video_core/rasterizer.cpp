@@ -47,7 +47,8 @@ constexpr u32 BLEND_TARGET = 0x780;            // 8 cada uno
 constexpr u32 PIPELINE = 0x800;                // 0x10 cada uno: config, offset, -, registros, grupo
 constexpr u32 TSC_POOL = 0x557, TSC_MAX = 0x559;   // tabla de samplers: direccion (2), ultimo indice
 constexpr u32 TIC_POOL = 0x55D, TIC_MAX = 0x55F;   // tabla de imagenes
-constexpr u32 BINDLESS_TEXTURE = 0x982;            // constbuf con los handles de texturas
+constexpr u32 BINDLESS_TEXTURE = 0x982;
+constexpr u32 MULTISAMPLE_MODE = 0x574;           // MSAA: cuantas muestras por pixel            // constbuf con los handles de texturas
 
 inline u64 Iova(u32 hi, u32 lo) { return (u64(hi & 0xFF) << 32) | lo; }
 inline float F(u32 v) { float f; std::memcpy(&f, &v, 4); return f; }
@@ -71,6 +72,29 @@ void ReadSpan(GpuMemoryManager& mm, const Surface& s, u32 x, u32 y, u32 count, u
         mm.ReadBlock(s.address + BlockLinearOffset(xb, y, s.width * bpp, s.block_height_log2), out, chunk);
         xb += chunk; out += chunk; size -= chunk;
     }
+}
+void WriteSpan(GpuMemoryManager& mm, const Surface& s, u32 x, u32 y, u32 count, const u8* in);
+
+// Con MSAA la superficie guarda msx x msy muestras por pixel (como una imagen msx veces mas
+// ancha y msy veces mas alta). No calculamos la cobertura por muestra: cada pixel se lee de
+// su primera muestra y se escribe en todas (sin bordes suavizados, pero el "resolve" que
+// hace el programa despues da el mismo color).
+void ReadPixels(GpuMemoryManager& mm, const Surface& s, u32 msx, u32 msy, u32 x, u32 y, u32 count, u8* out,
+                std::vector<u8>& tmp) {
+    if (msx == 1 && msy == 1) { ReadSpan(mm, s, x, y, count, out); return; }
+    const u32 bpp = s.bytes_per_pixel;
+    tmp.resize(size_t(count) * msx * bpp);
+    ReadSpan(mm, s, x * msx, y * msy, count * msx, tmp.data());
+    for (u32 i = 0; i < count; ++i) std::memcpy(out + size_t(i) * bpp, tmp.data() + size_t(i) * msx * bpp, bpp);
+}
+void WritePixels(GpuMemoryManager& mm, const Surface& s, u32 msx, u32 msy, u32 x, u32 y, u32 count, const u8* in,
+                 std::vector<u8>& tmp) {
+    if (msx == 1 && msy == 1) { WriteSpan(mm, s, x, y, count, in); return; }
+    const u32 bpp = s.bytes_per_pixel;
+    tmp.resize(size_t(count) * msx * bpp);
+    for (u32 i = 0; i < count; ++i)
+        for (u32 k = 0; k < msx; ++k) std::memcpy(tmp.data() + (size_t(i) * msx + k) * bpp, in + size_t(i) * bpp, bpp);
+    for (u32 r = 0; r < msy; ++r) WriteSpan(mm, s, x * msx, y * msy + r, count * msx, tmp.data());
 }
 void WriteSpan(GpuMemoryManager& mm, const Surface& s, u32 x, u32 y, u32 count, const u8* in) {
     const u32 bpp = s.bytes_per_pixel;
@@ -193,6 +217,8 @@ struct SoftwareRasterizer::DrawState {
     std::array<std::array<s32, 4>, 8> out_reg{};
     s32 depth_reg = -1;
     bool flip_y = false;
+    u32 msx = 1, msy = 1;         // muestras por pixel (MSAA) en horizontal y vertical
+    std::vector<u8> ms_tmp;
     float y_direction = 1.0f;
     ShaderInterpreter interp;
     std::deque<Vertex> scratch;   // vertices creados al recortar
@@ -440,6 +466,9 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
     u32 w = 0xFFFF, h = 0xFFFF;
     for (const auto& t : st.targets) { w = std::min(w, t.surf.width); h = std::min(h, t.surf.height); }
     if (st.depth_enabled) { w = std::min(w, st.zsurf.width); h = std::min(h, st.zsurf.height); }
+    MsaaSampleGrid(regs[MULTISAMPLE_MODE], st.msx, st.msy);   // las superficies miden en muestras
+    w /= st.msx;
+    h /= st.msy;
     st.bx0 = 0; st.by0 = 0; st.bx1 = w; st.by1 = h;
     auto clip_rect = [&](u32 x0, u32 x1, u32 y0, u32 y1) {
         st.bx0 = std::max(st.bx0, x0); st.bx1 = std::min(st.bx1, x1);
@@ -746,11 +775,11 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
         const u32 fx = u32(first), n = u32(lastx - first + 1);
         for (size_t t = 0; t < st.targets.size(); ++t) {
             rows[t].resize(size_t(n) * st.targets[t].surf.bytes_per_pixel);
-            ReadSpan(*st.mm, st.targets[t].surf, fx, u32(py), n, rows[t].data());
+            ReadPixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), st.ms_tmp);
         }
         if (st.depth_enabled) {
             zrow.resize(size_t(n) * st.zsurf.bytes_per_pixel);
-            ReadSpan(*st.mm, st.zsurf, fx, u32(py), n, zrow.data());
+            ReadPixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), st.ms_tmp);
         }
         bool zdirty = false;
         for (s64 px = first; px <= lastx; ++px) {
@@ -817,8 +846,8 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
             }
         }
         for (size_t t = 0; t < st.targets.size(); ++t)
-            WriteSpan(*st.mm, st.targets[t].surf, fx, u32(py), n, rows[t].data());
-        if (zdirty) WriteSpan(*st.mm, st.zsurf, fx, u32(py), n, zrow.data());
+            WritePixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), st.ms_tmp);
+        if (zdirty) WritePixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), st.ms_tmp);
         (void)span;
     }
 }

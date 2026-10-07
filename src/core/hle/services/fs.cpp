@@ -88,6 +88,18 @@ bool FileSystem::HostPath(IpcContext& ctx, size_t index, fs::path& out) {
     return true;
 }
 
+std::shared_ptr<const std::vector<u8>> FileSystem::SelfNro(IpcContext& ctx, size_t index) {
+    const auto& kernel = ctx.GetKernel();
+    if (kernel.GetSelfNroPath().empty()) return nullptr;
+    const auto raw = ctx.ReadBuffer(index);
+    std::string guest(reinterpret_cast<const char*>(raw.data()), raw.size());
+    guest = guest.substr(0, guest.find('\0'));
+    if (guest != kernel.GetSelfNroPath()) return nullptr;
+    const fs::path host = ResolveGuestPath(kernel.GetSdmcRoot(), guest);
+    if (!host.empty() && fs::is_regular_file(host)) return nullptr;   // el de verdad tiene prioridad
+    return kernel.GetSelfNro();
+}
+
 FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
     // 0 CreateFile(u32 opcion, s64 tamano, ruta)
     RegisterCommand(0, "CreateFile", [this](IpcContext& ctx) {
@@ -148,6 +160,7 @@ FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
     RegisterCommand(6, "RenameDirectory", rename);
     // 7 GetEntryType(ruta) -> u32 (0 = carpeta, 1 = archivo)
     RegisterCommand(7, "GetEntryType", [this](IpcContext& ctx) {
+        if (SelfNro(ctx, 0)) { ctx.Push<u32>(1); ctx.SetResult(Result::Success); return; }
         fs::path p;
         if (!HostPath(ctx, 0, p)) return;
         if (fs::is_directory(p))         { ctx.Push<u32>(0); ctx.SetResult(Result::Success); }
@@ -157,6 +170,13 @@ FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
     // 8 OpenFile(u32 modo, ruta) -> IFile
     RegisterCommand(8, "OpenFile", [this](IpcContext& ctx) {
         const u32 mode = ctx.Pop<u32>();
+        if (auto self = SelfNro(ctx, 0)) {
+            if (mode & 2) { ctx.SetResult(RESULT_NOT_PERMITTED); return; }
+            Logger::Log(Logger::Level::Info, "[fs] OpenFile(" + ctx.GetKernel().GetSelfNroPath() + "): el propio .nro");
+            ctx.PushInterface(std::make_shared<MemoryFileObject>(self));
+            ctx.SetResult(Result::Success);
+            return;
+        }
         fs::path p;
         if (!HostPath(ctx, 0, p)) return;
         if (!fs::is_regular_file(p)) { ctx.SetResult(RESULT_PATH_NOT_FOUND); return; }
@@ -245,6 +265,28 @@ FileObject::FileObject(fs::path path, u32 mode)
         const auto size = fs::file_size(m_path, ec);
         ctx.Push<s64>(ec ? 0 : static_cast<s64>(size));
         ctx.SetResult(ec ? ErrorFor(ec) : Result::Success);
+    });
+}
+
+MemoryFileObject::MemoryFileObject(std::shared_ptr<const std::vector<u8>> data)
+    : ServiceObject("IFile (nro)"), m_data(std::move(data)) {
+    RegisterCommand(0, "Read", [this](IpcContext& ctx) {
+        ctx.Pop<u32>(); ctx.Pop<u32>();
+        const s64 offset = ctx.Pop<s64>();
+        const u64 size = std::min<u64>(ctx.Pop<u64>(), ctx.GetWriteBufferSize(0));
+        if (offset < 0) { ctx.SetResult(RESULT_INVALID_OFFSET); return; }
+        const u64 start = std::min<u64>(u64(offset), m_data->size());
+        const u64 got = std::min<u64>(size, m_data->size() - start);
+        if (got) ctx.WriteBuffer(m_data->data() + start, static_cast<size_t>(got), 0);
+        ctx.Push<u64>(got);
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(1, "Write", [](IpcContext& ctx) { ctx.SetResult(RESULT_NOT_PERMITTED); });
+    RegisterCommand(2, "Flush", [](IpcContext& ctx) { ctx.SetResult(Result::Success); });
+    RegisterCommand(3, "SetSize", [](IpcContext& ctx) { ctx.SetResult(RESULT_NOT_PERMITTED); });
+    RegisterCommand(4, "GetSize", [this](IpcContext& ctx) {
+        ctx.Push<s64>(static_cast<s64>(m_data->size()));
+        ctx.SetResult(Result::Success);
     });
 }
 

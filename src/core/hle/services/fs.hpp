@@ -20,6 +20,16 @@ public:
 private:
     // Lee la ruta del buffer X 'index' y la convierte en ruta del PC. false si no es valida.
     bool HostPath(IpcContext& ctx, size_t index, std::filesystem::path& out);
+    // Si la ruta es la del propio .nro (y no existe de verdad en la SD), sus datos
+    std::shared_ptr<const std::vector<u8>> SelfNro(IpcContext& ctx, size_t index);
+};
+
+// IFile de solo lectura con los datos en memoria (el propio .nro)
+class MemoryFileObject final : public ServiceObject {
+public:
+    explicit MemoryFileObject(std::shared_ptr<const std::vector<u8>> data);
+private:
+    std::shared_ptr<const std::vector<u8>> m_data;
 };
 
 // IFile: un archivo abierto

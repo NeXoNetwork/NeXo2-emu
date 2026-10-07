@@ -400,3 +400,43 @@ TEST(Gpu_Deko3dRealMacros) {
     CHECK_EQ(r.Reg(0x388), 7u);
     CHECK_EQ(r.Reg(0x38C), 0u);
 }
+
+TEST(Gpu_ShadowRamFirmwareCallAndMsaaClear) {
+    Fixture f;
+    Push p;
+    p.Bind(0, 0xB197);
+    // MmeShadowRamControl: track (guarda), passthrough (no guarda), replay (usa lo guardado)
+    p.Cmd(0, 0x49, {0});
+    p.Cmd(0, 0x3E0, {5});
+    p.Cmd(0, 0x49, {2});
+    p.Cmd(0, 0x3E0, {7});
+    f.Run(p);
+    auto& r = f.ch.Get3D();
+    CHECK_EQ(r.Reg(0x3E0), 7u);
+    Push p2;
+    p2.Cmd(0, 0x49, {3});
+    p2.Cmd(0, 0x3E0, {99});
+    p2.Cmd(0, 0x49, {1});
+    // Macro WriteHardwareReg de deko3d (tal cual la sube deko_examples.nro): pasa los
+    // argumentos en MmeFirmwareArgs, llama a FirmwareCall[4] y espera a que el firmware
+    // ponga MmeFirmwareArgs[0] = 1
+    const std::vector<u32> whr = {0x00110071, 0x07400251, 0x00000331, 0x00001041, 0x00001841, 0x02310021,
+                                  0x00000841, 0x03400115, 0xFFFFC911, 0xFFFF8817, 0x001000F1, 0x00000011};
+    p2.Cmd(0, 0x45, {0});
+    p2.Pipe(0, 0x46, whr);
+    p2.Cmd(0, 0x47, {0});
+    p2.Pipe(0, 0x48, {0});
+    p2.Upload(0, 0xE00, {0x418800, 1, 1});
+    // MSAA 2x2: render target de 32x16 muestras = 16x8 pixeles; el scissor va en pixeles
+    p2.Cmd(0, 0x574, {2});
+    p2.Cmd(0, 0x200, {Hi(RT), Lo(RT), 32, 16, 0xD5, 0, 1, 0});
+    p2.Cmd(0, 0x487, {1u | (076543210u << 4)});
+    p2.Cmd(0, 0x3FD, {16u << 16, 8u << 16});
+    p2.Cmd(0, 0x360, {F(1.0f), F(0.0f), F(0.0f), F(1.0f)});
+    p2.Cmd(0, 0x674, {0xFu << 2});
+    f.Run(p2);
+    CHECK_EQ(r.Reg(0x3E0), 5u);                     // replay devolvio el valor guardado
+    CHECK_EQ(r.Reg(0x8C4), 0x418800u);              // FirmwareCall[4] con el registro de PGRAPH
+    CHECK_EQ(r.Reg(0xD00), 1u);                     // "hecho": la macro no se queda en bucle
+    CHECK_EQ(f.Read32(RT + GPU::BlockLinearOffset(31 * 4, 15, 32 * 4, 0)), 0xFF0000FFu);   // ultima muestra
+}

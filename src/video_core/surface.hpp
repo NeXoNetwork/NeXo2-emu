@@ -13,6 +13,10 @@ namespace NeXo2::GPU {
 //   width_bytes: ancho de la imagen en bytes (se redondea a GOBs de 64)
 u64 BlockLinearOffset(u32 x_bytes, u32 y, u32 width_bytes, u32 block_height_log2);
 
+// MSAA (registro MultisampleMode del motor 3D): cuantas muestras por pixel en horizontal y
+// en vertical. Las superficies multisample miden en muestras; los scissors, en pixeles.
+void MsaaSampleGrid(u32 mode, u32& sx, u32& sy);
+
 // Descripcion de una superficie en memoria de la GPU
 struct Surface {
     u64 address = 0;          // direccion virtual de la GPU

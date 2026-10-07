@@ -5,6 +5,16 @@
 
 namespace NeXo2::GPU {
 
+void MsaaSampleGrid(u32 mode, u32& sx, u32& sy) {
+    switch (mode & 0xF) {
+        case 1: case 5:          sx = 2; sy = 1; break;   // 2x1
+        case 2: case 8: case 9:  sx = 2; sy = 2; break;   // 2x2
+        case 3: case 4: case 10: case 11: sx = 4; sy = 2; break;   // 4x2
+        case 6:                  sx = 4; sy = 4; break;   // 4x4
+        default:                 sx = 1; sy = 1; break;
+    }
+}
+
 u64 BlockLinearOffset(u32 x_bytes, u32 y, u32 width_bytes, u32 block_height_log2) {
     const u32 gob_rows = 8u << block_height_log2;            // filas por bloque
     const u32 blocks_per_row = (width_bytes + 63) / 64;       // un bloque mide 1 GOB (64 bytes) de ancho

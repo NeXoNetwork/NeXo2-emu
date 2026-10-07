@@ -114,6 +114,17 @@ offset of any pixel; it is the exact inverse of the display's deswizzle (tested)
 Deliberately breaking the macro delay slot, the exit rule, an ALU operation or the DMA remap
 makes these tests fail.
 
+## Shadow RAM and firmware calls
+
+- **Shadow RAM** (`MmeShadowRamControl`, 0x049). The 3D engine keeps a copy of its registers
+  that macros read. Mode 0/1 ("track"): a write also updates the copy. Mode 2 ("passthrough"):
+  the copy is not touched. Mode 3 ("replay"): the value sent is replaced by the saved copy.
+  deko3d uses passthrough + replay to change state for one operation and then restore it.
+- **Firmware calls** (`FirmwareCall[0..31]`, 0x8C0..0x8DF). deko3d's `WriteHardwareReg` macro
+  writes its arguments to `MmeFirmwareArgs` (0xD00..), calls the engine firmware and waits in a
+  loop until `MmeFirmwareArgs[0]` becomes 1. NeXo has no firmware: it sets that register to 1
+  straight away.
+
 ## Next phases
 
 1. ~~Shaders and rasterisation~~ (phase 2, done: see [gpu-shaders.md](gpu-shaders.md) and

@@ -76,7 +76,7 @@ TEST(Nro_HelloRunsToExit) {
     const std::string& out = sys.GetKernel().GetDebugOutput();
     CHECK(Contains(out, "Hola desde un NRO en NeXo 2!"));
     CHECK(Contains(out, "Loader: X1=0xFFFFFFFFFFFFFFFF, entradas de config=5"));
-    CHECK(Contains(out, "argv: hello.nro"));
+    CHECK(Contains(out, "argv: sdmc:/switch/hello.nro"));
     CHECK(Contains(out, "Contador (.data): 42"));
     CHECK(Contains(out, "svcSetHeapSize: rc=0x0, heap en 0x80000000"));
     CHECK(Contains(out, "Suma en el heap: 499500"));

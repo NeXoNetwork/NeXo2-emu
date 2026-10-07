@@ -57,6 +57,14 @@ Register numbers are method offset / 4, with names from NVIDIA's public class he
     subtract, reverse subtract, min, max; constant colour). Each row is read once, modified
     and written back (pitch or block linear).
 
+## Multisampling (MSAA)
+
+With `MultisampleMode` (0x574) set, render targets and depth buffers are stored in samples
+(4x MSAA = 2x2 samples per pixel, so a 1280x720 target is 2560x1440), while viewports and
+scissors stay in pixels. NeXo shades each pixel once and writes the result to all of its
+samples. Edges are not smoothed, but the program's resolve step (a 2D engine blit that
+averages the samples) gives the right image. Clears follow the same rule.
+
 ## Tests
 
 `tests/gpu_draw_tests.cpp` uses real shaders from `tests/shaders`, compiled with uam:
@@ -80,5 +88,5 @@ slow. Possible improvements: several threads (rows of the image), and later the 
 
 ## Not yet
 
-Points and lines, stencil, multisampling, tessellation
+Points and lines, stencil, per-sample coverage (antialiased edges), tessellation
 and geometry shaders, transform feedback, queries.

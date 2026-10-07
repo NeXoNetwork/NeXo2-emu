@@ -83,6 +83,11 @@ private:
 
     Gpu& m_gpu;
     std::array<u32, NUM_REGS> m_regs{};
+    // "Shadow RAM": copia de los registros que lee el MME (macros). MmeShadowRamControl
+    // (0x049) dice si una escritura la actualiza (0/1), no (2, "passthrough") o si en vez del
+    // valor enviado se usa el guardado (3, "replay": asi deko3d restaura el estado).
+    std::array<u32, NUM_REGS> m_shadow{};
+    u32 m_shadowMode = 0;
     InlineToMemoryState m_i2m;
     // Macros
     std::vector<u32> m_macroCode = std::vector<u32>(0x2000, 0);   // memoria de instrucciones

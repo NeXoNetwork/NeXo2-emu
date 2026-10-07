@@ -120,6 +120,8 @@ const Entry kTable[] = {
     {0xFE000000u, 0xD8000000u, ShOp::Texs, ShForm::None, ImmKind::None},
     {0xFE000000u, 0xDA000000u, ShOp::Tlds, ShForm::None, ImmKind::None},
     {0xFE380000u, 0xC0380000u, ShOp::Tex,  ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xDE380000u, ShOp::Txd,  ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xDF480000u, ShOp::Txq,  ShForm::None, ImmKind::None},
 };
 #undef FAM2
 #undef FAMCMP
@@ -186,7 +188,7 @@ const char* ShOpName(ShOp op) {
         "lop", "lop32i", "iadd", "iadd32i", "imul", "imul32i", "imad", "iscadd", "xmad", "imnmx", "iset", "isetp", "icmp",
         "shl", "shr", "popc", "bfi", "bfe", "flo",
         "ald", "ast", "ipa", "ldc", "ldl", "stl",
-        "tex", "texs", "tlds",
+        "tex", "texs", "tlds", "txd", "txq",
     };
     static_assert(sizeof(names) / sizeof(names[0]) == size_t(ShOp::Count), "faltan nombres");
     return names[size_t(op)];

@@ -59,7 +59,8 @@ written from scratch.
 | Float | FADD(32I), FMUL(32I) with post-scale and the "0 * x = 0" mode, FFMA(32I) (fused), MUFU (sin, cos, ex2, lg2, rcp, rsq, sqrt), RRO, FMNMX, FSET, FSETP, FCMP |
 | Integer | LOP(32I), IADD(32I) with carry and `.PO`, IMUL(32I), IMAD (incl. high half), ISCADD, XMAD (all modes), IMNMX, ISET, ISETP, ICMP, SHL, SHR, POPC, BFI, BFE, FLO |
 | Memory | ALD/AST (attributes), IPA (interpolation), LDC (indexed constant buffer), LDL/STL (local memory) |
-| Not yet | Textures (TEX, TEXS, TLDS...): phase 2b. 64-bit floats, LOP3, PSETP and others that uam does not emit |
+| Textures | TEX, TEXS, TLDS, TXD, TXQ (see [gpu-textures.md](gpu-textures.md)) |
+| Not yet | TLD, TLD4 (`textureGather`), image loads/stores, 64-bit floats, LOP3, PSETP and others that uam does not emit |
 
 Notes:
 
@@ -85,6 +86,8 @@ Notes:
 | `ReadAttribute` / `WriteAttribute` | the `a[]` attribute space: vertex inputs, outputs, system values |
 | `Interpolate(addr, mode)` | IPA in pixel shaders: 0 linear, 1 perspective (the shader multiplies by w), 2 flat |
 | `SystemRegister` | S2R |
+| `SampleTexture(handle, request)` / `QueryTexture` | texture instructions ([gpu-textures.md](gpu-textures.md)) |
+| `TextureConstbuf()` | the `c[]` slot that holds texture handles (`SetBindlessTexture`) |
 
 Attribute addresses: `a[0x70..0x7C]` position, `a[0x80 + 16*n]` generic attribute *n*,
 `a[0x2F8]` InstanceID, `a[0x2FC]` VertexID, `a[0x3FC]` front facing (pixel shaders). In a pixel

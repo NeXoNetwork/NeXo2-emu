@@ -1,5 +1,6 @@
 // Dibujo por software (ver rasterizer.hpp y docs/07-nexo-internals/gpu-rasterizer.md).
 #include "rasterizer.hpp"
+#include "texture.hpp"
 #include "common/logger.hpp"
 #include <algorithm>
 #include <cmath>
@@ -44,7 +45,9 @@ constexpr u32 CT_WRITE = 0x680;
 constexpr u32 VERTEX_STREAM = 0x700;           // 4 cada uno: config, direccion (2), divisor
 constexpr u32 BLEND_TARGET = 0x780;            // 8 cada uno
 constexpr u32 PIPELINE = 0x800;                // 0x10 cada uno: config, offset, -, registros, grupo
-constexpr u32 BINDLESS_TEXTURE = 0x982;
+constexpr u32 TSC_POOL = 0x557, TSC_MAX = 0x559;   // tabla de samplers: direccion (2), ultimo indice
+constexpr u32 TIC_POOL = 0x55D, TIC_MAX = 0x55F;   // tabla de imagenes
+constexpr u32 BINDLESS_TEXTURE = 0x982;            // constbuf con los handles de texturas
 
 inline u64 Iova(u32 hi, u32 lo) { return (u64(hi & 0xFF) << 32) | lo; }
 inline float F(u32 v) { float f; std::memcpy(&f, &v, 4); return f; }
@@ -166,6 +169,9 @@ struct SoftwareRasterizer::DrawState {
     // Constbufs copiados a memoria la primera vez que se leen
     std::array<std::array<std::vector<u32>, 18>, 5> cb_cache;
     std::array<std::array<bool, 18>, 5> cb_loaded{};
+    // Texturas (descriptores leidos y niveles decodificados, solo durante este draw)
+    std::unique_ptr<TextureSampler> textures;
+    u32 tex_cb = 0;
     // Render targets
     struct Target {
         Surface surf;
@@ -235,6 +241,15 @@ public:
     }
     void WriteAttribute(u32 addr, u32 value) override { if (addr < 0x400) m_out.attr[addr / 4] = value; }
     float Interpolate(u32, u32) override { return 0.0f; }
+    void SampleTexture(u32 handle, const TextureRequest& req, u32 out[4]) override {
+        TextureRequest r = req;
+        if (!r.fetch && !r.explicit_lod) { r.explicit_lod = true; r.lod = 0; }   // sin derivadas: nivel 0
+        tex->Sample(handle, r, out);
+    }
+    void QueryTexture(u32 handle, u32 lod, u32 out[4]) override { tex->Query(handle, lod, out); }
+    u32 TextureConstbuf() override { return tex_cb; }
+    TextureSampler* tex = nullptr;
+    u32 tex_cb = 0;
 
 private:
     void Fetch(u32 loc) {
@@ -306,6 +321,8 @@ bool SoftwareRasterizer::RunVertexShader(DrawState& st, u32 index, u32 vertex_id
     out.attr[0x7C / 4] = U(1.0f);
     VertexEnv env(st.regs, *st.mm, *st.dc, index, vertex_id,
                   [&st](u32 i, u32 o) { return st.ReadConst(st.vs_group, i, o); }, out);
+    env.tex = st.textures.get();
+    env.tex_cb = st.tex_cb;
     const auto res = st.interp.Run(*st.vs, env);
     if (!res.ok) { st.failed = true; st.error = "shader de vertices: " + res.error; }
     return res.ok;
@@ -338,6 +355,9 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
         return;
     }
     auto read = [mm = st.mm](u64 a, void* d, size_t n) { mm->ReadBlock(a, d, n); };
+    st.textures = std::make_unique<TextureSampler>(m_gpu, Iova(regs[TIC_POOL], regs[TIC_POOL + 1]), regs[TIC_MAX],
+                                                   Iova(regs[TSC_POOL], regs[TSC_POOL + 1]), regs[TSC_MAX]);
+    st.tex_cb = std::min<u32>(regs[BINDLESS_TEXTURE] & 0x1F, 17);
     st.vs = std::make_unique<ShaderProgram>(region + regs[PIPELINE + 0x10 * 1 + 1], read);
     st.fs = std::make_unique<ShaderProgram>(region + regs[PIPELINE + 0x10 * 5 + 1], read);
     st.vs_group = std::min<u32>(regs[PIPELINE + 0x10 * 1 + 4] & 7, 4);
@@ -655,6 +675,11 @@ public:
         if (sr == 0x12) return U(y_direction);   // SR_Y_DIRECTION
         return 0;
     }
+    void SampleTexture(u32 handle, const TextureRequest& req, u32 out[4]) override { tex->Sample(handle, req, out); }
+    void QueryTexture(u32 handle, u32 lod, u32 out[4]) override { tex->Query(handle, lod, out); }
+    u32 TextureConstbuf() override { return tex_cb; }
+    TextureSampler* tex = nullptr;
+    u32 tex_cb = 0;
 };
 } // namespace
 
@@ -694,6 +719,8 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, const ScreenVertex sv[
     env.read_const = [&st](u32 i, u32 o2) { return st.ReadConst(st.fs_group, i, o2); };
     for (int i = 0; i < 3; ++i) { env.v[i] = sv[o[i]].v; env.inv_w[i] = sv[o[i]].inv_w; }
     env.provoking = &provoking;
+    env.tex = st.textures.get();
+    env.tex_cb = st.tex_cb;
     env.front = front;
     env.y_direction = st.y_direction;
     const float z0 = sv[o[0]].z, z1 = sv[o[1]].z, z2 = sv[o[2]].z;

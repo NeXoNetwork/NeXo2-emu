@@ -39,7 +39,7 @@ enum class ShOp : u8 {
     // Memoria y atributos
     Ald, Ast, Ipa, Ldc, Ldl, Stl,
     // Texturas
-    Tex, Texs, Tlds,
+    Tex, Texs, Tlds, Txd, Txq,
     Count
 };
 
@@ -90,6 +90,22 @@ struct ShaderHeader {
     bool OmapDepth() const { return (words[19] >> 1) & 1; }
 };
 
+// Peticion de muestreo desde un shader
+struct TextureRequest {
+    float coords[3] = {};        // u, v, w (3D/cubo) en float
+    s32 icoords[3] = {};         // texelFetch: coordenadas enteras
+    u32 layer = 0;               // arrays
+    float lod = 0;               // lod explicito (o sesgo si 'bias')
+    bool explicit_lod = false;   // .LL / .LZ
+    bool bias = false;           // .LB
+    s32 offset[3] = {};          // textureOffset
+    bool fetch = false;          // texelFetch (TLD/TLDS): sin filtro ni repeticion
+    bool depth_compare = false;  // muestreadores "shadow"
+    float dref = 0;
+    bool grad = false;           // textureGrad (TXD): derivadas de u, v, w en x y en y
+    float ddx[3] = {}, ddy[3] = {};
+};
+
 // ----------------------------------------------------------------------------
 // Lo que el shader necesita de fuera (atributos, constantes, texturas)
 // ----------------------------------------------------------------------------
@@ -107,11 +123,14 @@ public:
     virtual float Interpolate(u32 addr, u32 mode) = 0;
     // Registro especial (S2R): id del hilo, etc.
     virtual u32 SystemRegister(u32 sr) { (void)sr; return 0; }
-    // Texturas: handle (TIC | TSC << 20), coordenadas y lod -> RGBA
-    virtual void SampleTexture(u32 handle, const float coords[4], u32 dims, float lod, bool fetch,
-                               float out[4]) { (void)handle; (void)coords; (void)dims; (void)lod; (void)fetch;
-                                               out[0] = out[1] = out[2] = 0; out[3] = 1; }
-    // Indice del constbuf con los handles de texturas (SET_BINDLESS_TEXTURE)
+    // Texturas: handle (bits 0..19 indice de imagen, 20..31 indice de sampler) ->
+    // 4 valores de 32 bits (floats o enteros segun el formato)
+    virtual void SampleTexture(u32 handle, const TextureRequest& req, u32 out[4]) {
+        (void)handle; (void)req; out[0] = out[1] = out[2] = 0; out[3] = 0x3F800000u; }
+    // textureSize / textureQueryLevels: ancho, alto, profundidad o capas, niveles
+    virtual void QueryTexture(u32 handle, u32 lod, u32 out[4]) {
+        (void)handle; (void)lod; out[0] = out[1] = out[2] = out[3] = 0; }
+    // Indice del constbuf con los handles de texturas (SetBindlessTexture)
     virtual u32 TextureConstbuf() { return 0; }
 };
 

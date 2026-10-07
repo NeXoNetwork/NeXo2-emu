@@ -698,9 +698,112 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
             }
 
             // ================= Texturas =================
-            case ShOp::Texs: case ShOp::Tlds: case ShOp::Tex: {
-                fail("las texturas llegan en la GPU fase 2b", in);
-                return res;
+            // El campo tex.r (bits 36..48) dice donde esta el handle: c[TextureConstbuf][tex.r * 4].
+            // Formas escalares (TEXS/TLDS): pocos operandos repartidos entre Ra, Ra+1, Rb, Rb+1 y
+            // salida en Rd, Rd+1, Rd2, Rd2+1. Forma completa (TEX/TXD): Ra.. = [capa] + coordenadas,
+            // Rb.. = [lod o sesgo] [offsets] [referencia de profundidad]; salida en Rd.. seguidos.
+            case ShOp::Texs: case ShOp::Tlds: {
+                // Fuentes de cada "target": c = coordenada float (x, y, z), i = entera,
+                // L = capa, l = lod, d = referencia de profundidad, o = offsets, m = muestra
+                static const char* const k_texs[16] = {"x", "xy", "xy", "xyl", "xyd", "xyld", "xyd", "Lxy",
+                                                        "Lxy", "Lxyd", "xyz", "xyz", "xyz", "xyzl", nullptr, nullptr};
+                static const char* const k_tlds[16] = {"x", "xl", "xy", nullptr, "xyo", "xyl", "xym", "xyz",
+                                                        "Lxy", nullptr, nullptr, nullptr, "xylo", nullptr, nullptr, nullptr};
+                const bool fetch = in.op == ShOp::Tlds;
+                const u32 target = in.Bits(53, 4);
+                const char* srcs = (fetch ? k_tlds : k_texs)[target];
+                if (!srcs) { fail("variante de textura no soportada", in); return res; }
+                const u32 n = u32(std::strlen(srcs));
+                // 1 fuente: Ra; 2: Ra, Rb; 3: Ra, Ra+1, Rb; 4: Ra, Ra+1, Rb, Rb+1
+                const u32 ra = in.ra, rb = in.Bits(20, 8);
+                const u32 regs[4] = {ra, n == 2 ? rb : ra + 1, rb, rb + 1};
+                TextureRequest req;
+                req.fetch = fetch;
+                u32 ci = 0;
+                for (u32 k = 0; k < n; ++k) {
+                    const u32 r = regs[k];
+                    const u32 v = r >= 255 ? 0 : R(r);   // RZ (y RZ+1) leen 0
+                    switch (srcs[k]) {
+                        case 'x': case 'y': case 'z':
+                            if (fetch) req.icoords[ci] = s32(v); else req.coords[ci] = F(v);
+                            ++ci;
+                            break;
+                        case 'L': req.layer = v & 0xFFFF; break;
+                        case 'l': req.lod = fetch ? float(s32(v)) : F(v); req.explicit_lod = true; break;
+                        case 'd': req.depth_compare = true; req.dref = F(v); break;
+                        case 'o':
+                            req.offset[0] = s32(v << 28) >> 28;
+                            req.offset[1] = s32(v << 24) >> 28;
+                            break;
+                        default: break;   // 'm': indice de muestra (sin multisample, se ignora)
+                    }
+                }
+                // .LZ = nivel 0
+                static const bool k_texs_lz[16] = {true, false, true, false, false, false, true, false,
+                                                   true, true, false, true, false, false, false, false};
+                if (!fetch && k_texs_lz[target]) { req.explicit_lod = true; req.lod = 0; }
+                u32 val[4];
+                env.SampleTexture(env.ReadConst(env.TextureConstbuf(), in.Bits(36, 13) * 4), req, val);
+                // Que componentes se escriben (orden R, G, B, A)
+                static const u8 k_one[8] = {0x1, 0x2, 0x4, 0x8, 0x3, 0x9, 0xA, 0xC};
+                static const u8 k_two[8] = {0x7, 0xB, 0xD, 0xE, 0xF, 0xF, 0xF, 0xF};
+                const u32 rd = in.Bits(0, 8), rd2 = in.Bits(28, 8);
+                const u32 mask = (rd2 == 0xFF ? k_one : k_two)[in.Bits(50, 3)];
+                u32 outn = 0;
+                for (u32 c = 0; c < 4; ++c) {
+                    if (!(mask & (1u << c))) continue;
+                    const u32 dst = outn < 2 ? rd + outn : rd2 + (outn - 2);
+                    if ((outn < 2 ? rd : rd2) != 0xFF) W(dst, val[c]);
+                    ++outn;
+                }
+                break;
+            }
+            case ShOp::Tex: case ShOp::Txd: {
+                const u32 dims = in.Bits(29, 2);           // 0 1D, 1 2D, 2 3D, 3 cubo
+                const bool array = in.Bit(28);
+                const u32 lodm = in.op == ShOp::Tex ? in.Bits(55, 2) : 0;   // 0 auto, 1 lz, 2 lb, 3 ll
+                const bool aoffi = in.op == ShOp::Tex && in.Bit(54);
+                const bool dc = in.op == ShOp::Tex && in.Bit(50);
+                const u32 ncoord = dims == 0 ? 1 : dims == 1 ? 2 : 3;
+                u32 a = in.ra, b = in.Bits(20, 8);
+                auto nexta = [&]() { const u32 v = R(a); if (a < 255) ++a; return v; };
+                auto nextb = [&]() { const u32 v = R(b); if (b < 255) ++b; return v; };
+                TextureRequest req;
+                if (array) req.layer = nexta() & 0xFFFF;
+                for (u32 c = 0; c < ncoord; ++c) req.coords[c] = F(nexta());
+                if (in.op == ShOp::Txd) {
+                    req.grad = true;
+                    for (u32 c = 0; c < ncoord; ++c) { req.ddx[c] = F(nextb()); req.ddy[c] = F(nextb()); }
+                } else if (lodm == 1) {
+                    req.explicit_lod = true;
+                } else if (lodm == 2) {
+                    req.bias = true; req.lod = F(nextb());
+                } else if (lodm == 3) {
+                    req.explicit_lod = true; req.lod = F(nextb());
+                }
+                if (aoffi) {
+                    const u32 v = nextb();
+                    for (u32 c = 0; c < ncoord && c < 3; ++c) req.offset[c] = s32(v << (28 - 4 * c)) >> 28;
+                }
+                if (dc) { req.depth_compare = true; req.dref = F(nextb()); }
+                u32 val[4];
+                env.SampleTexture(env.ReadConst(env.TextureConstbuf(), in.Bits(36, 13) * 4), req, val);
+                const u32 mask = in.Bits(31, 4);
+                u32 d = in.rd;
+                for (u32 c = 0; c < 4; ++c)
+                    if (mask & (1u << c)) { W(d, val[c]); if (d < 255) ++d; }
+                break;
+            }
+            case ShOp::Txq: {
+                const u32 query = in.Bits(22, 6);
+                if (query != 1) { fail("consulta de textura no soportada (solo tamano)", in); return res; }
+                u32 val[4];
+                env.QueryTexture(env.ReadConst(env.TextureConstbuf(), in.Bits(36, 13) * 4), R(in.ra), val);
+                const u32 mask = in.Bits(31, 4);
+                u32 d = in.rd;
+                for (u32 c = 0; c < 4; ++c)
+                    if (mask & (1u << c)) { W(d, val[c]); if (d < 255) ++d; }
+                break;
             }
 
             default:

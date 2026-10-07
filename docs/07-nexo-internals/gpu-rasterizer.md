@@ -5,7 +5,7 @@ registers. Everything happens on the CPU, synchronously, and the result is writt
 render target in the program's memory. From there the existing `vi` path shows it in the
 "Pantalla" window ([display.md](display.md)).
 
-Files: `src/video_core/rasterizer.hpp/.cpp`, `tests/gpu_draw_tests.cpp`,
+Files: `src/video_core/rasterizer.hpp/.cpp`, `tests/gpu_draw_tests.cpp`, `tests/gpu_draw_fixture.hpp`,
 `tests/programs/nro_triangle`.
 
 ## Which methods start a draw
@@ -48,6 +48,7 @@ Register numbers are method offset / 4, with names from NVIDIA's public class he
    top-left rule for pixels exactly on an edge. The area is limited to the render target,
    viewport 0 (0x300), the screen scissor (0x3FD) and scissor 0 (0x380).
 10. **Pixel shader** per covered pixel: barycentrics give depth, 1/w and the attributes (IPA).
+    Both shaders can read textures ([gpu-textures.md](gpu-textures.md)).
 11. **Depth test** (0x4B3 enable, 0x4BA write, 0x4C3 function). It runs before the pixel shader
     when the shader does not write depth. Formats: Z16, Z24S8, S8Z24, X8Z24, Z32F, Z32F_X24S8.
 12. **Colour output.** Render targets from `RenderTargetControl` (0x487). With MRT, output *k*
@@ -68,6 +69,7 @@ Register numbers are method offset / 4, with names from NVIDIA's public class he
 | `Draw_DepthTest` | two overlapping triangles in both orders: the near one always wins, depth buffer value |
 | `Draw_DiscardAndUniformBlend` | `discard` (KIL); colour from a uniform buffer in the pixel shader, 50 % alpha blending |
 | `Draw_PerspectiveFromUniformMatrix` | matrix from a uniform buffer, w = 2 halves the triangle, perspective-correct colours |
+| `Texture_*` | textured draws, see [gpu-textures.md](gpu-textures.md) |
 | `Draw_NroTriangle` | `triangle.nro`: a homebrew that sets everything up through `nvdrv` like deko3d, draws and checks its own pixels |
 
 ## Speed
@@ -78,5 +80,5 @@ slow. Possible improvements: several threads (rows of the image), and later the 
 
 ## Not yet
 
-Textures and samplers (phase 2b), points and lines, stencil, multisampling, tessellation
+Points and lines, stencil, multisampling, tessellation
 and geometry shaders, transform feedback, queries.

@@ -50,6 +50,7 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/video_core/shader_decode.cpp"
     "${SRC_DIR}/video_core/shader_exec.cpp"
     "${SRC_DIR}/video_core/rasterizer.cpp"
+    "${SRC_DIR}/video_core/texture.cpp"
 )
 # 1c. JIT: dynarmic (externals/dynarmic) traduce ARM64 a x86-64.
 #     Sus cabeceras solo las ve jit_dynarmic.cpp. Necesita unas cabeceras de Boost
@@ -170,6 +171,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/gpu_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_shader_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_draw_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/gpu_texture_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
     # Carpeta con hello.nro y demas archivos de prueba

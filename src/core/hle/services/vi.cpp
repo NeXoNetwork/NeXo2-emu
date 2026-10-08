@@ -335,6 +335,11 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
                 if (display.Present(ctx.GetMemory(), q.slots[slot].info) && first)
                     Logger::Log(Logger::Level::Info, "[vi] Primera imagen en pantalla (" +
                         std::to_string(display.Frame().width) + "x" + std::to_string(display.Frame().height) + ")");
+                // Sincronizacion vertical a 60 Hz: el programa espera a la siguiente antes de
+                // seguir, como en la consola. Asi no dibuja cientos de imagenes por segundo
+                // (que solo gastan CPU) y el ritmo entre imagenes es regular.
+                auto& kernel = ctx.GetKernel();
+                kernel.SleepCurrentUntil(Kernel::NextVsync(kernel.Ticks()));
             }
             w.WriteBytes(&output, sizeof(output));
             w.WriteI32(STATUS_OK);

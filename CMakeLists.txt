@@ -11,6 +11,7 @@ set(IMGUI_DIR "${EXT_DIR}/imgui")
 option(NEXO2_BUILD_APP "Compilar la aplicacion (necesita SDL3 e ImGui)" ON)
 option(NEXO2_BUILD_TESTS "Compilar los tests de la CPU (nexo2_tests)" ON)
 option(NEXO2_ENABLE_JIT "JIT dynarmic (ARM64 -> x86-64). Necesita externals/dynarmic y externals/ext-boost" ON)
+option(NEXO2_ENABLE_VULKAN "GPU por Vulkan (fase 3). Necesita externals/Vulkan-Headers y externals/volk" ON)
 
 # 1a. Nucleo del emulador (CPU, memoria, cargador NRO, kernel HLE) como libreria estatica.
 #     Asi lo usan tanto el ejecutable como los tests, sin compilarlo dos veces.
@@ -78,6 +79,23 @@ if(NEXO2_ENABLE_JIT)
     target_compile_definitions(nexo2_core PRIVATE NEXO2_HAS_JIT)
     message(STATUS "NeXo 2: JIT dynarmic activado")
 endif()
+# 1d. Vulkan (GPU fase 3): cabeceras de Khronos + volk, que carga el driver al arrancar
+#     (no hace falta el Vulkan SDK). Sin los submodulos se compila solo con el dibujo por software.
+if(NEXO2_ENABLE_VULKAN AND NOT (EXISTS "${EXT_DIR}/Vulkan-Headers/include/vulkan/vulkan.h" AND EXISTS "${EXT_DIR}/volk/volk.c"))
+    message(WARNING "NEXO2_ENABLE_VULKAN: faltan externals/Vulkan-Headers o externals/volk (git submodule update --init). Se compila sin Vulkan.")
+    set(NEXO2_ENABLE_VULKAN OFF)
+endif()
+if(NEXO2_ENABLE_VULKAN)
+    target_sources(nexo2_core PRIVATE
+        "${SRC_DIR}/video_core/vulkan/vk_device.cpp"
+        "${EXT_DIR}/volk/volk.c"
+    )
+    target_include_directories(nexo2_core PUBLIC "${EXT_DIR}/Vulkan-Headers/include" "${EXT_DIR}/volk")
+    target_compile_definitions(nexo2_core PUBLIC NEXO2_HAS_VULKAN VK_NO_PROTOTYPES)
+    target_link_libraries(nexo2_core PRIVATE ${CMAKE_DL_LIBS})
+    message(STATUS "NeXo 2: Vulkan activado")
+endif()
+
 # El dibujo por software reparte los pixeles entre varios hilos (std::thread)
 find_package(Threads REQUIRED)
 target_link_libraries(nexo2_core PUBLIC Threads::Threads)
@@ -175,6 +193,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/gpu_shader_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_draw_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_texture_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/vulkan_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")
     # Carpeta con hello.nro y demas archivos de prueba

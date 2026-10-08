@@ -130,6 +130,6 @@ makes these tests fail.
 1. ~~Shaders and rasterisation~~ (phase 2, done: see [gpu-shaders.md](gpu-shaders.md) and
    [gpu-rasterizer.md](gpu-rasterizer.md)).
 2. ~~Textures~~ (phase 2b, done: see [gpu-textures.md](gpu-textures.md)).
-3. **Vulkan backend** (phase 3): translate the decoded shaders to SPIR-V; render targets and
+3. **Vulkan backend** (phase 3, in progress: see [gpu-vulkan.md](gpu-vulkan.md)): translate the decoded shaders to SPIR-V; render targets and
    textures as Vulkan images instead of software.
 4. The Switch 2's own GPU (Ampere, T239) for native games.

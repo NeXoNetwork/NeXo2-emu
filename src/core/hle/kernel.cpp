@@ -315,7 +315,7 @@ void Kernel::SvcCloseHandle(CPUState& s) {
 
 // svcGetSystemTick -> X0 = ticks. Mismo contador que CNTPCT_EL0.
 void Kernel::SvcGetSystemTick(CPUState& s) {
-    s.x[0] = m_cpu.GetInstructionCount();
+    s.x[0] = m_cpu.GetTicks();
 }
 
 // svcBreak(reason = X0, arg = X1, size = X2): el programa ha fallado (abort, assert...).

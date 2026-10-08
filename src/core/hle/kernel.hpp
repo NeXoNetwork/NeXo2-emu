@@ -203,6 +203,17 @@ private:
     std::shared_ptr<KThread> ThreadFromHandle(u32 handle);   // acepta 0xFFFF8000 (hilo actual)
     Core::CPUState& Ctx(KThread& t);       // registros del hilo (en la CPU si es el actual)
     void Block(KThread& t, KThread::Wait kind, s64 timeout_ns);
+public:
+    // Duerme el hilo actual hasta 'deadline' (ticks) sin tocar su X0: para que un servicio
+    // (vi) haga esperar al programa despues de contestarle, como la sincronizacion vertical.
+    void SleepCurrentUntil(u64 deadline);
+    u64  Ticks() const { return m_cpu.GetTicks(); }   // reloj del sistema (CNTPCT)
+    // Siguiente sincronizacion vertical (60 Hz) despues de 'now', en ticks
+    static u64 NextVsync(u64 now) {
+        constexpr u64 PERIOD = Core::Interpreter::TICK_FREQUENCY / 60;
+        return (now / PERIOD + 1) * PERIOD;
+    }
+private:
     void Wake(KThread& t, u32 result);
     void ReleaseMutex(u64 addr);           // da el mutex al siguiente que lo espera (o lo deja libre)
     void AcquireMutexAfterWait(KThread& t, u32 result);
@@ -211,7 +222,7 @@ private:
     void SwitchTo(const std::shared_ptr<KThread>& t);
     u64  AllocateTls();
     void FreeTls(u64 tls);
-    u64  Now() const { return m_cpu.GetInstructionCount(); }
+    u64  Now() const { return m_cpu.GetTicks(); }
     static u64 NsToTicks(s64 ns);
 
     // Comandos "Control" de CMIF (dominios, clonar sesiones, tamano de buffer)

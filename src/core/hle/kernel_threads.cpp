@@ -119,6 +119,16 @@ void Kernel::Block(KThread& t, KThread::Wait kind, s64 timeout_ns) {
     if (&t == m_current.get()) m_cpu.RequestStop();   // cambiar de hilo tras esta SVC
 }
 
+void Kernel::SleepCurrentUntil(u64 deadline) {
+    if (!m_current || deadline <= Now()) return;
+    KThread& t = *m_current;
+    t.state = KThread::State::Waiting;
+    t.wait = KThread::Wait::Sleep;      // al despertar no se cambia X0 (el resultado del servicio)
+    t.wait_order = ++m_waitCounter;
+    t.deadline = deadline;
+    m_cpu.RequestStop();
+}
+
 void Kernel::Wake(KThread& t, u32 result) {
     Ctx(t).x[0] = result;
     t.state = KThread::State::Ready;

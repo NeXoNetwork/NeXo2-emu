@@ -47,6 +47,11 @@ public:
     // Frecuencia del contador del sistema en Switch 2 (ver
     // docs/05-switch2-system/compatibility-mode.md). La Switch 1 usaba 19.2 MHz.
     static constexpr u64 TICK_FREQUENCY = 31'250'000;
+    // Velocidad de la CPU emulada respecto al contador: 32 instrucciones por tick = 1000
+    // millones de instrucciones por segundo, mas o menos lo que hace un nucleo de la consola.
+    // (Con 1 instruccion = 1 tick la CPU emulada parecia de 31 MHz: con el reloj ligado al
+    // tiempo real, los programas que calculan mucho por fotograma iban a camara lenta.)
+    static constexpr u64 INSTRUCTIONS_PER_TICK = 32;
 
     // Se llama cuando el programa ejecuta "SVC #imm" (llamada al kernel).
     // En la Fase 4 aqui ira el kernel HLE. Por defecto solo se registra en el log.
@@ -87,7 +92,9 @@ public:
     // kernel cuando un hilo se bloquea (espera, duerme...) para cambiar a otro hilo.
     void RequestStop() { m_stopRequested = true; m_attention = true; if (m_jit) NotifyJitStop(); }
     // Adelanta el reloj (CNTPCT) sin ejecutar nada: todos los hilos estan dormidos.
-    void AddTicks(u64 ticks) { m_instructionCount += ticks; }
+    void AddTicks(u64 ticks) { m_instructionCount += ticks * INSTRUCTIONS_PER_TICK; }
+    // Contador del sistema (CNTPCT_EL0, svcGetSystemTick), a TICK_FREQUENCY
+    u64 GetTicks() const { return m_instructionCount / INSTRUCTIONS_PER_TICK; }
     // Al cambiar de hilo se pierde la reserva de LDXR (como en la CPU real).
     void ClearExclusive() { m_exclusiveValid = false; if (m_jit) ClearJitExclusive(); }
 

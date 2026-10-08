@@ -5,6 +5,9 @@
 
 #include "system.hpp"
 #include "common/logger.hpp"
+#ifdef NEXO2_HAS_VULKAN
+#include "video_core/vulkan/vk_device.hpp"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -13,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -146,7 +150,7 @@ private:
     // Devuelve cuanto hay que dormir (ns) si la emulacion va adelantada.
     u64 PaceToRealTime(NeXo2::Core::Interpreter& cpu) {
         using Clock = std::chrono::steady_clock;
-        const u64 ticks = cpu.GetInstructionCount();
+        const u64 ticks = cpu.GetTicks();
         if (!m_paceValid || ticks < m_paceLast || m_paceRun != g_runGeneration) {   // empezar de nuevo
             m_paceValid = true;
             m_paceRun = g_runGeneration;
@@ -164,7 +168,7 @@ private:
         } else if (ticks > wall + u64(2e6 * TICKS_PER_NS)) { // va mas de 2 ms adelantada: esperar
             sleep_ns = u64(std::min(double(ticks - wall) / TICKS_PER_NS, 20e6));
         }
-        m_paceLast = cpu.GetInstructionCount();
+        m_paceLast = cpu.GetTicks();
         return sleep_ns;
     }
 
@@ -328,6 +332,19 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
+    // GPU fase 3: abrir Vulkan (de momento solo para comprobar que funciona; el dibujo sigue
+    // siendo por software). NEXO2_VK_VALIDATION=1 activa las capas de validacion.
+#ifdef NEXO2_HAS_VULKAN
+    NeXo2::GPU::Vulkan::Device vulkan;
+    const bool vulkan_ok = vulkan.Init(std::getenv("NEXO2_VK_VALIDATION") != nullptr);
+    const std::string vulkan_label = vulkan_ok
+        ? "Vulkan Core: " + vulkan.DeviceName() + " (Vulkan " + vulkan.ApiVersionString() + ", driver " + vulkan.DriverString() + ")"
+        : "Vulkan Core: " + vulkan.Error();
+#else
+    const bool vulkan_ok = false;
+    const std::string vulkan_label = "Vulkan Core: compilado sin Vulkan";
+#endif
+
     EmuThread emu(sys);   // la CPU emulada corre en su propio hilo
 
     bool running = true;
@@ -395,8 +412,8 @@ int main(int argc, char** argv) {
         Tick("NRO Loader + HLE Kernel (SVC basicas)", true);
         Tick("JIT: dynarmic (ARM64 -> x86-64)", NeXo2::Core::Interpreter::JitAvailable());
         Tick("SDL3 Graphics Driver", true);
-        Tick("GPU Maxwell: canales, borrados, copias, macros (fase 1, sin shaders)", true);
-        Tick("Vulkan Core", false);
+        Tick("GPU Maxwell: comandos, shaders, texturas, dibujo por software (fases 1-2)", true);
+        Tick(vulkan_label.c_str(), vulkan_ok);
 
         ImGui::Separator();
         const auto& st = cpu.GetState();

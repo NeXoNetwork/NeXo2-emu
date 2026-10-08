@@ -14,12 +14,13 @@ How NeXo 2 itself is built (our code, not the console).
 | [gpu.md](gpu.md) | GPU: nvhost devices, channels, pushbuffers, engines (3D clears, DMA, 2D, inline), macros, syncpoints |
 | [gpu-shaders.md](gpu-shaders.md) | Maxwell shader decoder and interpreter, shader environment, random-program tests with uam |
 | [gpu-rasterizer.md](gpu-rasterizer.md) | Draws: vertex fetch, clipping, viewport, culling, rasterization rules, depth, blending |
+| [gpu-vulkan.md](gpu-vulkan.md) | GPU phase 3: Vulkan device (volk, no SDK), plan for the SPIR-V translator and Vulkan draws |
 | [gpu-textures.md](gpu-textures.md) | Textures: TIC/TSC descriptors, formats (incl. BC1-5), block linear and mipmaps, TEX/TEXS/TLDS/TXD/TXQ, filtering |
 | [display.md](display.md) | vi + nvdrv: binder buffer queue, GraphicBuffer layout, block-linear deswizzle, the "Pantalla" window |
 
 ## Test suite
 
-`nexo2_tests` (87 tests, each run with the interpreter and with the JIT) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
+`nexo2_tests` (89 tests, each run with the interpreter and with the JIT) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
 the NRO loader, IPC, the libnx start-up services, display (deswizzle, GraphicBuffer parsing,
 pixel formats), GPU (shaders, draws, textures), SD card paths, controller LIFOs, decode cache and threads. Run it after any change:
 `build\Release\nexo2_tests.exe`.

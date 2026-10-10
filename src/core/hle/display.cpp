@@ -70,7 +70,11 @@ void DeswizzleBlockLinear(const u8* in, u8* out, u32 pitch, u32 height, u32 bloc
 
 bool Display::Present(Core::Memory& memory, const GraphicBufferInfo& buf) {
     const NvMapObject* obj = m_nvmap.FindById(buf.nvmap_id);
-    if (!obj || obj->address == 0 || buf.width == 0 || buf.height == 0 || buf.pitch == 0) return false;
+    return obj && PresentAt(memory, buf, obj->address);
+}
+
+bool Display::PresentAt(Core::Memory& memory, const GraphicBufferInfo& buf, u64 nvmap_address) {
+    if (nvmap_address == 0 || buf.width == 0 || buf.height == 0 || buf.pitch == 0) return false;
     if (buf.width > 4096 || buf.height > 4096) return false;
 
     // 1) Leer el buffer de la memoria del programa
@@ -78,7 +82,7 @@ bool Display::Present(Core::Memory& memory, const GraphicBufferInfo& buf) {
     const u32 rows = (buf.layout == LAYOUT_BLOCK_LINEAR) ? ((buf.height + block_px - 1) / block_px) * block_px
                                                          : buf.height;
     std::vector<u8> raw(size_t(buf.pitch) * rows);
-    memory.ReadBytes(obj->address + buf.offset, raw.data(), raw.size());
+    memory.ReadBytes(nvmap_address + buf.offset, raw.data(), raw.size());
 
     // 2) Pasar a lineal si viene en bloques
     std::vector<u8> linear;
@@ -93,6 +97,7 @@ bool Display::Present(Core::Memory& memory, const GraphicBufferInfo& buf) {
 
     // 3) Convertir cada pixel a RGBA
     const u32 bpp = BytesPerPixel(buf.format);
+    std::lock_guard lock(m_frameMutex);
     m_frame.width = buf.width;
     m_frame.height = buf.height;
     m_frame.rgba.resize(size_t(buf.width) * buf.height);

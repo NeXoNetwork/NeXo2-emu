@@ -310,6 +310,9 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
                 if (q.slots[i].configured && !q.slots[i].dequeued) found = static_cast<s32>(i);
             }
             if (found < 0) { w.WriteI32(-1); w.WriteI32(0); w.WriteI32(STATUS_WOULD_BLOCK); break; }
+            // Si su imagen anterior aun no se ha presentado (va en la cola de la GPU), esperar:
+            // el programa podria escribir en el buffer con la CPU mientras se lee.
+            ctx.GetKernel().GetGpu().WaitTicket(q.slots[found].present_ticket);
             q.slots[found].dequeued = true;
             q.next = (found + 1) % 64;
             const u8 no_fences[36] = {}; // NvMultiFence vacio: el buffer ya esta listo
@@ -330,11 +333,18 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
             const s32 slot = r.ReadI32();
             if (slot >= 0 && slot < 64 && q.slots[slot].configured) {
                 q.slots[slot].dequeued = false;
+                // Presentar en la cola de la GPU: detras del dibujo ya enviado a ese buffer
                 Display& display = ctx.GetKernel().GetDisplay();
-                const bool first = display.Frame().count == 0;
-                if (display.Present(ctx.GetMemory(), q.slots[slot].info) && first)
-                    Logger::Log(Logger::Level::Info, "[vi] Primera imagen en pantalla (" +
-                        std::to_string(display.Frame().width) + "x" + std::to_string(display.Frame().height) + ")");
+                Core::Memory& memory = ctx.GetMemory();
+                const GraphicBufferInfo info = q.slots[slot].info;
+                const NvMapObject* obj = display.NvMap().FindById(info.nvmap_id);
+                const u64 address = obj ? obj->address : 0;
+                q.slots[slot].present_ticket = ctx.GetKernel().GetGpu().Enqueue([&display, &memory, info, address] {
+                    const bool first = display.Frame().count == 0;
+                    if (display.PresentAt(memory, info, address) && first)
+                        Logger::Log(Logger::Level::Info, "[vi] Primera imagen en pantalla (" +
+                            std::to_string(info.width) + "x" + std::to_string(info.height) + ")");
+                });
                 // Sincronizacion vertical a 60 Hz: el programa espera a la siguiente antes de
                 // seguir, como en la consola. Asi no dibuja cientos de imagenes por segundo
                 // (que solo gastan CPU) y el ritmo entre imagenes es regular.

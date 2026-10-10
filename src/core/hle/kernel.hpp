@@ -105,6 +105,7 @@ public:
         u64 condvar_waits = 0;      // esperas en variables de condicion
         u64 sync_waits = 0;         // esperas en svcWaitSynchronization que bloquearon
         u64 idle_ticks = 0;         // ticks saltados porque todos dormian
+        u64 gpu_waits = 0;          // veces que todos esperaban y la GPU aun trabajaba
     };
     const SchedulerStats& Stats() const { return m_stats; }
     s32 CurrentCore() const { return m_currentCore; }

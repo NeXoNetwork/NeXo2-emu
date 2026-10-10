@@ -188,8 +188,8 @@ u32 NvDrv::IoctlNvMap(IpcContext& ctx, u32 request, std::vector<u8>& d) {
 }
 
 // ----------------------------------------------------------------------------
-//  /dev/nvhost-ctrl: syncpoints y eventos. La GPU emulada termina el trabajo al
-//  enviarlo, asi que casi siempre el syncpoint ya ha llegado.
+//  /dev/nvhost-ctrl: syncpoints y eventos. Con la GPU sincrona el syncpoint ya ha
+//  llegado al volver del envio; con la GPU en su hilo puede que aun no.
 // ----------------------------------------------------------------------------
 u32 NvDrv::IoctlCtrl(IpcContext& ctx, u32 request, std::vector<u8>& d) {
     if (IocType(request) != 0x00) {
@@ -200,8 +200,10 @@ u32 NvDrv::IoctlCtrl(IpcContext& ctx, u32 request, std::vector<u8>& d) {
     GPU::Syncpoints& sp = k.GetGpu().GetSyncpoints();
     switch (IocNr(request)) {
         case 0x14: // SYNCPT_READ(id) -> valor
-        case 0x1A: // SYNCPT_READ_MAX(id) -> valor
             Put<u32>(d, 4, sp.Read(Get<u32>(d, 0)));
+            return NV_SUCCESS;
+        case 0x1A: // SYNCPT_READ_MAX(id) -> valor cuando acabe todo lo enviado
+            Put<u32>(d, 4, sp.ReadMax(Get<u32>(d, 0)));
             return NV_SUCCESS;
         case 0x15: // SYNCPT_INCR(id)
             sp.Increment(Get<u32>(d, 0));
@@ -312,7 +314,8 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
 //  /dev/nvhost-as-gpu: direcciones virtuales de la GPU
 // ----------------------------------------------------------------------------
 u32 NvDrv::IoctlAsGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
-    GPU::GpuMemoryManager& mm = ctx.GetKernel().GetGpu().MemoryManager();
+    GPU::Gpu& gpu = ctx.GetKernel().GetGpu();
+    GPU::GpuMemoryManager& mm = gpu.MemoryManager();
     using MM = GPU::GpuMemoryManager;
     switch (IocNr(request)) {
         case 0x01: // BIND_CHANNEL(fd)
@@ -334,9 +337,12 @@ u32 NvDrv::IoctlAsGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
         case 0x03: // FREE_SPACE(direccion, paginas, tamano pagina)
             mm.Free(Get<u64>(d, 0), u64(Get<u32>(d, 8)) * Get<u32>(d, 12));
             return NV_SUCCESS;
-        case 0x05: // UNMAP_BUFFER(direccion)
-            mm.Unmap(Get<u64>(d, 0));
+        case 0x05: { // UNMAP_BUFFER(direccion). En la cola de la GPU: el trabajo ya enviado
+                     // aun ve la proyeccion vieja (solo el hilo de la GPU toca las proyecciones)
+            const u64 va = Get<u64>(d, 0);
+            gpu.Enqueue([&mm, va] { mm.Unmap(va); });
             return NV_SUCCESS;
+        }
         case 0x06: { // MAP_BUFFER_EX(flags, kind, handle nvmap, tamano pagina, desplazamiento, tamano, direccion)
             const u32 flags = Get<u32>(d, 0);
             if (flags & 0x100) return NV_SUCCESS;   // MODIFY: solo cambia el "kind" (compresion)
@@ -352,7 +358,8 @@ u32 NvDrv::IoctlAsGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
                 va = mm.Allocate(size, page, page >= MM::BIG_PAGE);
                 if (!va) return NV_NO_MEMORY;
             }
-            mm.Map(va, obj->address + offset, size);
+            const u64 cpu = obj->address + offset;
+            gpu.Enqueue([&mm, va, cpu, size] { mm.Map(va, cpu, size); });
             Put<u32>(d, 12, page);
             Put<u64>(d, 32, va);
             return NV_SUCCESS;
@@ -382,10 +389,29 @@ u32 NvDrv::IoctlGpu(IpcContext& ctx, File& file, u32 request, std::vector<u8>& d
     if (!ch) return NV_BAD_VALUE;
     const u32 type = IocType(request), nr = IocNr(request);
 
-    // Fence que devuelve el canal: su syncpoint y el valor actual (el trabajo ya esta hecho)
-    auto put_fence = [&](size_t off) {
-        Put<u32>(d, off, ch->SyncpointId());
-        Put<u32>(d, off + 4, gpu.GetSyncpoints().Read(ch->SyncpointId()));
+    GPU::Syncpoints& sp = gpu.GetSyncpoints();
+    const u32 sp_id = ch->SyncpointId();
+    // Fence que devuelve el canal: su syncpoint y el valor que tendra al acabar lo enviado
+    auto put_fence = [&](size_t off, u32 value) {
+        Put<u32>(d, off, sp_id);
+        Put<u32>(d, off + 4, value);
+    };
+    // Envia las entradas a la GPU. flags (como en la consola):
+    //   bit 1  el driver anade 2 incrementos del syncpoint del canal al final
+    //   bit 8  el pushbuffer hace 'fence.value' incrementos (los anuncia el programa)
+    // El fence devuelto = maximo del syncpoint tras sumar esos incrementos. Al acabar,
+    // la GPU sube el syncpoint hasta ahi (por si el programa anuncio de mas).
+    auto submit = [&](std::vector<u64> entries) {
+        const u32 flags = Get<u32>(d, 12);
+        const bool driver_incr = (flags & 0x2) != 0;
+        const u32 count = (driver_incr ? 2u : 0u) + ((flags & 0x100) ? Get<u32>(d, 20) : 0u);
+        const u32 target = sp.Reserve(sp_id, count);
+        gpu.Enqueue([ch, &sp, sp_id, target, driver_incr, entries = std::move(entries)] {
+            ch->SubmitGpfifo(entries);
+            if (driver_incr) { sp.Increment(sp_id); sp.Increment(sp_id); }
+            sp.RaiseTo(sp_id, target);
+        });
+        put_fence(16, target);
     };
 
     if (type == 0x48) {
@@ -400,8 +426,7 @@ u32 NvDrv::IoctlGpu(IpcContext& ctx, File& file, u32 request, std::vector<u8>& d
                 const u32 count = Get<u32>(d, 8);
                 std::vector<u64> entries(count);
                 for (u32 i = 0; i < count; ++i) entries[i] = Get<u64>(d, 24 + size_t(i) * 8);
-                ch->SubmitGpfifo(entries);
-                put_fence(16);
+                submit(std::move(entries));
                 return NV_SUCCESS;
             }
             case 0x1B: { // KICKOFF_PB (Ioctl2: entradas en el buffer extra)
@@ -409,15 +434,14 @@ u32 NvDrv::IoctlGpu(IpcContext& ctx, File& file, u32 request, std::vector<u8>& d
                 std::vector<u64> entries(count);
                 for (u32 i = 0; i < count && (size_t(i) + 1) * 8 <= extra.size(); ++i)
                     std::memcpy(&entries[i], extra.data() + size_t(i) * 8, 8);
-                ch->SubmitGpfifo(entries);
-                put_fence(16);
+                submit(std::move(entries));
                 return NV_SUCCESS;
             }
             case 0x09: // ALLOC_OBJ_CTX(clase, flags) -> id
                 Put<u64>(d, 8, Get<u32>(d, 0));
                 return NV_SUCCESS;
             case 0x1A: // ALLOC_GPFIFO_EX2 -> fence inicial
-                put_fence(12);
+                put_fence(12, sp.ReadMax(sp_id));
                 return NV_SUCCESS;
             case 0x16: // GET_ERROR_INFO: ningun error
             case 0x17: // GET_ERROR_NOTIFICATION

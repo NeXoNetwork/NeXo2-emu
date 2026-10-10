@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <mutex>
 #include <vector>
 #include "common/types.hpp"
 #include "memory.hpp"
@@ -73,16 +74,23 @@ public:
     static constexpr u32 HEIGHT = 720;
 
     NvMapTable& NvMap() { return m_nvmap; }
+    // La imagen la escribe el hilo de la GPU (Present va en su cola): quien la lea desde
+    // otro hilo (la interfaz) tiene que coger LockFrame() mientras la usa.
     const DisplayFrame& Frame() const { return m_frame; }
+    std::unique_lock<std::mutex> LockFrame() const { return std::unique_lock(m_frameMutex); }
 
     // Copia el buffer 'buf' de la memoria del programa a la imagen de salida.
     // Devuelve false si el buffer no se puede interpretar.
     bool Present(Core::Memory& memory, const GraphicBufferInfo& buf);
+    // Igual, con la direccion del bloque nvmap ya resuelta (para la cola de la GPU:
+    // la tabla nvmap es del hilo de la emulacion)
+    bool PresentAt(Core::Memory& memory, const GraphicBufferInfo& buf, u64 nvmap_address);
 
-    void Reset() { m_nvmap.Clear(); m_frame = DisplayFrame{}; }
+    void Reset() { m_nvmap.Clear(); std::lock_guard lock(m_frameMutex); m_frame = DisplayFrame{}; }
 
 private:
     NvMapTable   m_nvmap;
+    mutable std::mutex m_frameMutex;
     DisplayFrame m_frame;
 };
 

@@ -27,6 +27,7 @@ struct BufferQueue {
         bool configured = false;
         bool dequeued = false;
         GraphicBufferInfo info;
+        u64  present_ticket = 0;   // tarea de la GPU que lo presenta (hay que esperarla al reusarlo)
     };
     std::array<Slot, 64> slots;
     u32  next = 0;          // siguiente hueco a entregar (por turnos)

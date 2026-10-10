@@ -302,6 +302,12 @@ int main(int argc, char** argv) {
     System sys;
     // JIT activado por defecto (si NeXo se compilo con dynarmic). Se puede apagar en Diagnostics.
     sys.GetCpu().SetJitEnabled(true);
+    // GPU en su propio hilo (dibuja mientras la CPU emulada sigue). NEXO2_GPU_ASYNC=0 la
+    // vuelve sincrona, como en los tests (util para buscar fallos).
+    {
+        const char* env = std::getenv("NEXO2_GPU_ASYNC");
+        sys.GetKernel().GetGpu().SetAsync(!(env && env[0] == '0'));
+    }
 
     // Tarjeta SD emulada: carpeta "sdmc" junto al ejecutable
     std::string sdmcRoot = "sdmc";
@@ -474,7 +480,9 @@ int main(int argc, char** argv) {
 
         // GPU emulada: lo que ha hecho desde que se cargo el programa
         {
-            auto& gs = sys.GetKernel().GetGpu().GetStats();
+            auto& gpu = sys.GetKernel().GetGpu();
+            auto& gs = gpu.GetStats();   // las escribe el hilo de la GPU: valores aproximados
+            ImGui::Text("GPU: %s", gpu.IsAsync() ? "en su propio hilo" : "sincrona (en el hilo de la emulacion)");
             ImGui::Text("GPU: envios %llu | metodos %llu | borrados %llu | copias %llu | macros %llu",
                         (unsigned long long)gs.submits, (unsigned long long)gs.methods,
                         (unsigned long long)gs.clears, (unsigned long long)gs.copies,
@@ -620,19 +628,24 @@ int main(int argc, char** argv) {
         // =====================================================================
         //  Ventana 3: Pantalla de la consola (lo que el programa manda a vi)
         // =====================================================================
-        const auto& frame = kernel.GetDisplay().Frame();
-        g_speed.Update(cpu.GetInstructionCount(), frame.count, g_emuRunning);
-        if (frame.count == 0) shownFrame = ~0ull;   // programa nuevo: la siguiente imagen se muestra seguro
-        if (frame.count != shownFrame && frame.count > 0 && screenTexture &&
-            frame.width == NeXo2::HLE::Display::WIDTH && frame.height == NeXo2::HLE::Display::HEIGHT) {
-            SDL_UpdateTexture(screenTexture, nullptr, frame.rgba.data(), int(frame.width * 4));
-            shownFrame = frame.count;
+        u64 frameCount = 0;
+        {
+            auto frameLock = kernel.GetDisplay().LockFrame();   // el hilo de la GPU la escribe
+            const auto& frame = kernel.GetDisplay().Frame();
+            frameCount = frame.count;
+            if (frame.count == 0) shownFrame = ~0ull;   // programa nuevo: la siguiente imagen se muestra seguro
+            if (frame.count != shownFrame && frame.count > 0 && screenTexture &&
+                frame.width == NeXo2::HLE::Display::WIDTH && frame.height == NeXo2::HLE::Display::HEIGHT) {
+                SDL_UpdateTexture(screenTexture, nullptr, frame.rgba.data(), int(frame.width * 4));
+                shownFrame = frame.count;
+            }
         }
+        g_speed.Update(cpu.GetInstructionCount(), frameCount, g_emuRunning);
         ImGui::SetNextWindowPos(ImVec2(60 * main_scale, 80 * main_scale), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(660 * main_scale, 420 * main_scale), ImGuiCond_FirstUseEver);
         ImGui::Begin("Pantalla");
-        if (frame.count > 0 && screenTexture) {
-            ImGui::Text("Imagenes: %llu   Mando: %s", (unsigned long long)frame.count,
+        if (frameCount > 0 && screenTexture) {
+            ImGui::Text("Imagenes: %llu   Mando: %s", (unsigned long long)frameCount,
                         g_gamepad ? SDL_GetGamepadName(g_gamepad) : "teclado");
             if (g_emuRunning) {
                 ImGui::SameLine();

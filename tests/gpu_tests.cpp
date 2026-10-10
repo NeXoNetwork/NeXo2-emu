@@ -289,6 +289,62 @@ TEST(Gpu_SyncpointsAndSemaphores) {
     CHECK_EQ(f.gpu.GetStats().draws_skipped, 1);
 }
 
+// GPU en su propio hilo: las tareas van en orden, el fence prometido llega al acabar,
+// y los avisos de los syncpoints esperan a que el hilo de la emulacion los recoja.
+TEST(Gpu_AsyncThreadFencesAndOrder) {
+    Fixture f;
+    auto& sp = f.gpu.GetSyncpoints();
+    const u32 id = f.ch.SyncpointId();
+    f.gpu.SetAsync(true);
+    CHECK(f.gpu.IsAsync());
+
+    // Envio que el programa anuncia con 2 incrementos (flag 0x100 de SUBMIT_GPFIFO)
+    const u32 target = sp.Reserve(id, 2);
+    CHECK_EQ(target, 2u);
+    CHECK_EQ(sp.ReadMax(id), 2u);
+    bool fired = false;
+    sp.AddWaiter(id, target, [&] { fired = true; });
+    Push p;
+    p.Bind(0, 0xB197);
+    p.Cmd(0, 0x6C0, {Hi(BUF), Lo(BUF), 0x1234, 0x10000000u});   // semaforo: escribe 0x1234
+    p.Cmd(0, 0xB2, {id | (1u << 20)});                            // +1 (solo uno de los 2 anunciados)
+    f.gpu.MemoryManager().WriteBlock(PB, p.w.data(), p.w.size() * 4);
+    const u32 words = u32(p.w.size());
+    f.gpu.Enqueue([&] { f.ch.ProcessPushbuffer(PB, words); sp.RaiseTo(id, target); });
+    // Despues, en orden: quitar la proyeccion (lo ya enviado aun la vio)
+    const u64 ticket = f.gpu.Enqueue([&] { f.gpu.MemoryManager().Unmap(GPU_BASE); });
+    f.gpu.WaitTicket(ticket);
+    CHECK(f.gpu.IsDone(ticket));
+    CHECK(!f.gpu.IsBusy());
+    CHECK_EQ(sp.Read(id), target);                    // RaiseTo completo lo que faltaba
+    CHECK_EQ(f.mem.Read<u32>(CPU_BASE + (BUF - GPU_BASE)), 0x1234u);
+    CHECK(!f.gpu.MemoryManager().Translate(GPU_BASE).has_value());
+    // El aviso no se llama en el hilo de la GPU: queda guardado hasta RunFired()
+    CHECK(sp.HasFired());
+    CHECK(!fired);
+    CHECK_EQ(sp.RunFired(), size_t(1));
+    CHECK(fired);
+
+    // Un incremento no anunciado sube tambien el maximo (el siguiente fence no se queda atras)
+    f.gpu.Enqueue([&] { sp.Increment(id); });
+    f.gpu.WaitIdle();
+    CHECK_EQ(sp.ReadMax(id), 3u);
+    CHECK_EQ(sp.Reserve(id, 1), 4u);
+
+    // Muchas tareas seguidas: se ejecutan todas y en orden
+    std::vector<int> order;
+    for (int i = 0; i < 200; ++i) f.gpu.Enqueue([&order, i] { order.push_back(i); });
+    f.gpu.SetAsync(false);                            // acaba la cola antes de parar el hilo
+    CHECK_EQ(order.size(), size_t(200));
+    bool sorted = true;
+    for (int i = 0; i < int(order.size()); ++i) sorted &= order[size_t(i)] == i;
+    CHECK(sorted);
+    // Sincrona otra vez: la tarea se hace al momento
+    bool now = false;
+    f.gpu.Enqueue([&] { now = true; });
+    CHECK(now);
+}
+
 // Programa de prueba completo: abre los dispositivos de nvdrv como libnx/deko3d,
 // envia comandos por un canal y comprueba el resultado (tests/programs/nro_gpu)
 TEST(Gpu_NroThroughNvdrv) {

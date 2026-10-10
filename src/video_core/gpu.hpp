@@ -7,14 +7,23 @@
 //   Channel             un canal (/dev/nvhost-gpu): lee el GPFIFO y los pushbuffers,
 //                       y reparte los "metodos" entre los motores (engines.hpp)
 //
-// Todo se ejecuta al momento (sincrono), dentro del ioctl que envia el trabajo: cuando
-// el programa recibe el fence, el trabajo ya esta hecho. Ver docs/07-nexo-internals/gpu.md.
+// Dos modos (ver docs/07-nexo-internals/gpu.md):
+//   sincrono  (por defecto, tests): el trabajo se hace dentro del ioctl que lo envia.
+//   asincrono (la app, SetAsync): la GPU tiene su propio hilo con una cola de tareas en
+//             orden (envios GPFIFO, cambios de memoria de la GPU, presentar imagenes).
+//             La CPU emulada sigue mientras la GPU dibuja; los fences dicen cuando acaba.
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 #include "common/types.hpp"
 
@@ -84,24 +93,48 @@ private:
 // Syncpoints: contadores que la GPU incrementa al terminar trabajo. Los fences
 // de NVIDIA son (syncpoint, valor): "el trabajo estara hecho cuando el syncpoint
 // llegue a este valor".
+//
+// Ademas del valor, cada syncpoint tiene un "maximo": el valor que tendra cuando
+// acabe todo lo enviado. Al enviar trabajo se suma lo que lo incrementara, y el
+// fence que recibe el programa es ese maximo.
+//
+// Se puede usar desde varios hilos (la GPU incrementa, la CPU lee y espera).
 // ----------------------------------------------------------------------------
 class Syncpoints {
 public:
     static constexpr u32 COUNT = 192;
-    u32  Read(u32 id) const { return id < COUNT ? m_values[id] : 0; }
+    u32  Read(u32 id) const { return id < COUNT ? m_values[id].load(std::memory_order_acquire) : 0; }
+    u32  ReadMax(u32 id) const;
     void Increment(u32 id);
+    // Sube el valor hasta 'value' si no habia llegado (fin de un envio: el valor prometido)
+    void RaiseTo(u32 id, u32 value);
+    // Reserva 'count' incrementos futuros; devuelve el nuevo maximo (el fence del envio)
+    u32  Reserve(u32 id, u32 count);
     bool Reached(u32 id, u32 threshold) const { return s32(Read(id) - threshold) >= 0; }
     // Cada canal recibe un syncpoint propio
     u32  AllocateSyncpoint() { return m_next < COUNT ? m_next++ : COUNT - 1; }
     // Llama a 'fire' cuando el syncpoint llegue a 'threshold' (ya mismo si ha llegado).
     // Asi nvhost-ctrl activa el evento por el que espera el programa.
     void AddWaiter(u32 id, u32 threshold, std::function<void()> fire);
-    void Reset() { m_values.fill(0); m_next = 1; m_waiters.clear(); }
+    // Modo diferido (GPU asincrona): los avisos no se llaman en el hilo de la GPU, se
+    // guardan y los llama el kernel (en el hilo de la emulacion) con RunFired().
+    void SetDeferred(bool on) { m_deferred = on; }
+    size_t RunFired();
+    bool HasFired() const { return m_hasFired.load(std::memory_order_acquire); }
+    void Reset();
 private:
     struct Waiter { u32 id, threshold; std::function<void()> fire; };
-    std::array<u32, COUNT> m_values{};
+    // Con el candado cogido: saca los avisos que ya se cumplen
+    void CollectReached(u32 id, std::vector<std::function<void()>>& out);
+    void Fire(std::vector<std::function<void()>>& ready);
+    std::array<std::atomic<u32>, COUNT> m_values{};
+    std::array<u32, COUNT> m_max{};
     u32 m_next = 1;   // el 0 queda libre (nadie lo usa)
+    mutable std::mutex m_mutex;
     std::vector<Waiter> m_waiters;
+    std::vector<std::function<void()>> m_fired;    // avisos pendientes (modo diferido)
+    std::atomic<bool> m_hasFired{false};
+    std::atomic<bool> m_deferred{false};
 };
 
 class Gpu;
@@ -126,7 +159,8 @@ public:
     u32 Id() const { return m_id; }
     u32 SyncpointId() const { return m_syncpoint; }
 
-    // Entradas GPFIFO: cada una apunta a una lista de comandos (pushbuffer)
+    // Entradas GPFIFO: cada una apunta a una lista de comandos (pushbuffer).
+    // Se ejecuta en el hilo de la GPU (o al momento en modo sincrono): ver Gpu::Enqueue.
     void SubmitGpfifo(const std::vector<u64>& entries);
 
     // Para los tests: procesar un pushbuffer que esta en memoria de la GPU
@@ -169,6 +203,21 @@ public:
 
     void Reset();
 
+    // ---- Hilo de la GPU ------------------------------------------------------
+    // Activa/desactiva el hilo propio. Desactivado (por defecto) todo es sincrono.
+    void SetAsync(bool on);
+    bool IsAsync() const { return m_async; }
+    // Ejecuta 'task' en la GPU, en orden con las anteriores. Devuelve su numero de
+    // tarea ("ticket"). En modo sincrono se ejecuta ya.
+    u64  Enqueue(std::function<void()> task);
+    // Espera (bloqueando el hilo que llama) a que acabe la tarea 'ticket' / todas
+    void WaitTicket(u64 ticket);
+    void WaitIdle();
+    bool IsDone(u64 ticket) const { return m_completed.load(std::memory_order_acquire) >= ticket; }
+    bool IsBusy() const;
+    // Espera a que la GPU termine alguna tarea, como mucho 'max'
+    void WaitProgress(std::chrono::microseconds max);
+
     // Estadisticas para la interfaz y los tests
     struct Stats {
         u64 submits = 0;          // envios GPFIFO
@@ -189,12 +238,26 @@ public:
     void Warn(const std::string& key, const std::string& message);
 
 private:
+    void WorkerLoop();
+
     Core::Memory& m_memory;
     GpuMemoryManager m_mm;
     Syncpoints m_syncpoints;
     std::vector<std::unique_ptr<Channel>> m_channels;
     Stats m_stats;
+    std::mutex m_warnMutex;
     std::map<std::string, bool> m_warned;
+
+    // Cola de tareas del hilo de la GPU
+    bool m_async = false;
+    std::thread m_worker;
+    mutable std::mutex m_queueMutex;
+    std::condition_variable m_queueCv;   // hay trabajo (o hay que parar)
+    std::condition_variable m_doneCv;    // se acabo una tarea
+    std::deque<std::function<void()>> m_queue;
+    bool m_stop = false;
+    u64 m_submitted = 0;                 // tareas enviadas (con m_queueMutex)
+    std::atomic<u64> m_completed{0};     // tareas terminadas
 };
 
 } // namespace NeXo2::GPU

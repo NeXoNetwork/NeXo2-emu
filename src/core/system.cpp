@@ -11,6 +11,7 @@ using Common::Logger;
 System::System() = default;
 
 void System::ResetMachine() {
+    m_kernel.GetGpu().WaitIdle();   // antes de borrar la memoria que la GPU podria estar leyendo
     m_memory.Clear();
     m_cpu.Reset();
     m_kernel.Reset();

@@ -68,6 +68,7 @@ void Kernel::RegisterDefaultServices() {
 }
 
 void Kernel::Reset() {
+    m_gpu.WaitIdle();   // la GPU (si va en su hilo) no puede seguir usando nada de lo que se borra
     m_heapSize = 0;
     m_imageSize = 0;
     m_exited = false;

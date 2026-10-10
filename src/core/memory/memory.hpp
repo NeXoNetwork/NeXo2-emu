@@ -1,10 +1,12 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "common/types.hpp"
@@ -46,6 +48,10 @@ struct MemoryRegion {
 // Gestor de memoria por paginación (VMM básico).
 // En vez de reservar 12 GB de golpe (lo que petaría en muchos PCs), las
 // páginas de 4 KB se crean bajo demanda la primera vez que se escriben.
+//
+// Varios hilos: la CPU emulada y la GPU (en su propio hilo) leen y escriben a la vez.
+// Buscar una pagina no usa candado (punteros atomicos); crear una si (m_pageMutex).
+// Clear() y el mapa de zonas solo se usan con la GPU parada.
 class Memory {
 public:
     static constexpr u64 ADDRESS_SPACE = 12ULL * 1024 * 1024 * 1024; // 12 GB
@@ -55,8 +61,10 @@ public:
 
     // Borra todo (paginas y zonas). Se usa al cargar un programa nuevo.
     void Clear() {
+        std::scoped_lock lock(m_pageMutex, m_codeMutex);
+        for (auto& l2 : m_table) l2.store(nullptr, std::memory_order_relaxed);
+        m_l2Tables.clear();
         m_pages.clear();
-        for (auto& l2 : m_table) l2.reset();
         if (m_flat) std::fill_n(m_flat.get(), FLAT_ENTRIES, nullptr);
         m_regions.clear();
         m_codeWrites = 0;
@@ -78,8 +86,8 @@ public:
     void MarkCode(VAddr addr) {
         if (addr >= ADDRESS_SPACE) return;
         const u64 index = addr / PAGE_SIZE;
-        GetOrCreatePage(index)->code = true;
-        if (m_flat) m_flat[index] = nullptr;   // el JIT escribira por Write(): asi nos enteramos
+        GetOrCreatePage(index)->code.store(true, std::memory_order_relaxed);
+        SetFlat(index, nullptr);   // el JIT escribira por Write(): asi nos enteramos
     }
 
     // ---------------------------------------------------------------------
@@ -92,19 +100,21 @@ public:
     static constexpr unsigned FLAT_BITS = 34;                       // bits de direccion cubiertos
     static constexpr u64 FLAT_ENTRIES = 1ull << (FLAT_BITS - 12);
     void** EnableFlatPageTable() {
+        std::lock_guard lock(m_pageMutex);
         if (!m_flat) {
             m_flat = std::make_unique<void*[]>(FLAT_ENTRIES);      // todo a nullptr
             for (u64 l1 = 0; l1 < L1_SIZE; ++l1) {
-                if (!m_table[l1]) continue;
+                L2Table* l2 = m_table[l1].load(std::memory_order_acquire);
+                if (!l2) continue;
                 for (u64 i = 0; i < L2_SIZE; ++i) {
-                    Page* p = (*m_table[l1])[i];
-                    if (p && !p->code) m_flat[(l1 << L2_BITS) | i] = p->bytes.data();
+                    Page* p = (*l2)[i].load(std::memory_order_acquire);
+                    if (p && !p->code.load(std::memory_order_relaxed)) m_flat[(l1 << L2_BITS) | i] = p->bytes.data();
                 }
             }
         }
         return m_flat.get();
     }
-    u64 CodeWriteCount() const { return m_codeWrites; }
+    u64 CodeWriteCount() const { return m_codeWrites.load(std::memory_order_relaxed); }
     // Variable que se pone a true en cada escritura en codigo (la CPU la mira en su bucle)
     void SetCodeWriteFlag(bool* flag) { m_codeWriteFlag = flag; }
 
@@ -112,6 +122,7 @@ public:
     // Devuelve false si fueron demasiadas para recordarlas: entonces hay que tirarlo todo.
     template <size_t N>
     bool TakeCodeWrites(std::array<VAddr, N>& out, size_t& count) {
+        std::lock_guard lock(m_codeMutex);
         const bool overflow = m_pendingCount > m_pending.size();
         count = std::min(m_pendingCount, std::min(N, m_pending.size()));
         for (size_t i = 0; i < count; ++i) out[i] = m_pending[i];
@@ -182,8 +193,8 @@ public:
     const std::map<VAddr, MemoryRegion>& Regions() const { return m_regions; }
 
     bool   IsReady() const { return true; }
-    size_t AllocatedPages() const { return m_pages.size(); }
-    u64    AllocatedBytes() const { return static_cast<u64>(m_pages.size()) * PAGE_SIZE; }
+    size_t AllocatedPages() const { std::lock_guard lock(m_pageMutex); return m_pages.size(); }
+    u64    AllocatedBytes() const { return static_cast<u64>(AllocatedPages()) * PAGE_SIZE; }
 
     // Lectura/escritura de un valor. Camino rapido: el valor cabe entero en una pagina
     // (casi siempre). Si cruza el borde entre dos paginas, va por ReadBytes/WriteBytes.
@@ -205,7 +216,7 @@ public:
         const u64 offset = addr & (PAGE_SIZE - 1);
         if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
             Page* page = GetOrCreatePage(addr / PAGE_SIZE);
-            if (page->code) [[unlikely]] NoteCodeWrite(page, addr);
+            if (page->code.load(std::memory_order_relaxed)) [[unlikely]] NoteCodeWrite(page, addr);
             std::memcpy(page->bytes.data() + offset, &value, sizeof(T));
             return;
         }
@@ -244,7 +255,7 @@ public:
             const u64 offset = addr % PAGE_SIZE;
             const size_t chunk = std::min<size_t>(size, PAGE_SIZE - offset);
             Page* page = GetOrCreatePage(index);
-            if (page->code) [[unlikely]] NoteCodeWrite(page, addr);
+            if (page->code.load(std::memory_order_relaxed)) [[unlikely]] NoteCodeWrite(page, addr);
             std::memcpy(page->bytes.data() + offset, in, chunk);
             addr += chunk; in += chunk; size -= chunk;
         }
@@ -253,14 +264,20 @@ public:
 private:
     struct Page {
         std::array<u8, PAGE_SIZE> bytes{};   // los 4 KB (a cero al crearla)
-        bool code = false;                   // la CPU tiene instrucciones decodificadas de aqui
+        std::atomic<bool> code{false};       // la CPU tiene instrucciones decodificadas de aqui
     };
+
+    // Entrada de la tabla plana del JIT (el JIT la lee desde otro hilo: escritura atomica)
+    void SetFlat(u64 index, void* value) {
+        if (m_flat) std::atomic_ref<void*>(m_flat[index]).store(value, std::memory_order_release);
+    }
 
     // Primera escritura en una pagina de codigo: se apunta y se desmarca (las
     // siguientes escrituras ya no cuentan hasta que la CPU la vuelva a decodificar).
     void NoteCodeWrite(Page* page, VAddr addr) {
-        page->code = false;
-        if (m_flat) m_flat[addr / PAGE_SIZE] = page->bytes.data();   // ya no es codigo traducido
+        std::lock_guard lock(m_codeMutex);
+        if (!page->code.exchange(false, std::memory_order_relaxed)) return;   // otro hilo ya lo hizo
+        SetFlat(addr / PAGE_SIZE, page->bytes.data());   // ya no es codigo traducido
         if (m_pendingCount < m_pending.size()) m_pending[m_pendingCount] = addr & ~(PAGE_SIZE - 1);
         ++m_pendingCount;
         ++m_codeWrites;
@@ -274,30 +291,42 @@ private:
     static constexpr u64 L2_BITS = 9;                       // 512 paginas = 2 MB
     static constexpr u64 L2_SIZE = 1ull << L2_BITS;
     static constexpr u64 L1_SIZE = (ADDRESS_SPACE / PAGE_SIZE) >> L2_BITS;
-    using L2Table = std::array<Page*, L2_SIZE>;
+    using L2Table = std::array<std::atomic<Page*>, L2_SIZE>;
 
     Page* FindPage(u64 index) const {
-        const L2Table* l2 = m_table[index >> L2_BITS].get();
-        return l2 ? (*l2)[index & (L2_SIZE - 1)] : nullptr;
+        const L2Table* l2 = m_table[index >> L2_BITS].load(std::memory_order_acquire);
+        return l2 ? (*l2)[index & (L2_SIZE - 1)].load(std::memory_order_acquire) : nullptr;
     }
 
     Page* GetOrCreatePage(u64 index) {
-        auto& l2 = m_table[index >> L2_BITS];
-        if (!l2) l2 = std::make_unique<L2Table>(); // todos los punteros a nullptr
-        Page*& slot = (*l2)[index & (L2_SIZE - 1)];
-        if (!slot) {
-            auto page = std::make_unique<Page>(); // página nueva inicializada a 0
-            slot = page.get();
-            if (m_flat) m_flat[index] = page->bytes.data();
-            m_pages.push_back(std::move(page));
+        if (Page* p = FindPage(index)) [[likely]] return p;
+        // Camino lento: con candado (dos hilos podrian querer crear la misma pagina)
+        std::lock_guard lock(m_pageMutex);
+        auto& l1 = m_table[index >> L2_BITS];
+        L2Table* l2 = l1.load(std::memory_order_relaxed);
+        if (!l2) {
+            m_l2Tables.push_back(std::make_unique<L2Table>()); // todos los punteros a nullptr
+            l2 = m_l2Tables.back().get();
+            l1.store(l2, std::memory_order_release);
         }
-        return slot;
+        auto& slot = (*l2)[index & (L2_SIZE - 1)];
+        Page* page = slot.load(std::memory_order_relaxed);
+        if (!page) {
+            m_pages.push_back(std::make_unique<Page>()); // página nueva inicializada a 0
+            page = m_pages.back().get();
+            slot.store(page, std::memory_order_release);
+            SetFlat(index, page->bytes.data());
+        }
+        return page;
     }
 
+    mutable std::mutex m_pageMutex;             // crear paginas
+    std::mutex m_codeMutex;                     // apuntar escrituras en codigo
     std::vector<std::unique_ptr<Page>> m_pages;                      // duenas de las paginas
-    std::array<std::unique_ptr<L2Table>, L1_SIZE> m_table{};
+    std::vector<std::unique_ptr<L2Table>> m_l2Tables;                // duenas de las tablas de nivel 2
+    std::array<std::atomic<L2Table*>, L1_SIZE> m_table{};
     u64 m_generation = 0;
-    u64 m_codeWrites = 0;                       // escrituras en paginas de codigo
+    std::atomic<u64> m_codeWrites{0};           // escrituras en paginas de codigo
     std::array<VAddr, 8> m_pending{};           // que paginas eran
     size_t m_pendingCount = 0;
     bool* m_codeWriteFlag = nullptr;

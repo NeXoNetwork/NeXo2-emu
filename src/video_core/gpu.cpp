@@ -137,23 +137,100 @@ void GpuMemoryManager::WriteBlock(u64 va, const void* src, size_t size) {
 //  Syncpoints
 // ============================================================================
 
-void Syncpoints::Increment(u32 id) {
-    if (id >= COUNT) return;
-    ++m_values[id];
+void Syncpoints::CollectReached(u32 id, std::vector<std::function<void()>>& out) {
     for (size_t i = 0; i < m_waiters.size();) {
         if (m_waiters[i].id == id && Reached(id, m_waiters[i].threshold)) {
-            auto fire = std::move(m_waiters[i].fire);
+            out.push_back(std::move(m_waiters[i].fire));
             m_waiters.erase(m_waiters.begin() + std::ptrdiff_t(i));
-            fire();
         } else {
             ++i;
         }
     }
 }
 
+// Llama a los avisos ya cumplidos (sin el candado), o los guarda si estamos en modo diferido
+void Syncpoints::Fire(std::vector<std::function<void()>>& ready) {
+    if (ready.empty()) return;
+    if (m_deferred) {
+        std::lock_guard lock(m_mutex);
+        for (auto& f : ready) m_fired.push_back(std::move(f));
+        m_hasFired.store(true, std::memory_order_release);
+        return;
+    }
+    for (auto& f : ready) f();
+}
+
+u32 Syncpoints::ReadMax(u32 id) const {
+    if (id >= COUNT) return 0;
+    std::lock_guard lock(m_mutex);
+    return m_max[id];
+}
+
+void Syncpoints::Increment(u32 id) {
+    if (id >= COUNT) return;
+    std::vector<std::function<void()>> ready;
+    {
+        std::lock_guard lock(m_mutex);
+        const u32 v = m_values[id].fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (s32(v - m_max[id]) > 0) m_max[id] = v;   // incrementos que nadie habia anunciado
+        CollectReached(id, ready);
+    }
+    Fire(ready);
+}
+
+void Syncpoints::RaiseTo(u32 id, u32 value) {
+    if (id >= COUNT) return;
+    std::vector<std::function<void()>> ready;
+    {
+        std::lock_guard lock(m_mutex);
+        if (s32(value - m_values[id].load(std::memory_order_relaxed)) <= 0) return;
+        m_values[id].store(value, std::memory_order_release);
+        if (s32(value - m_max[id]) > 0) m_max[id] = value;
+        CollectReached(id, ready);
+    }
+    Fire(ready);
+}
+
+u32 Syncpoints::Reserve(u32 id, u32 count) {
+    if (id >= COUNT) return 0;
+    std::lock_guard lock(m_mutex);
+    const u32 v = m_values[id].load(std::memory_order_relaxed);
+    if (s32(v - m_max[id]) > 0) m_max[id] = v;
+    m_max[id] += count;
+    return m_max[id];
+}
+
 void Syncpoints::AddWaiter(u32 id, u32 threshold, std::function<void()> fire) {
-    if (Reached(id, threshold)) { fire(); return; }
-    m_waiters.push_back({id, threshold, std::move(fire)});
+    {
+        std::lock_guard lock(m_mutex);
+        if (!Reached(id, threshold)) {
+            m_waiters.push_back({id, threshold, std::move(fire)});
+            return;
+        }
+    }
+    fire();   // ya habia llegado (lo llama quien espera, en su hilo)
+}
+
+size_t Syncpoints::RunFired() {
+    if (!m_hasFired.load(std::memory_order_acquire)) return 0;
+    std::vector<std::function<void()>> fired;
+    {
+        std::lock_guard lock(m_mutex);
+        fired.swap(m_fired);
+        m_hasFired.store(false, std::memory_order_relaxed);
+    }
+    for (auto& f : fired) f();
+    return fired.size();
+}
+
+void Syncpoints::Reset() {
+    std::lock_guard lock(m_mutex);
+    for (auto& v : m_values) v.store(0, std::memory_order_relaxed);
+    m_max.fill(0);
+    m_next = 1;
+    m_waiters.clear();
+    m_fired.clear();
+    m_hasFired = false;
 }
 
 // ============================================================================
@@ -292,7 +369,96 @@ void Channel::HostMethod(u32 method, u32 arg) {
 // ============================================================================
 
 Gpu::Gpu(Core::Memory& memory) : m_memory(memory), m_mm(memory) {}
-Gpu::~Gpu() = default;
+Gpu::~Gpu() { SetAsync(false); }
+
+// ---- Hilo de la GPU ----------------------------------------------------------
+
+void Gpu::SetAsync(bool on) {
+    if (on == m_async) return;
+    if (on) {
+        m_stop = false;
+        m_async = true;
+        m_syncpoints.SetDeferred(true);
+        m_worker = std::thread([this] { WorkerLoop(); });
+    } else {
+        {
+            std::lock_guard lock(m_queueMutex);
+            m_stop = true;           // el hilo acaba lo que queda en la cola y sale
+        }
+        m_queueCv.notify_all();
+        if (m_worker.joinable()) m_worker.join();
+        m_async = false;
+        m_syncpoints.SetDeferred(false);
+        m_syncpoints.RunFired();
+    }
+}
+
+u64 Gpu::Enqueue(std::function<void()> task) {
+    if (!m_async) {
+        task();
+        u64 ticket;
+        {
+            std::lock_guard lock(m_queueMutex);
+            ticket = ++m_submitted;
+        }
+        m_completed.store(ticket, std::memory_order_release);
+        return ticket;
+    }
+    u64 ticket;
+    {
+        std::lock_guard lock(m_queueMutex);
+        m_queue.push_back(std::move(task));
+        ticket = ++m_submitted;
+    }
+    m_queueCv.notify_one();
+    return ticket;
+}
+
+void Gpu::WorkerLoop() {
+    for (;;) {
+        std::function<void()> task;
+        {
+            std::unique_lock lock(m_queueMutex);
+            m_queueCv.wait(lock, [this] { return m_stop || !m_queue.empty(); });
+            if (m_queue.empty()) return;          // m_stop y no queda nada
+            task = std::move(m_queue.front());
+            m_queue.pop_front();
+        }
+        task();
+        {
+            std::lock_guard lock(m_queueMutex);   // con el candado: nadie se pierde el aviso
+            m_completed.fetch_add(1, std::memory_order_acq_rel);
+        }
+        m_doneCv.notify_all();
+    }
+}
+
+void Gpu::WaitTicket(u64 ticket) {
+    if (IsDone(ticket)) return;
+    std::unique_lock lock(m_queueMutex);
+    m_doneCv.wait(lock, [&] { return IsDone(ticket); });
+}
+
+void Gpu::WaitIdle() {
+    u64 last;
+    {
+        std::lock_guard lock(m_queueMutex);
+        last = m_submitted;
+    }
+    WaitTicket(last);
+}
+
+bool Gpu::IsBusy() const {
+    std::lock_guard lock(m_queueMutex);
+    return m_completed.load(std::memory_order_acquire) < m_submitted;
+}
+
+void Gpu::WaitProgress(std::chrono::microseconds max) {
+    std::unique_lock lock(m_queueMutex);
+    const u64 now = m_completed.load(std::memory_order_acquire);
+    if (now >= m_submitted) return;
+    m_doneCv.wait_for(lock, max, [&] { return m_completed.load(std::memory_order_acquire) != now; });
+}
 
 Channel& Gpu::CreateChannel() {
     m_channels.push_back(std::make_unique<Channel>(*this, u32(m_channels.size())));
@@ -304,6 +470,7 @@ Channel* Gpu::GetChannel(u32 id) {
 }
 
 void Gpu::Reset() {
+    WaitIdle();
     m_channels.clear();
     m_mm.Reset();
     m_syncpoints.Reset();
@@ -312,6 +479,7 @@ void Gpu::Reset() {
 }
 
 void Gpu::Warn(const std::string& key, const std::string& message) {
+    std::lock_guard lock(m_warnMutex);
     if (m_warned[key]) return;
     m_warned[key] = true;
     Logger::Log(Logger::Level::Warning, "[GPU] " + message);

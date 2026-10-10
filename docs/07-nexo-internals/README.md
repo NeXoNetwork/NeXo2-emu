@@ -11,7 +11,7 @@ How NeXo 2 itself is built (our code, not the console).
 | [ipc-and-services.md](ipc-and-services.md) | IPC (HIPC/CMIF/TIPC, domains), all services (sm:, applet, hid, time, fs/SD card...), how to add a service |
 | [threads.md](threads.md) | Threads, scheduler (6 time-sliced cores), mutex/condvar protocol |
 | [input.md](input.md) | Controllers: hid shared memory layout, LIFOs, PC keyboard/gamepad mapping |
-| [gpu.md](gpu.md) | GPU: nvhost devices, channels, pushbuffers, engines (3D clears, DMA, 2D, inline), macros, syncpoints |
+| [gpu.md](gpu.md) | GPU: nvhost devices, channels, pushbuffers, engines (3D clears, DMA, 2D, inline), macros, syncpoints and fences, the GPU thread |
 | [gpu-shaders.md](gpu-shaders.md) | Maxwell shader decoder and interpreter, shader environment, random-program tests with uam |
 | [gpu-rasterizer.md](gpu-rasterizer.md) | Draws: vertex fetch, clipping, viewport, culling, rasterization rules, depth, blending |
 | [gpu-vulkan.md](gpu-vulkan.md) | GPU phase 3: Vulkan device (volk, no SDK), plan for the SPIR-V translator and Vulkan draws |
@@ -20,7 +20,7 @@ How NeXo 2 itself is built (our code, not the console).
 
 ## Test suite
 
-`nexo2_tests` (89 tests, each run with the interpreter and with the JIT) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
+`nexo2_tests` (90 tests, each run with the interpreter and with the JIT) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
 the NRO loader, IPC, the libnx start-up services, display (deswizzle, GraphicBuffer parsing,
 pixel formats), GPU (shaders, draws, textures), SD card paths, controller LIFOs, decode cache and threads. Run it after any change:
 `build\Release\nexo2_tests.exe`.

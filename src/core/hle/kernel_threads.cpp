@@ -176,6 +176,8 @@ void Kernel::AcquireMutexAfterWait(KThread& t, u32 result) {
 }
 
 void Kernel::UpdateWaits() {
+    // Avisos de la GPU (syncpoints que llegaron en su hilo): activan eventos de nvdrv
+    m_gpu.GetSyncpoints().RunFired();
     const u64 now = Now();
     for (auto& tp : m_threads) {
         KThread& t = *tp;
@@ -254,6 +256,14 @@ u64 Kernel::Run(u64 budget) {
         UpdateWaits();
         KThread* next = PickNext();
         if (!next) {
+            // Nadie listo pero la GPU (en su hilo) aun trabaja: lo normal es que alguien
+            // espere su fence. Esperar en tiempo real (el reloj emulado lo alcanza luego,
+            // en el ritmo de main.cpp) y volver, para soltar el candado de la interfaz.
+            if (m_gpu.IsBusy() || m_gpu.GetSyncpoints().HasFired()) {
+                m_gpu.WaitProgress(std::chrono::milliseconds(2));
+                ++m_stats.gpu_waits;
+                break;
+            }
             // Nadie listo: adelantar el reloj hasta el primer plazo, o es un bloqueo
             u64 earliest = NEVER;
             for (auto& t : m_threads)

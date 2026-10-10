@@ -29,8 +29,8 @@ nvGpuChannelCreate          ->  /dev/nvhost-gpu     Gpu::CreateChannel (own sync
 dkQueueSubmitCommands
   nvGpuChannelKickoff       ->  KICKOFF_PB (Ioctl2) Channel::SubmitGpfifo
                                   each GPFIFO entry -> pushbuffer -> methods -> engines
-dkQueueWaitIdle / fences    ->  /dev/nvhost-ctrl    syncpoint already reached (see below)
-dkSwapchainAcquire/Present  ->  vi binder           Display::Present reads the image
+dkQueueWaitIdle / fences    ->  /dev/nvhost-ctrl    syncpoint value / event (see below)
+dkSwapchainAcquire/Present  ->  vi binder           Display::Present reads the image (GPU queue)
 ```
 
 ### Pushbuffers
@@ -47,13 +47,53 @@ A pushbuffer is a list of 32-bit words. Each command starts with a header:
 Methods below 0x40 belong to the channel itself (bind engine, semaphores, syncpoint
 increment/wait). The rest go to the engine bound to the subchannel.
 
-### Synchronous model
+### Synchronous and threaded modes
 
-The GPU runs the work **inside the ioctl that submits it**. When the program gets its fence
-back, the work is done and the syncpoint has its new value, so `nvFenceWait` returns at once.
+`Gpu` has two modes, chosen with `Gpu::SetAsync`:
+
+- **Synchronous** (default; the tests use it). The work runs **inside the ioctl that submits
+  it**: when the program gets its fence back, the syncpoint already has that value.
+- **Threaded** (the app turns it on; `NEXO2_GPU_ASYNC=0` turns it off). The GPU has its own
+  host thread with a FIFO of tasks (`Gpu::Enqueue`). The emulated CPU keeps running while the
+  GPU draws, so on a PC with several cores the two overlap.
+
+Everything that the GPU thread reads goes through that FIFO, in order:
+
+| Task | Queued by |
+| :--- | :--- |
+| GPFIFO submit (pushbuffers -> engines) | `SUBMIT_GPFIFO`, `KICKOFF_PB` |
+| `GpuMemoryManager::Map` / `Unmap` | `MAP_BUFFER_EX`, `UNMAP_BUFFER` (work submitted earlier still sees the old mapping) |
+| Present a swapchain image (`Display::PresentAt`) | vi `QueueBuffer` (after the drawing sent to that image) |
+
+Only the GPU thread touches the mappings; address-space reservations (`Allocate`) stay on
+the emulation thread because the program needs the address back at once.
+
+**Fences.** Each syncpoint has a value and a *max*: the value it will have when everything
+submitted so far has finished. A submit adds its increments to the max and returns the max as
+the fence, like the console's driver. The increments come from the `SUBMIT_GPFIFO` flags:
+bit 8 = "the pushbuffer does `fence.value` increments" (what libnx sends), bit 1 = "the driver
+adds 2 increments at the end". When the GPU finishes a submit it raises the syncpoint to the
+promised value (`Syncpoints::RaiseTo`), so a program that announced too many increments does
+not hang; an increment nobody announced raises the max too.
+
+**Waiting.** `EVENT_WAIT_ASYNC` for a value not reached yet returns timeout and arms the event
+(`Syncpoints::AddWaiter`). In threaded mode the waiter callbacks do not run on the GPU thread:
+they are stored and the kernel runs them on the emulation thread at the start of
+`UpdateWaits` (`Syncpoints::RunFired`), which wakes the guest thread waiting on the event. If
+no guest thread can run and the GPU is still busy, the scheduler waits for GPU progress in real
+time (`Gpu::WaitProgress`, up to 2 ms, then returns so the UI can take its lock) instead of
+reporting a deadlock or jumping the clock; the real-time pacing in `main.cpp` catches the
+emulated clock up afterwards. vi's `DequeueBuffer` waits for the previous present of that
+buffer, because the program may draw into it with the CPU.
+
 Waits inside a pushbuffer (semaphore acquire, syncpoint wait) that are not met only log a
-warning. `EVENT_WAIT_ASYNC` for a value not reached yet arms the event; it is signalled when
-the syncpoint gets there (`Syncpoints::AddWaiter`).
+warning.
+
+**Thread safety.** `Syncpoints` (atomic values, waiters under a mutex), `Core::Memory` page
+creation (lock-free lookups through atomic page-table pointers, a mutex only when a page is
+created), the displayed frame (`Display::LockFrame`) and the warning list. Loading a new
+program (`System::ResetMachine`, `Kernel::Reset`) first waits for the GPU to go idle. The
+statistics in Diagnostics are read without a lock (approximate while running).
 
 ## Devices and ioctls
 
@@ -107,6 +147,8 @@ offset of any pixel; it is the exact inverse of the display's deswizzle (tested)
 - Macros: a hand-assembled FillRegisters, every ALU/bitfield/read operation, and deko3d's real macros.
 - DMA (pitch <-> block linear round trip, fill, component swap), inline upload, scaled 2D blit.
 - Syncpoints, waiters and semaphores.
+- Threaded mode: tasks run in order, the promised fence is reached, mapping changes are queued,
+  waiter callbacks wait for `RunFired`, switching back to synchronous drains the queue.
 - `gpu.nro` (`tests/programs/nro_gpu`): a homebrew that does what libnx + deko3d do through
   `nvdrv` (open the devices, map memory, create a channel, upload a macro, clear, copy,
   KICKOFF_PB, wait for the fence) and checks the pixels in its own memory.

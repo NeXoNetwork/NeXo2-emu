@@ -12,6 +12,7 @@ option(NEXO2_BUILD_APP "Compilar la aplicacion (necesita SDL3 e ImGui)" ON)
 option(NEXO2_BUILD_TESTS "Compilar los tests de la CPU (nexo2_tests)" ON)
 option(NEXO2_ENABLE_JIT "JIT dynarmic (ARM64 -> x86-64). Necesita externals/dynarmic y externals/ext-boost" ON)
 option(NEXO2_ENABLE_VULKAN "GPU por Vulkan (fase 3). Necesita externals/Vulkan-Headers y externals/volk" ON)
+option(NEXO2_ENABLE_TLS "https para los programas (servicio ssl). Necesita externals/mbedtls" ON)
 
 # 1a. Nucleo del emulador (CPU, memoria, cargador NRO, kernel HLE) como libreria estatica.
 #     Asi lo usan tanto el ejecutable como los tests, sin compilarlo dos veces.
@@ -39,6 +40,10 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/hle/services/set.cpp"
     "${SRC_DIR}/core/hle/services/apm.cpp"
     "${SRC_DIR}/core/hle/services/misc.cpp"
+    "${SRC_DIR}/core/hle/services/bsd.cpp"
+    "${SRC_DIR}/core/hle/services/ssl.cpp"
+    "${SRC_DIR}/core/hle/net/host_net.cpp"
+    "${SRC_DIR}/core/hle/net/host_certs.cpp"
     "${SRC_DIR}/core/hle/services/applet.cpp"
     "${SRC_DIR}/core/hle/services/hid.cpp"
     "${SRC_DIR}/core/hle/services/time.cpp"
@@ -95,6 +100,29 @@ if(NEXO2_ENABLE_VULKAN)
     target_compile_definitions(nexo2_core PUBLIC NEXO2_HAS_VULKAN VK_NO_PROTOTYPES)
     target_link_libraries(nexo2_core PRIVATE ${CMAKE_DL_LIBS})
     message(STATUS "NeXo 2: Vulkan activado")
+endif()
+
+# 1e. Red: sockets del PC (Winsock en Windows) y TLS con mbedTLS (externals/mbedtls, con su
+#     submodulo "framework"). Sin mbedTLS los programas tienen red, pero no https.
+if(WIN32)
+    target_link_libraries(nexo2_core PRIVATE ws2_32 crypt32)
+endif()
+if(NEXO2_ENABLE_TLS AND NOT (EXISTS "${EXT_DIR}/mbedtls/CMakeLists.txt" AND EXISTS "${EXT_DIR}/mbedtls/framework/CMakeLists.txt"))
+    message(WARNING "NEXO2_ENABLE_TLS: falta externals/mbedtls (git submodule update --init --recursive). Se compila sin https.")
+    set(NEXO2_ENABLE_TLS OFF)
+endif()
+if(NEXO2_ENABLE_TLS)
+    set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(GEN_FILES OFF CACHE BOOL "" FORCE)
+    set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
+    set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "" FORCE)
+    add_subdirectory("${EXT_DIR}/mbedtls" EXCLUDE_FROM_ALL)
+    target_link_libraries(nexo2_core PRIVATE mbedtls mbedx509 mbedcrypto)
+    target_compile_definitions(nexo2_core PRIVATE NEXO2_HAS_TLS)
+    message(STATUS "NeXo 2: TLS (mbedTLS) activado")
 endif()
 
 # El dibujo por software reparte los pixeles entre varios hilos (std::thread)
@@ -190,6 +218,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/decode_cache_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/threads_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/multicore_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/network_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/cpu_fuzz_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_shader_tests.cpp"

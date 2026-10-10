@@ -1,11 +1,13 @@
 #include "misc.hpp"
 #include "hle/kernel.hpp"
 #include "common/logger.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <vector>
 
 namespace NeXo2::HLE {
@@ -40,50 +42,6 @@ PsmSession::PsmSession() : ServiceObject("IPsmSession") {
     RegisterStub(2, "SetChargerTypeChangeEventEnabled");
     RegisterStub(3, "SetPowerSupplyChangeEventEnabled");
     RegisterStub(4, "SetBatteryVoltageStateChangeEventEnabled");
-}
-
-namespace {
-constexpr u32 BSD_ENETDOWN = 50;          // errno de FreeBSD (el de Horizon)
-constexpr u32 RESULT_NIFM_NO_NETWORK = 0x2A6E;   // nifm: sin conexion (modulo 110)
-}
-
-BsdService::BsdService(std::string name) : ServiceObject(std::move(name)) {
-    // RegisterClient(config, pid, tamano de la memoria de transferencia, handle) -> u64 pid
-    RegisterCommand(0, "RegisterClient", [](IpcContext& ctx) { ctx.Push<u64>(0); ctx.SetResult(Result::Success); });
-    RegisterStub(1, "StartMonitoring");
-    // Todo lo demas: -1 y errno = ENETDOWN
-    static const std::pair<u32, const char*> ops[] = {
-        {2, "Socket"}, {3, "SocketExempt"}, {4, "Open"}, {5, "Select"}, {6, "Poll"}, {7, "Sysctl"},
-        {8, "Recv"}, {9, "RecvFrom"}, {10, "Send"}, {11, "SendTo"}, {12, "Accept"}, {13, "Bind"},
-        {14, "Connect"}, {15, "GetPeerName"}, {16, "GetSockName"}, {17, "GetSockOpt"}, {18, "Listen"},
-        {19, "Ioctl"}, {20, "Fcntl"}, {21, "SetSockOpt"}, {22, "Shutdown"}, {23, "ShutdownAllSockets"},
-        {24, "Write"}, {25, "Read"}, {26, "Close"}, {27, "DuplicateSocket"},
-    };
-    for (const auto& [id, op] : ops) {
-        RegisterCommand(id, op, [](IpcContext& ctx) {
-            ctx.Push<s32>(-1);
-            ctx.Push<u32>(BSD_ENETDOWN);
-            ctx.SetResult(Result::Success);
-        });
-    }
-}
-
-NifmService::NifmService(std::string name) : ServiceObject(std::move(name)) {
-    auto create = [](IpcContext& ctx) {
-        ctx.PushInterface(std::make_shared<NifmGeneralService>());
-        ctx.SetResult(Result::Success);
-    };
-    RegisterCommand(4, "CreateGeneralServiceOld", create);
-    RegisterCommand(5, "CreateGeneralService", create);
-}
-
-NifmGeneralService::NifmGeneralService() : ServiceObject("IGeneralService") {
-    RegisterCommand(1, "GetClientId", [](IpcContext& ctx) { ctx.Push<u32>(1); ctx.SetResult(Result::Success); });
-    // GetCurrentIpAddress: sin red
-    RegisterCommand(12, "GetCurrentIpAddress", [](IpcContext& ctx) { ctx.SetResult(RESULT_NIFM_NO_NETWORK); });
-    // GetInternetConnectionStatus: sin red
-    RegisterCommand(18, "GetInternetConnectionStatus", [](IpcContext& ctx) { ctx.SetResult(RESULT_NIFM_NO_NETWORK); });
-    RegisterCommand(21, "IsAnyInternetRequestAccepted", [](IpcContext& ctx) { ctx.Push<u8>(0); ctx.SetResult(Result::Success); });
 }
 
 namespace {
@@ -168,6 +126,30 @@ PlService::PlService() : ServiceObject("pl:u") {
         ctx.Push<u8>(HostFont().empty() ? 0 : 1);
         ctx.Push<u8>(0); ctx.Push<u8>(0); ctx.Push<u8>(0);
         ctx.Push<u32>(PL_FONT_TYPES);
+        ctx.SetResult(Result::Success);
+    });
+}
+
+// ============================================================================
+//  audren:u (sin audio todavia)
+// ============================================================================
+AudioRendererManager::AudioRendererManager() : ServiceObject("audren:u") {
+    constexpr u32 RESULT_AUDIO_NOT_AVAILABLE = (2u << 9) | 153u;   // audio (modulo 153)
+    auto unavailable = [](IpcContext& ctx) {
+        Common::Logger::Log(Common::Logger::Level::Info, "[audren:u] Sin audio todavia: el programa sigue sin sonido");
+        ctx.SetResult(RESULT_AUDIO_NOT_AVAILABLE);
+    };
+    RegisterCommand(0, "OpenAudioRenderer", unavailable);
+    RegisterCommand(1, "GetWorkBufferSize", unavailable);
+    RegisterCommand(2, "GetAudioDeviceService", unavailable);
+}
+
+CsrngService::CsrngService() : ServiceObject("csrng") {
+    RegisterCommand(0, "GenerateRandomBytes", [](IpcContext& ctx) {
+        static std::random_device device;
+        std::vector<u8> bytes(size_t(ctx.GetWriteBufferSize(0)));
+        for (auto& b : bytes) b = u8(device());
+        ctx.WriteBuffer(bytes.data(), bytes.size(), 0);
         ctx.SetResult(Result::Success);
     });
 }

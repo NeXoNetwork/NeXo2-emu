@@ -10,6 +10,7 @@ How NeXo 2 itself is built (our code, not the console).
 | [nro-loader-and-hle.md](nro-loader-and-hle.md) | NRO loader, process memory layout, Homebrew ABI, HLE kernel SVCs |
 | [ipc-and-services.md](ipc-and-services.md) | IPC (HIPC/CMIF/TIPC, domains), all services (sm:, applet, hid, time, fs/SD card...), how to add a service |
 | [threads.md](threads.md) | Threads, scheduler (6 cores: time-sliced or one host thread each), mutex/condvar protocol, shared memory and atomics |
+| [network.md](network.md) | Network: sockets (bsd), DNS (sfdnsres), nifm and TLS (ssl with mbedTLS) |
 | [input.md](input.md) | Controllers: hid shared memory layout, LIFOs, PC keyboard/gamepad mapping |
 | [gpu.md](gpu.md) | GPU: nvhost devices, channels, pushbuffers, engines (3D clears, DMA, 2D, inline), macros, syncpoints and fences, the GPU thread |
 | [gpu-shaders.md](gpu-shaders.md) | Maxwell shader decoder and interpreter, shader environment, random-program tests with uam |
@@ -20,7 +21,7 @@ How NeXo 2 itself is built (our code, not the console).
 
 ## Test suite
 
-`nexo2_tests` (94 tests, each run with the interpreter and with the JIT) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
+`nexo2_tests` (97 tests, each run with the interpreter and with the JIT) covers every page above: CPU programs, SIMD differential tests, CPU fuzzing,
 the NRO loader, IPC, the libnx start-up services, display (deswizzle, GraphicBuffer parsing,
 pixel formats), GPU (shaders, draws, textures), SD card paths, controller LIFOs, decode cache and threads. Run it after any change:
 `build\Release\nexo2_tests.exe`.

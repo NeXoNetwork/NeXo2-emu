@@ -604,10 +604,7 @@ Core::Interpreter& Kernel::EnsureCoreCpu(s32 core) {
     auto& slot = m_extraCpus[size_t(core)];
     if (!slot) {
         slot = std::make_unique<Core::Interpreter>(m_memory, u32(core));
-        slot->SetSvcHandler([this](u32 imm, CPUState& state) {
-            std::lock_guard lock(m_lock);
-            HandleSvc(imm, state);
-        });
+        slot->SetSvcHandler([this](u32 imm, CPUState& state) { SvcEntry(imm, state); });
         slot->SetClock(&WallClock, this);
     }
     // Mismas opciones que la CPU principal (la interfaz cambia la de m_cpu)

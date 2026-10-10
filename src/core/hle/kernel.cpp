@@ -7,6 +7,8 @@
 #include "services/fs.hpp"
 #include "services/hid.hpp"
 #include "services/misc.hpp"
+#include "services/bsd.hpp"
+#include "services/ssl.hpp"
 #include "services/nvdrv.hpp"
 #include "services/set.hpp"
 #include "services/sm.hpp"
@@ -49,10 +51,7 @@ constexpr u32 CONFIG_FLAG_MANDATORY = 1;
 Kernel::Kernel(Core::Memory& memory, Core::Interpreter& cpu)
     : m_memory(memory), m_cpu(cpu) {
     // Cada SVC con el candado del kernel: con varios nucleos, otro puede estar en el kernel a la vez
-    m_cpu.SetSvcHandler([this](u32 imm, CPUState& state) {
-        std::lock_guard lock(m_lock);
-        HandleSvc(imm, state);
-    });
+    m_cpu.SetSvcHandler([this](u32 imm, CPUState& state) { SvcEntry(imm, state); });
     RegisterDefaultServices();
 }
 
@@ -64,8 +63,12 @@ void Kernel::RegisterDefaultServices() {
     m_services.Register("bsd:u",    [] { return std::make_shared<BsdService>("bsd:u"); });
     m_services.Register("bsd:s",    [] { return std::make_shared<BsdService>("bsd:s"); });
     m_services.Register("nifm:u",   [] { return std::make_shared<NifmService>("nifm:u"); });
+    m_services.Register("sfdnsres", [] { return std::make_shared<SfdnsresService>(); });
+    m_services.Register("csrng",    [] { return std::make_shared<CsrngService>(); });
     m_services.Register("ts",       [] { return std::make_shared<TsService>(); });
     m_services.Register("pl:u",     [] { return std::make_shared<PlService>(); });
+    m_services.Register("ssl",      [] { return std::make_shared<SslService>(); });
+    m_services.Register("audren:u", [] { return std::make_shared<AudioRendererManager>(); });
     m_services.Register("apm",      [] { return std::make_shared<ApmManager>(); });
     m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
     m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
@@ -86,6 +89,7 @@ void Kernel::Reset() {
     StopCores();        // los nucleos en hilos del PC paran antes de borrar nada
     m_gpu.WaitIdle();   // la GPU (si va en su hilo) no puede seguir usando nada de lo que se borra
     std::lock_guard lock(m_lock);
+    m_network.reset();  // cierra los sockets del programa anterior
     m_coresHalted = false;
     m_coreHaltReason.clear();
     for (auto& c : m_extraCpus) if (c) c->Resume();
@@ -197,6 +201,27 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
 // ============================================================================
 //  Despachador de SVC
 // ============================================================================
+
+namespace {
+thread_local int t_svcDepth = 0;   // SVC en curso en este hilo del PC (con el candado cogido)
+}
+
+void Kernel::SvcEntry(u32 imm, CPUState& s) {
+    std::lock_guard lock(m_lock);
+    ++t_svcDepth;
+    HandleSvc(imm, s);
+    --t_svcDepth;
+}
+
+bool Kernel::ReleaseLockForWait() {
+    if (t_svcDepth != 1) return false;   // fuera de una SVC (o anidada): no se toca
+    m_lock.unlock();
+    return true;
+}
+
+void Kernel::ReacquireLockAfterWait(bool released) {
+    if (released) m_lock.lock();
+}
 
 void Kernel::HandleSvc(u32 imm, CPUState& s) {
     // NEXO2_SVC_TRACE=1: cada SVC con sus argumentos y su resultado (para buscar fallos)

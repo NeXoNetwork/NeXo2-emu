@@ -19,3 +19,6 @@
 [submodule "externals/volk"]
 	path = externals/volk
 	url = https://github.com/zeux/volk
+[submodule "externals/mbedtls"]
+	path = externals/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls

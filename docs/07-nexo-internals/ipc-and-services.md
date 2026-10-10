@@ -60,8 +60,9 @@ battery and no network:
 | `set:sys` | Firmware version, `GetColorSetId` = dark theme |
 | `psm` | Battery 100 %, official charger, a state-change event that never fires |
 | `ts` | Temperature 35 °C |
-| `bsd:u`, `bsd:s` | Sockets: registration works, every operation returns -1 / `ENETDOWN` |
-| `nifm:u` | Network status: no connection |
+| `bsd:u`, `bsd:s`, `sfdnsres`, `nifm:u`, `ssl` | Real network through the PC: see [network.md](network.md) |
+| `csrng` | Random bytes |
+| `audren:u` | No audio yet: answers "not available" and SDL goes on without sound |
 | `pl:u` | Shared fonts: a TrueType font from the PC (`NEXO2_FONT`, else Segoe UI / Arial on Windows, DejaVu on Linux) for every font type |
 | `ICommonStateGetter` 66 | `SetCpuBoostMode` (stub) |
 | `IFileSystem` 14 | `GetFileTimeStampRaw` (the PC's modification time) |

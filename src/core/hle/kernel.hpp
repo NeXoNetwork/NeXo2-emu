@@ -26,6 +26,8 @@
 // Referencia de cada SVC: docs/02-horizon-os/svc.md y switchbrew.org/wiki/SVC
 namespace NeXo2::HLE {
 
+class NetworkState;   // services/bsd.hpp
+
 // Mapa de memoria del proceso. Valores fijos (sin ASLR) y dentro de los 12 GB
 // que soporta Core::Memory. Los programas los consultan con svcGetInfo.
 namespace Layout {
@@ -97,8 +99,20 @@ public:
     // de entrada (X0 = config, X1 = -1, SP = pila, X30 = stub que llama a svcExitProcess).
     void SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, const std::string& argv);
 
-    // Llamada desde el interprete al ejecutar "svc #imm".
+    // Llamada desde el interprete al ejecutar "svc #imm" (con el candado del kernel cogido).
     void HandleSvc(u32 imm, Core::CPUState& state);
+    // Punto de entrada de las CPU: coge el candado y llama a HandleSvc
+    void SvcEntry(u32 imm, Core::CPUState& state);
+
+    // --- Servicios que esperan al PC (red) ---
+    // Sockets del proceso (bsd, ssl)
+    NetworkState& Network();
+    // Suelta el candado del kernel mientras se espera algo del PC (que los demas nucleos
+    // sigan). Solo dentro de una SVC. Devuelve si lo solto (para volver a cogerlo despues).
+    bool ReleaseLockForWait();
+    void ReacquireLockAfterWait(bool released);
+    // El emulador quiere parar los nucleos: las esperas largas deben terminar ya
+    bool StopRequested() const { return m_coresStop.load(); }
     void HandleSvcImpl(u32 imm, Core::CPUState& state);
 
     // --- Hilos y planificador (kernel_threads.cpp) ---
@@ -299,6 +313,7 @@ private:
 
     std::vector<std::shared_ptr<KThread>> m_threads;
     std::shared_ptr<KThread> m_current;    // el hilo cuyos registros estan en la CPU (modo de un hilo)
+    std::shared_ptr<NetworkState> m_network;
 
     // Modo multinucleo
     std::recursive_mutex m_lock;

@@ -1,5 +1,7 @@
 #pragma once
 #include "hle/service.hpp"
+#include <map>
+#include <string>
 
 // Servicios pequenos que piden programas como el hbmenu: bateria (psm), red (nifm)...
 // Contestan como una consola en modo portatil con la bateria llena y sin red.
@@ -15,23 +17,6 @@ public:
 class PsmSession final : public ServiceObject {
 public:
     PsmSession();
-};
-
-// "bsd:u" / "bsd:s": sockets. NeXo aun no tiene red: el registro funciona (libnx arranca sus
-// sockets sin error) y cada operacion contesta -1 con errno ENETDOWN ("la red no esta").
-class BsdService final : public ServiceObject {
-public:
-    explicit BsdService(std::string name);
-};
-
-// "nifm:u": estado de la red. Siempre "sin conexion".
-class NifmService final : public ServiceObject {
-public:
-    explicit NifmService(std::string name);
-};
-class NifmGeneralService final : public ServiceObject {
-public:
-    NifmGeneralService();
 };
 
 // "ts": temperatura (el hbmenu la ensena arriba). Siempre 35 grados.
@@ -50,6 +35,19 @@ public:
 class PlService final : public ServiceObject {
 public:
     PlService();
+};
+
+// "audren:u": renderizador de audio. Aun no hay audio: contesta "no disponible" y los
+// programas (SDL) siguen sin sonido.
+class AudioRendererManager final : public ServiceObject {
+public:
+    AudioRendererManager();
+};
+
+// "csrng": numeros aleatorios de calidad (claves, TLS de los programas)
+class CsrngService final : public ServiceObject {
+public:
+    CsrngService();
 };
 
 } // namespace NeXo2::HLE

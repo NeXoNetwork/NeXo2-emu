@@ -321,6 +321,16 @@ public:
         }
     }
 
+    // Bytes de la pagina que contiene 'addr' (para copiar trozos que no se salen de ella).
+    // nullptr si esta fuera, si no existe (al leer) o si tiene codigo de la CPU (al escribir:
+    // entonces hay que usar WriteBytes, que avisa al JIT).
+    u8* PageData(VAddr addr, bool for_write) {
+        if (addr >= ADDRESS_SPACE) return nullptr;
+        if (!for_write) { Page* p = FindPage(addr / PAGE_SIZE); return p ? p->bytes.data() : nullptr; }
+        Page* p = GetOrCreatePage(addr / PAGE_SIZE);
+        return p->code.load(std::memory_order_relaxed) ? nullptr : p->bytes.data();
+    }
+
     // Crea las paginas de [addr, addr+size) que aun no existan (a cero), sin escribir nada
     void TouchPages(VAddr addr, u64 size) {
         if (!size || addr >= ADDRESS_SPACE) return;

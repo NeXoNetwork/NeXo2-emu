@@ -361,6 +361,7 @@ TextureSampler::Texture* TextureSampler::GetTexture(u32 tic) {
     u32 w[8];
     m_gpu.MemoryManager().ReadBlock(m_ticPool + u64(tic) * 32, w, sizeof(w));
     t.info = DecodeTic(w);
+    std::memcpy(t.words.data(), w, sizeof(w));
     if (!t.info.valid) {
         char buf[96];
         std::snprintf(buf, sizeof(buf), "textura con formato 0x%X no soportado (o descriptor vacio)", Bits(w, 0, 7));
@@ -382,50 +383,99 @@ SamplerInfo TextureSampler::GetSampler(u32 tsc) {
     return s;
 }
 
-const TextureSampler::Level& TextureSampler::GetLevel(Texture& tex, u32 level) {
-    auto it = tex.levels.find(level);
-    if (it != tex.levels.end()) return it->second;
-    Level& lv = tex.levels[level];
-    const TextureInfo& t = tex.info;
+namespace {
+// Zonas de memoria de un nivel: una por capa (en 3D, una para todo el volumen).
+// Devuelve el indice de zona de cada z en 'zone'.
+struct LevelRegions {
+    std::vector<std::pair<u64, u64>> zones;   // direccion, tamano
+    std::vector<u32> zone_of_z;
+};
+LevelRegions GetLevelRegions(const TextureInfo& t, u32 level, u32 depth) {
+    LevelRegions r;
     const bool is3d = t.type == 2;
-    lv.width = std::max(t.width >> level, 1u);
-    lv.height = std::max(t.height >> level, 1u);
-    lv.depth = is3d ? std::max(t.depth >> level, 1u) : t.depth;   // capas en los arrays
-    const u64 texels = u64(lv.width) * lv.height * lv.depth;
+    const u32 bpb = TextureFormatBytes(t.format);
+    const u32 bw = TextureFormatCompressed(t.format) ? 4 : 1;
+    const u32 w = std::max(t.width >> level, 1u), h = std::max(t.height >> level, 1u);
+    const u32 wblocks = (w + bw - 1) / bw, hblocks = (h + bw - 1) / bw;
+    const u64 level_off = TextureLevelOffset(t, level);
+    const u64 layer_size = TextureLayerSize(t);
+    constexpr u64 MAX_ZONE = 256ull << 20;
+    if (!t.block_linear) {
+        const u64 size = u64(t.pitch) * (hblocks ? hblocks - 1 : 0) + u64(wblocks) * bpb;
+        for (u32 z = 0; z < depth; ++z) {
+            const u64 base = t.address + (is3d ? 0 : u64(z) * layer_size);
+            if (z == 0 || base != r.zones.back().first) r.zones.push_back({base, std::min(size, MAX_ZONE)});
+            r.zone_of_z.push_back(u32(r.zones.size() - 1));
+        }
+        return r;
+    }
+    const u64 next = TextureLevelOffset(t, level + 1);
+    const u64 size = std::min(next > level_off ? next - level_off : 0, MAX_ZONE);
+    for (u32 z = 0; z < depth; ++z) {
+        if (is3d && z > 0) { r.zone_of_z.push_back(0); continue; }
+        r.zones.push_back({t.address + (is3d ? 0 : u64(z) * layer_size) + level_off, size});
+        r.zone_of_z.push_back(u32(r.zones.size() - 1));
+    }
+    return r;
+}
+
+u64 HashBytes(const std::vector<u8>& d, u64 h) {
+    size_t i = 0;
+    for (; i + 8 <= d.size(); i += 8) {
+        u64 w; std::memcpy(&w, d.data() + i, 8);
+        h = (h ^ w) * 0xFF51AFD7ED558CCDull;
+        h ^= h >> 29;
+    }
+    for (; i < d.size(); ++i) h = (h ^ d[i]) * 0x100000001B3ull;
+    return h ^ d.size();
+}
+
+// Lee los bytes de cada zona
+std::vector<std::vector<u8>> ReadZones(GpuMemoryManager& mm, const LevelRegions& r) {
+    std::vector<std::vector<u8>> raws(r.zones.size());
+    for (size_t i = 0; i < r.zones.size(); ++i) {
+        raws[i].resize(size_t(r.zones[i].second));
+        mm.ReadBlock(r.zones[i].first, raws[i].data(), raws[i].size());
+    }
+    return raws;
+}
+
+u32 LevelDepth(const TextureInfo& t, u32 level) {
+    return t.type == 2 ? std::max(t.depth >> level, 1u) : t.depth;   // capas en los arrays
+}
+
+std::shared_ptr<DecodedLevel> DecodeFrom(Gpu& gpu, const TextureInfo& t, u32 level, const LevelRegions& regions,
+                                         const std::vector<std::vector<u8>>& raws) {
+    auto lv = std::make_shared<DecodedLevel>();
+    const bool is3d = t.type == 2;
+    lv->width = std::max(t.width >> level, 1u);
+    lv->height = std::max(t.height >> level, 1u);
+    lv->depth = LevelDepth(t, level);
+    const u64 texels = u64(lv->width) * lv->height * lv->depth;
     if (texels > (64ull << 20)) {   // mas de 64 millones de texeles: algo esta mal
-        m_gpu.Warn("texbig", "textura demasiado grande, se ignora");
-        lv.width = lv.height = lv.depth = 1;
-        lv.texels.assign(1, {0, 0, 0, 0});
+        gpu.Warn("texbig", "textura demasiado grande, se ignora");
+        lv->width = lv->height = lv->depth = 1;
+        lv->texels.assign(1, {0, 0, 0, 0});
         return lv;
     }
-    lv.texels.assign(size_t(texels), {0, 0, 0, U(1.0f)});
-    auto& mm = m_gpu.MemoryManager();
+    lv->texels.assign(size_t(texels), {0, 0, 0, U(1.0f)});
+    auto& mm = gpu.MemoryManager();
     const u32 bpb = TextureFormatBytes(t.format);
     const bool comp = TextureFormatCompressed(t.format);
     const u32 bw = comp ? 4 : 1;
-    const u32 wblocks = (lv.width + bw - 1) / bw, hblocks = (lv.height + bw - 1) / bw;
+    const u32 wblocks = (lv->width + bw - 1) / bw, hblocks = (lv->height + bw - 1) / bw;
     const u32 wb = wblocks * bpb;
     const u32 bh = AdjustShift(t.block_height_log2, 8, hblocks);
-    const u32 bd = is3d ? AdjustShift(t.block_depth_log2, 1, lv.depth) : 0;
-    const u64 level_off = TextureLevelOffset(t, level);
-    const u64 layer_size = TextureLayerSize(t);
+    const u32 bd = is3d ? AdjustShift(t.block_depth_log2, 1, lv->depth) : 0;
     Layout lay{};
     GetLayout(t.format, lay);
     const bool snorm = t.types[0] == 1 || t.types[0] == 5;
 
-    // Leer cada capa entera de una vez y decodificar desde ahi
-    std::vector<u8> raw;
-    for (u32 z = 0; z < lv.depth; ++z) {
-        u64 base;
-        u32 zin = 0;
-        if (!t.block_linear) {
-            base = t.address + (is3d ? 0 : u64(z) * layer_size);
-        } else if (is3d) {
-            base = t.address + level_off;
-            zin = z;
-        } else {
-            base = t.address + u64(z) * layer_size + level_off;
-        }
+    for (u32 z = 0; z < lv->depth; ++z) {
+        const auto& reg = regions.zones[regions.zone_of_z[z]];
+        const auto& raw = raws[regions.zone_of_z[z]];
+        const u64 base = reg.first;
+        const u32 zin = (t.block_linear && is3d) ? z : 0;
         auto addr_of = [&](u32 bx, u32 by) -> u64 {
             if (!t.block_linear) return base + u64(by) * t.pitch + u64(bx) * bpb;
             return base + BlockLinear3D(bx * bpb, by, zin, wb, hblocks, bh, bd);
@@ -433,20 +483,22 @@ const TextureSampler::Level& TextureSampler::GetLevel(Texture& tex, u32 level) {
         u8 block[16];
         for (u32 by = 0; by < hblocks; ++by) {
             for (u32 bx = 0; bx < wblocks; ++bx) {
-                mm.ReadBlock(addr_of(bx, by), block, bpb);
+                const u64 at = addr_of(bx, by);
+                if (at >= base && at - base + bpb <= raw.size()) std::memcpy(block, raw.data() + (at - base), bpb);
+                else mm.ReadBlock(at, block, bpb);
                 if (comp) {
                     float rgba[16][4];
                     if (!DecodeBlock(t.format, block, snorm, t.srgb, rgba)) continue;
                     for (u32 ty = 0; ty < 4; ++ty)
                         for (u32 tx = 0; tx < 4; ++tx) {
                             const u32 x = bx * 4 + tx, y = by * 4 + ty;
-                            if (x >= lv.width || y >= lv.height) continue;
-                            auto& o = lv.texels[(size_t(z) * lv.height + y) * lv.width + x];
+                            if (x >= lv->width || y >= lv->height) continue;
+                            auto& o = lv->texels[(size_t(z) * lv->height + y) * lv->width + x];
                             for (int c = 0; c < 4; ++c) o[c] = U(rgba[ty * 4 + tx][c]);
                         }
                     continue;
                 }
-                auto& o = lv.texels[(size_t(z) * lv.height + by) * lv.width + bx];
+                auto& o = lv->texels[(size_t(z) * lv->height + by) * lv->width + bx];
                 if (t.format == 0x21) {          // R11G11B10F
                     u32 v; std::memcpy(&v, block, 4);
                     o = {U(SmallFloat(v & 0x7FF, 6)), U(SmallFloat((v >> 11) & 0x7FF, 6)), U(SmallFloat(v >> 22, 5)), U(1.0f)};
@@ -470,6 +522,77 @@ const TextureSampler::Level& TextureSampler::GetLevel(Texture& tex, u32 level) {
         }
     }
     return lv;
+}
+} // namespace
+
+std::shared_ptr<DecodedLevel> DecodeTextureLevel(Gpu& gpu, const TextureInfo& t, u32 level) {
+    const LevelRegions r = GetLevelRegions(t, level, LevelDepth(t, level));
+    return DecodeFrom(gpu, t, level, r, ReadZones(gpu.MemoryManager(), r));
+}
+
+std::shared_ptr<const DecodedLevel> TextureCache::Get(const std::array<u32, 8>& tic, const TextureInfo& info, u32 level) {
+    std::lock_guard lock(m_mutex);
+    const u64 epoch = m_epoch.load(std::memory_order_relaxed);
+    const u64 gen = m_gpu.MemoryManager().Generation();
+    const Key key{tic, level};
+    auto it = m_entries.find(key);
+    if (it != m_entries.end() && !it->second.dirty && it->second.epoch == epoch && it->second.mm_generation == gen)
+        return it->second.level;
+    // Leer la memoria: si los bytes son los mismos que la ultima vez, sirve lo decodificado
+    const LevelRegions r = GetLevelRegions(info, level, LevelDepth(info, level));
+    const auto raws = ReadZones(m_gpu.MemoryManager(), r);
+    u64 h = 0xCBF29CE484222325ull;
+    for (const auto& raw : raws) h = HashBytes(raw, h);
+    if (it != m_entries.end() && it->second.hash == h) {
+        it->second.dirty = false;
+        it->second.epoch = epoch;
+        it->second.mm_generation = gen;
+        return it->second.level;
+    }
+    auto lv = DecodeFrom(m_gpu, info, level, r, raws);
+    m_decodes.fetch_add(1, std::memory_order_relaxed);
+    const size_t bytes = lv->texels.size() * sizeof(lv->texels[0]);
+    if (it == m_entries.end()) {
+        // Limite de memoria: si se pasa, se empieza de cero (los draws en curso conservan lo suyo)
+        if (m_bytes + bytes > (512ull << 20)) { m_entries.clear(); m_bytes = 0; }
+        it = m_entries.emplace(key, Entry{}).first;
+    } else {
+        m_bytes -= it->second.level ? it->second.level->texels.size() * sizeof(it->second.level->texels[0]) : 0;
+    }
+    Entry& e = it->second;
+    e.level = lv;
+    e.hash = h;
+    e.epoch = epoch;
+    e.mm_generation = gen;
+    e.dirty = false;
+    e.lo = ~0ull; e.hi = 0;
+    for (const auto& z : r.zones) { e.lo = std::min(e.lo, z.first); e.hi = std::max(e.hi, z.first + z.second); }
+    m_bytes += bytes;
+    m_count.store(m_entries.size(), std::memory_order_relaxed);
+    return lv;
+}
+
+void TextureCache::OnGpuWrite(u64 va, u64 size) {
+    if (m_count.load(std::memory_order_relaxed) == 0) return;
+    std::lock_guard lock(m_mutex);
+    for (auto& [k, e] : m_entries)
+        if (va < e.hi && va + size > e.lo) e.dirty = true;
+}
+
+void TextureCache::Clear() {
+    std::lock_guard lock(m_mutex);
+    m_entries.clear();
+    m_bytes = 0;
+    m_count.store(0, std::memory_order_relaxed);
+}
+
+const TextureSampler::Level& TextureSampler::GetLevel(Texture& tex, u32 level) {
+    auto it = tex.levels.find(level);
+    if (it != tex.levels.end()) return *it->second;
+    std::shared_ptr<const Level> lv = m_cache ? m_cache->Get(tex.words, tex.info, level)
+                                              : std::shared_ptr<const Level>(GPU::DecodeTextureLevel(m_gpu, tex.info, level));
+    tex.levels[level] = lv;
+    return *lv;
 }
 
 void TextureSampler::Texel(const Level& lv, s32 x, s32 y, s32 z, u32 out[4]) const {

@@ -36,10 +36,17 @@ class MaxwellDma;
 class Fermi2D;
 class KeplerCompute;
 class InlineToMemory;
+class TextureCache;
 
 // ----------------------------------------------------------------------------
 // Memoria virtual de la GPU
 // ----------------------------------------------------------------------------
+// Quien quiere saber que memoria escribe la GPU (la cache de texturas)
+struct GpuWriteObserver {
+    virtual ~GpuWriteObserver() = default;
+    virtual void OnGpuWrite(u64 va, u64 size) = 0;
+};
+
 class GpuMemoryManager {
 public:
     // Regiones de direcciones (las que devuelve GET_VA_REGIONS en la consola)
@@ -67,6 +74,9 @@ public:
 
     void ReadBlock(u64 va, void* dst, size_t size) const;
     void WriteBlock(u64 va, const void* src, size_t size);
+    // Puntero directo a [va, va+size) si cae entero en una pagina de 4 KB de la memoria del
+    // programa (si no, nullptr y hay que usar ReadBlock/WriteBlock)
+    u8* HostPointer(u64 va, size_t size, bool for_write);
     // Crea ya las paginas de memoria de [va, va+size) sin cambiar su contenido. Antes de
     // dibujar con varios hilos: asi ninguno crea paginas a la vez que otro.
     void Touch(u64 va, u64 size);
@@ -74,6 +84,11 @@ public:
     template <typename T> void Write(u64 va, T v) { WriteBlock(va, &v, sizeof(T)); }
 
     size_t MappingCount() const { return m_maps.size(); }
+    // Cambia cada vez que se proyecta o quita memoria
+    u64 Generation() const { return m_generation; }
+    // La GPU escribio [va, va+size) sin pasar por WriteBlock (el rasterizador): avisar
+    void NotifyWrite(u64 va, u64 size) { if (m_observer) m_observer->OnGpuWrite(va, size); }
+    void SetWriteObserver(GpuWriteObserver* o) { m_observer = o; }
 
 private:
     struct Mapping { u64 size; u64 cpu; };
@@ -81,6 +96,7 @@ private:
     const std::pair<const u64, Mapping>* Find(u64 va) const;
 
     Core::Memory& m_memory;
+    GpuWriteObserver* m_observer = nullptr;
     std::map<u64, u64> m_reserved;        // inicio -> tamano (espacio de direcciones ocupado)
     std::map<u64, Mapping> m_maps;        // inicio -> proyeccion
     // Cambia cada vez que cambian las proyecciones (invalida la cache de Find de cada hilo).
@@ -195,6 +211,8 @@ public:
     ~Gpu();
 
     GpuMemoryManager& MemoryManager() { return m_mm; }
+    // Texturas ya decodificadas (compartidas entre draws)
+    TextureCache& Textures() { return *m_textures; }
     Syncpoints& GetSyncpoints() { return m_syncpoints; }
     Core::Memory& CpuMemory() { return m_memory; }
 
@@ -231,6 +249,8 @@ public:
         u64 draws_skipped = 0;    // dibujos ignorados (algo no soportado todavia)
         u64 shader_errors = 0;    // shaders con instrucciones que aun no sabemos ejecutar
         u64 unknown_methods = 0;
+        u64 busy_ns = 0;
+        u64 fs_instructions = 0;  // instrucciones de shaders de pixeles ejecutadas          // tiempo trabajando (modo con hilo propio)
     };
     Stats& GetStats() { return m_stats; }
 
@@ -242,6 +262,7 @@ private:
 
     Core::Memory& m_memory;
     GpuMemoryManager m_mm;
+    std::unique_ptr<TextureCache> m_textures;
     Syncpoints m_syncpoints;
     std::vector<std::unique_ptr<Channel>> m_channels;
     Stats m_stats;

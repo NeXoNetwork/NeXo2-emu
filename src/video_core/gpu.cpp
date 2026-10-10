@@ -1,5 +1,7 @@
+#include <chrono>
 #include <atomic>
 #include "gpu.hpp"
+#include "texture.hpp"
 #include "engines.hpp"
 #include "memory.hpp"
 #include "common/logger.hpp"
@@ -110,6 +112,16 @@ void GpuMemoryManager::ReadBlock(u64 va, void* dst, size_t size) const {
     }
 }
 
+u8* GpuMemoryManager::HostPointer(u64 va, size_t size, bool for_write) {
+    const auto* m = Find(va);
+    if (!m || va - m->first + size > m->second.size) return nullptr;
+    const u64 cpu = m->second.cpu + (va - m->first);
+    const u64 in_page = cpu % Core::Memory::PAGE_SIZE;
+    if (in_page + size > Core::Memory::PAGE_SIZE) return nullptr;
+    u8* page = m_memory.PageData(cpu, for_write);
+    return page ? page + in_page : nullptr;
+}
+
 void GpuMemoryManager::Touch(u64 va, u64 size) {
     while (size > 0) {
         const auto* m = Find(va);
@@ -122,6 +134,7 @@ void GpuMemoryManager::Touch(u64 va, u64 size) {
 }
 
 void GpuMemoryManager::WriteBlock(u64 va, const void* src, size_t size) {
+    NotifyWrite(va, size);
     auto* in = static_cast<const u8*>(src);
     while (size > 0) {
         const auto* m = Find(va);
@@ -267,6 +280,7 @@ void Channel::BindSubchannel(u32 subchannel, u32 class_id) {
 
 void Channel::SubmitGpfifo(const std::vector<u64>& entries) {
     ++m_gpu.GetStats().submits;
+    m_gpu.Textures().NewEpoch();   // la CPU puede haber cambiado texturas desde el envio anterior
     for (u64 entry : entries) {
         const u64 va = entry & 0xFF'FFFF'FFFCull;
         const u32 words = u32((entry >> 42) & 0x1FFFFF);
@@ -368,7 +382,9 @@ void Channel::HostMethod(u32 method, u32 arg) {
 //  Gpu
 // ============================================================================
 
-Gpu::Gpu(Core::Memory& memory) : m_memory(memory), m_mm(memory) {}
+Gpu::Gpu(Core::Memory& memory) : m_memory(memory), m_mm(memory), m_textures(std::make_unique<TextureCache>(*this)) {
+    m_mm.SetWriteObserver(m_textures.get());
+}
 Gpu::~Gpu() { SetAsync(false); }
 
 // ---- Hilo de la GPU ----------------------------------------------------------
@@ -424,7 +440,9 @@ void Gpu::WorkerLoop() {
             task = std::move(m_queue.front());
             m_queue.pop_front();
         }
+        const auto t0 = std::chrono::steady_clock::now();
         task();
+        m_stats.busy_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
         {
             std::lock_guard lock(m_queueMutex);   // con el candado: nadie se pierde el aviso
             m_completed.fetch_add(1, std::memory_order_acq_rel);
@@ -473,6 +491,7 @@ void Gpu::Reset() {
     WaitIdle();
     m_channels.clear();
     m_mm.Reset();
+    m_textures->Clear();
     m_syncpoints.Reset();
     m_stats = {};
     m_warned.clear();

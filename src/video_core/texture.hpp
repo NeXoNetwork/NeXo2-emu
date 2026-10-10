@@ -10,8 +10,10 @@
 // Campos: cabeceras publicas de NVIDIA (open-gpu-doc, clb197tex.h: TEXHEAD_BL,
 // TEXHEAD_PITCH y TEXSAMP). Ver docs/07-nexo-internals/gpu-textures.md.
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include "gpu.hpp"
@@ -63,30 +65,72 @@ bool TextureFormatCompressed(u32 format);
 u64 TextureLevelOffset(const TextureInfo& t, u32 level);
 u64 TextureLayerSize(const TextureInfo& t);
 
+// Un nivel de una textura ya decodificado: 4 valores de 32 bits por texel
+struct DecodedLevel {
+    u32 width = 0, height = 0, depth = 0;   // depth = capas o profundidad
+    std::vector<std::array<u32, 4>> texels; // [z][y][x]
+};
+
+// Cache de texturas decodificadas, compartida por todos los draws (y sus hilos).
+// Decodificar una textura entera es caro; un programa usa las mismas (fuentes, iconos)
+// en cada draw. Antes de reutilizar un nivel se comprueba que la memoria no ha cambiado
+// (un hash de los bytes), como mucho una vez por envio de comandos: entre envios la CPU
+// puede haber escrito, y dentro de un envio la GPU avisa de lo que escribe (OnGpuWrite).
+class TextureCache final : public GpuWriteObserver {
+public:
+    explicit TextureCache(Gpu& gpu) : m_gpu(gpu) {}
+    std::shared_ptr<const DecodedLevel> Get(const std::array<u32, 8>& tic, const TextureInfo& info, u32 level);
+    void OnGpuWrite(u64 va, u64 size) override;
+    void NewEpoch() { m_epoch.fetch_add(1, std::memory_order_relaxed); }
+    void Clear();
+    size_t Size() const { return m_count.load(std::memory_order_relaxed); }
+    u64 Decodes() const { return m_decodes.load(std::memory_order_relaxed); }
+
+private:
+    struct Key {
+        std::array<u32, 8> tic;
+        u32 level;
+        auto operator<=>(const Key&) const = default;
+    };
+    struct Entry {
+        std::shared_ptr<const DecodedLevel> level;
+        u64 hash = 0;
+        u64 epoch = 0, mm_generation = 0;
+        bool dirty = false;
+        u64 lo = 0, hi = 0;       // direcciones de la GPU que ocupa
+    };
+    Gpu& m_gpu;
+    std::mutex m_mutex;
+    std::map<Key, Entry> m_entries;
+    std::atomic<u64> m_epoch{1};
+    std::atomic<size_t> m_count{0};
+    std::atomic<u64> m_decodes{0};
+    size_t m_bytes = 0;
+};
+
 // Muestrea texturas para un draw. Guarda cada nivel ya decodificado (como valores de 32
 // bits por componente) para no leer y decodificar la memoria en cada pixel.
 class TextureSampler {
 public:
-    TextureSampler(Gpu& gpu, u64 tic_pool, u32 tic_max, u64 tsc_pool, u32 tsc_max)
-        : m_gpu(gpu), m_ticPool(tic_pool), m_ticMax(tic_max), m_tscPool(tsc_pool), m_tscMax(tsc_max) {}
+    // 'cache' (opcional): niveles ya decodificados compartidos entre draws
+    TextureSampler(Gpu& gpu, u64 tic_pool, u32 tic_max, u64 tsc_pool, u32 tsc_max, TextureCache* cache = nullptr)
+        : m_gpu(gpu), m_ticPool(tic_pool), m_ticMax(tic_max), m_tscPool(tsc_pool), m_tscMax(tsc_max), m_cache(cache) {}
     // 'out' recibe 4 valores de 32 bits (floats, o enteros en formatos enteros)
     void Sample(u32 handle, const TextureRequest& req, u32 out[4]);
     // textureSize: ancho, alto, profundidad/capas y numero de niveles del nivel 'lod'
     void Query(u32 handle, u32 lod, u32 out[4]);
     // Otro muestreador de las mismas tablas, vacio (para otro hilo: cada uno con su cache)
     std::unique_ptr<TextureSampler> CloneEmpty() const {
-        return std::make_unique<TextureSampler>(m_gpu, m_ticPool, m_ticMax, m_tscPool, m_tscMax);
+        return std::make_unique<TextureSampler>(m_gpu, m_ticPool, m_ticMax, m_tscPool, m_tscMax, m_cache);
     }
 
 private:
-    struct Level {
-        u32 width = 0, height = 0, depth = 0;   // depth = capas o profundidad
-        std::vector<std::array<u32, 4>> texels; // [z][y][x]
-    };
+    using Level = DecodedLevel;
     struct Texture {
         TextureInfo info;
+        std::array<u32, 8> words{};             // descriptor tal cual (clave de la cache)
         bool is_int = false;                    // formato entero: sin filtrar, sin convertir
-        std::map<u32, Level> levels;
+        std::map<u32, std::shared_ptr<const Level>> levels;
     };
     Texture* GetTexture(u32 tic);
     const Level& GetLevel(Texture& t, u32 level);
@@ -100,6 +144,10 @@ private:
     u32 m_tscMax;
     std::map<u32, Texture> m_textures;
     std::map<u32, SamplerInfo> m_samplers;
+    TextureCache* m_cache = nullptr;
 };
+
+// Decodifica un nivel de una textura leyendo la memoria de la GPU (sin cache)
+std::shared_ptr<DecodedLevel> DecodeTextureLevel(Gpu& gpu, const TextureInfo& t, u32 level);
 
 } // namespace NeXo2::GPU

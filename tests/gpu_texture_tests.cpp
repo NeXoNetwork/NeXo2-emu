@@ -383,3 +383,43 @@ TEST(Texture_DescriptorDecodeAndLevelOffsets) {
     // Nivel 2: 75x50 -> 300 bytes = 5 GOBs; 50 filas: el bloque baja a 8 GOBs (64 filas, 4 KiB)
     CHECK_EQ(GPU::TextureLevelOffset(t, 3) - GPU::TextureLevelOffset(t, 2), 5ull * 4096);
 }
+
+TEST(Texture_CacheReusesAndSeesChanges) {
+    // La cache de texturas reutiliza lo decodificado entre draws, pero ve los cambios:
+    // los de la GPU (WriteBlock) enseguida, y los de la CPU en el siguiente envio
+    TexFixture f;
+    auto put = [&](u32 rgba) { f.Write(TEXMEM, &rgba, 4); };
+    put(Rgba(255, 0, 0));
+    TicDesc tic;
+    const auto t = MakeTic(tic);
+    f.Write(TIC, t.data(), 32);
+    const auto s = MakeTsc(TscDesc{});
+    f.Write(TSC, s.data(), 32);
+    auto& cache = f.gpu.Textures();
+    auto red = [&]() {
+        GPU::TextureSampler sampler(f.gpu, TIC, 15, TSC, 0, &cache);   // uno nuevo por "draw"
+        GPU::TextureRequest r;
+        r.fetch = true;
+        u32 v[4];
+        sampler.Sample(0, r, v);
+        float x; std::memcpy(&x, &v[0], 4);
+        return x;
+    };
+    const u64 d0 = cache.Decodes();
+    CHECK(red() > 0.99f);
+    CHECK(red() > 0.99f);
+    CHECK_EQ(cache.Decodes(), d0 + 1);              // el segundo draw no decodifica
+    // La GPU escribe la textura: se nota sin esperar al siguiente envio
+    put(Rgba(0, 0, 0));
+    CHECK(red() < 0.01f);
+    // La CPU escribe: se ve en el siguiente envio (nueva "epoca")
+    const u32 white = Rgba(255, 255, 255);
+    f.mem.WriteBytes(*f.gpu.MemoryManager().Translate(TEXMEM), &white, 4);
+    cache.NewEpoch();
+    CHECK(red() > 0.99f);
+    // Nueva epoca sin cambios: se comprueba (hash) pero no se decodifica otra vez
+    const u64 d1 = cache.Decodes();
+    cache.NewEpoch();
+    CHECK(red() > 0.99f);
+    CHECK_EQ(cache.Decodes(), d1);
+}

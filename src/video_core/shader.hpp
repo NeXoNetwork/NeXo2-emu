@@ -114,6 +114,15 @@ public:
     virtual ~ShaderEnv() = default;
     // c[index][offset]
     virtual u32 ReadConst(u32 index, u32 offset) = 0;
+    // Atajo (opcional): si cb_direct, los constbufs ya estan en memoria y el interprete los
+    // lee de aqui sin llamar a ReadConst (se lee muchas veces por pixel).
+    bool cb_direct = false;
+    const u32* cb_data[18] = {};
+    u32 cb_words[18] = {};
+    u32 Const(u32 index, u32 offset) {
+        if (cb_direct) return index < 18 && offset / 4 < cb_words[index] ? cb_data[index][offset / 4] : 0;
+        return ReadConst(index, offset);
+    }
     // Atributos: a[addr]. En un shader de vertices: entradas (posicion, color...) y
     // valores del sistema (VertexID...). AST escribe las salidas.
     virtual u32 ReadAttribute(u32 addr) = 0;
@@ -181,7 +190,7 @@ public:
 
     u32 Reg(u32 i) const { return i < 255 ? m_r[i] : 0; }
     float RegF(u32 i) const;
-    void SetReg(u32 i, u32 v) { if (i < 255) m_r[i] = v; }
+    void SetReg(u32 i, u32 v) { if (i < 255) { m_r[i] = v; if (i >= m_dirty) m_dirty = i + 1; } }
 
     // Limite de instrucciones por hilo (evita colgarse con un bucle infinito)
     u64 max_steps = 1'000'000;
@@ -196,6 +205,7 @@ private:
     std::vector<StackEntry> m_stack;
     std::vector<u8> m_local;
     std::array<u32, 256> m_r{};
+    u32 m_dirty = 0;   // registros [0, m_dirty) pueden no ser 0 (Run solo limpia esos)
     std::array<bool, 8> m_p{};
     bool m_ccZero = false, m_ccSign = false, m_ccCarry = false, m_ccOverflow = false;
 };

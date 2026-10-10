@@ -88,12 +88,38 @@ The pixel shader is interpreted for each pixel, so this is the slow part. Two th
   rows, and each CPU thread takes every N-th band and walks *all* triangles of the draw in
   order. A pixel is always written by the same thread and in the same order as on the GPU,
   so depth tests and blending give exactly the same result as with one thread. Each thread
-  has its own interpreter, its own copy of the decoded shader and its own texture cache;
-  constant buffers and the memory pages of the targets are loaded before the threads start.
+  has its own interpreter and its own copy of the decoded shader; decoded textures are
+  shared (see below). Constant buffers and the memory pages of the targets are loaded
+  before the threads start.
   Draws smaller than about 1000 pixels stay on one thread. `NEXO2_GPU_THREADS=1` (environment
   variable) forces one thread, to compare or debug.
 - **Fast clears.** Clearing a whole surface with one colour writes the memory in large
   blocks (the block linear order doesn't matter when every pixel is the same).
+- **Shared texture cache.** Decoding a texture (block linear to 4 values per texel) is
+  slow, and a program uses the same ones (font atlas, icons) in every draw. Decoded levels
+  live in `TextureCache` (one per GPU, shared by all draws and threads), keyed by the
+  32-byte image descriptor and the level. Before reusing a level the cache makes sure the
+  memory hasn't changed: GPU writes (`WriteBlock`, and the render targets after each draw
+  through `NotifyWrite`) mark overlapping entries dirty, and at each GPFIFO submit a new
+  "epoch" starts, because the CPU may have written in between. A dirty or old entry is
+  checked with a 64-bit hash of its bytes and only decoded again if the hash changed.
+- **Uniform shaders.** The `PixelEnv` notes whether the shader read anything that changes
+  per pixel (attributes, textures, gl_FragCoord, system registers). If it didn't (a
+  rectangle of one colour, very common in 2D interfaces), the result of the first pixel is
+  used for the whole triangle, and rows without blending, depth or write mask are filled
+  directly without reading them first.
+- **Direct memory.** Rows of a block linear target are copied a GOB (512 bytes, always
+  inside one 4 KB page) at a time through `GpuMemoryManager::HostPointer`, instead of
+  looking up the page every 16 bytes.
+- **Small things.** Constant buffers are read from a table (`ShaderEnv::cb_direct`), the
+  interpreter only clears the registers the last pixel used, and edge functions are
+  updated incrementally along a row.
+
+`Gpu::Stats::busy_ns` (time the GPU thread spends working) and `fs_instructions` show
+where the time goes; `NEXO2_DRAW_DEBUG=1` prints one line per draw (pixels, shader,
+target, blending). Measured with the Homebrew App Store scrolling (two full-screen fills
+and many small textured quads per frame) on a 2-core cloud machine: GPU time per frame
+went from about 200 ms to 36 ms (5 to 25 fps).
 
 Rough numbers on a 2-core cloud machine: deko3d's lit teapot with 4x MSAA went from 0.6 s
 to 0.23 s per frame. Expect more with more cores; the Vulkan backend (phase 3) is the real fix.

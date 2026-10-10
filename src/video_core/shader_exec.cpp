@@ -131,7 +131,8 @@ float ShaderInterpreter::RegF(u32 i) const { return F(Reg(i)); }
 
 ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv& env) {
     Result res;
-    m_r.fill(0);
+    std::fill_n(m_r.begin(), m_dirty, 0u);   // un pixel usa pocos registros: no limpiar los 256
+    m_dirty = 0;
     m_p.fill(false);
     m_p[7] = true;
     m_ccZero = m_ccSign = m_ccCarry = m_ccOverflow = false;
@@ -142,7 +143,9 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
     steps = 0;
 
     auto R = [&](u32 i) -> u32 { return i < 255 ? m_r[i] : 0; };
-    auto W = [&](u32 i, u32 v) { if (i < 255) m_r[i] = v; };
+    u32 dirty = 0;
+    struct DirtyFlush { u32& d; u32& out; ~DirtyFlush() { if (d > out) out = d; } } dirty_flush{dirty, m_dirty};
+    auto W = [&](u32 i, u32 v) { if (i < 255) { m_r[i] = v; if (i >= dirty) dirty = i + 1; } };
     auto P = [&](u32 i) -> bool { return m_p[i & 7]; };
     auto WP = [&](u32 i, bool v) { if ((i & 7) != 7) m_p[i & 7] = v; };
     auto fail = [&](const char* what, const ShaderInstr& in) {
@@ -182,13 +185,13 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
         auto B = [&]() -> u32 {
             switch (in.form) {
                 case ShForm::Reg: case ShForm::CbufC: return R(in.rb);
-                case ShForm::Cbuf: return env.ReadConst(in.cb_index, in.cb_offset);
+                case ShForm::Cbuf: return env.Const(in.cb_index, in.cb_offset);
                 case ShForm::Imm: case ShForm::Imm32: return in.imm;
                 default: return 0;
             }
         };
         auto C = [&]() -> u32 {
-            if (in.form == ShForm::CbufC) return env.ReadConst(in.cb_index, in.cb_offset);
+            if (in.form == ShForm::CbufC) return env.Const(in.cb_index, in.cb_offset);
             return R(in.rc);
         };
         auto set_cc_int = [&](u32 v) { m_ccZero = v == 0; m_ccSign = s32(v) < 0; };
@@ -667,7 +670,7 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
                 const u32 addr = u32(s32(s16(u16(in.Bits(20, 16))))) + R(in.ra);
                 const u32 words = size == 5 ? 2 : size == 6 ? 4 : 1;
                 for (u32 i = 0; i < words; ++i) {
-                    u32 v = env.ReadConst(idx, (addr & ~3u) + 4 * i);
+                    u32 v = env.Const(idx, (addr & ~3u) + 4 * i);
                     if (size < 4) {   // 8 o 16 bits
                         v >>= (addr & 3) * 8;
                         if (size == 0) v &= 0xFF;
@@ -748,7 +751,7 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
                                                    true, true, false, true, false, false, false, false};
                 if (!fetch && k_texs_lz[target]) { req.explicit_lod = true; req.lod = 0; }
                 u32 val[4];
-                env.SampleTexture(env.ReadConst(env.TextureConstbuf(), in.Bits(36, 13) * 4), req, val);
+                env.SampleTexture(env.Const(env.TextureConstbuf(), in.Bits(36, 13) * 4), req, val);
                 // Que componentes se escriben (orden R, G, B, A)
                 static const u8 k_one[8] = {0x1, 0x2, 0x4, 0x8, 0x3, 0x9, 0xA, 0xC};
                 static const u8 k_two[8] = {0x7, 0xB, 0xD, 0xE, 0xF, 0xF, 0xF, 0xF};
@@ -792,7 +795,7 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
                 }
                 if (dc) { req.depth_compare = true; req.dref = F(nextb()); }
                 u32 val[4];
-                env.SampleTexture(env.ReadConst(env.TextureConstbuf(), in.Bits(36, 13) * 4), req, val);
+                env.SampleTexture(env.Const(env.TextureConstbuf(), in.Bits(36, 13) * 4), req, val);
                 const u32 mask = in.Bits(31, 4);
                 u32 d = in.rd;
                 for (u32 c = 0; c < 4; ++c)
@@ -803,7 +806,7 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
                 const u32 query = in.Bits(22, 6);
                 if (query != 1) { fail("consulta de textura no soportada (solo tamano)", in); return res; }
                 u32 val[4];
-                env.QueryTexture(env.ReadConst(env.TextureConstbuf(), in.Bits(36, 13) * 4), R(in.ra), val);
+                env.QueryTexture(env.Const(env.TextureConstbuf(), in.Bits(36, 13) * 4), R(in.ra), val);
                 const u32 mask = in.Bits(31, 4);
                 u32 d = in.rd;
                 for (u32 c = 0; c < 4; ++c)

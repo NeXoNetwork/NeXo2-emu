@@ -67,14 +67,42 @@ float HalfToFloat(u16 h) {
 
 // Lineas de un render target en memoria (como en engines.cpp: el block linear se
 // escribe en trozos de 16 bytes, que dentro de un GOB son seguidos)
+// Posicion dentro de un GOB del byte 'o' (0..63) de una fila (la parte de la fila ya va en la base)
+inline u32 GobColumn(u32 o) { return (o / 32) * 256 + ((o % 32) / 16) * 32 + (o % 16); }
+
+// Copia la parte [gx, gx+n) de la fila 'y' de un GOB. Camino rapido: el GOB (512 bytes
+// seguidos) esta en una pagina de memoria y se copia directamente; si no, de 16 en 16 bytes.
+template <bool Write>
+void GobSpan(GpuMemoryManager& mm, const Surface& s, u32 xb, u32 y, u32 n, u8* buf) {
+    const u32 gx = xb % 64;
+    const u64 row = s.address + BlockLinearOffset(xb - gx, y, s.width * s.bytes_per_pixel, s.block_height_log2);
+    u8* gob = (s.address & 511) == 0 ? mm.HostPointer(row & ~511ull, 512, Write) : nullptr;
+    if (gob) {
+        u8* base = gob + (row & 511);
+        for (u32 o = gx; o < gx + n;) {
+            const u32 piece = std::min(16 - (o % 16), gx + n - o);
+            if constexpr (Write) std::memcpy(base + GobColumn(o), buf, piece);
+            else std::memcpy(buf, base + GobColumn(o), piece);
+            o += piece; buf += piece;
+        }
+        return;
+    }
+    for (u32 o = gx; o < gx + n;) {
+        const u32 piece = std::min(16 - (o % 16), gx + n - o);
+        if constexpr (Write) mm.WriteBlock(row + GobColumn(o), buf, piece);
+        else mm.ReadBlock(row + GobColumn(o), buf, piece);
+        o += piece; buf += piece;
+    }
+}
+
 void ReadSpan(GpuMemoryManager& mm, const Surface& s, u32 x, u32 y, u32 count, u8* out) {
     const u32 bpp = s.bytes_per_pixel;
     u32 xb = x * bpp, size = count * bpp;
     if (s.linear) { mm.ReadBlock(s.address + u64(y) * s.pitch + xb, out, size); return; }
     while (size > 0) {
-        const u32 chunk = std::min(size, 16 - (xb % 16));
-        mm.ReadBlock(s.address + BlockLinearOffset(xb, y, s.width * bpp, s.block_height_log2), out, chunk);
-        xb += chunk; out += chunk; size -= chunk;
+        const u32 n = std::min(size, 64 - (xb % 64));   // hasta el final del GOB
+        GobSpan<false>(mm, s, xb, y, n, out);
+        xb += n; out += n; size -= n;
     }
 }
 void WriteSpan(GpuMemoryManager& mm, const Surface& s, u32 x, u32 y, u32 count, const u8* in);
@@ -105,9 +133,9 @@ void WriteSpan(GpuMemoryManager& mm, const Surface& s, u32 x, u32 y, u32 count, 
     u32 xb = x * bpp, size = count * bpp;
     if (s.linear) { mm.WriteBlock(s.address + u64(y) * s.pitch + xb, in, size); return; }
     while (size > 0) {
-        const u32 chunk = std::min(size, 16 - (xb % 16));
-        mm.WriteBlock(s.address + BlockLinearOffset(xb, y, s.width * bpp, s.block_height_log2), in, chunk);
-        xb += chunk; in += chunk; size -= chunk;
+        const u32 n = std::min(size, 64 - (xb % 64));
+        GobSpan<true>(mm, s, xb, y, n, const_cast<u8*>(in));
+        xb += n; in += n; size -= n;
     }
 }
 
@@ -429,6 +457,7 @@ struct SoftwareRasterizer::Worker {
     TextureSampler* tex = nullptr;
     std::unique_ptr<TextureSampler> own_tex;    // texturas decodificadas por este hilo
     std::vector<u8> ms_tmp;
+    u64 fs_steps = 0;
     std::vector<std::vector<u8>> rows;
     std::vector<u8> zrow;
     u64 pixels = 0;
@@ -454,9 +483,10 @@ void SoftwareRasterizer::RasterizeAll(DrawState& st) {
         area += std::fabs(double(t.sv[1].x - t.sv[0].x) * (t.sv[2].y - t.sv[0].y) -
                           double(t.sv[2].x - t.sv[0].x) * (t.sv[1].y - t.sv[0].y)) * 0.5;
     const u32 n = area < 1024 ? 1 : m_pool->Size();
+    // Constbufs del shader de pixeles: se cargan ya (los hilos solo los leen)
+    for (u32 i = 0; i < 18; ++i) st.ReadConst(st.fs_group, i, 0);
     if (n > 1) {
-        // Lo que se carga "la primera vez" se carga ya, antes de repartir el trabajo
-        for (u32 i = 0; i < 18; ++i) st.ReadConst(st.fs_group, i, 0);
+        // Lo demas que se carga "la primera vez" tambien se carga ya, antes de repartir el trabajo
         for (const auto& t : st.targets) st.mm->Touch(t.surf.address, t.surf.SizeBytes());
         if (st.depth_enabled) st.mm->Touch(st.zsurf.address, st.zsurf.SizeBytes());
     }
@@ -482,6 +512,7 @@ void SoftwareRasterizer::RasterizeAll(DrawState& st) {
     });
     for (auto& w : workers) {
         st.pixels += w.pixels;
+        m_gpu.GetStats().fs_instructions += w.fs_steps;
         if (w.failed && !st.failed) { st.failed = true; st.error = w.error; }
     }
 }
@@ -510,7 +541,7 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
     }
     auto read = [mm = st.mm](u64 a, void* d, size_t n) { mm->ReadBlock(a, d, n); };
     st.textures = std::make_unique<TextureSampler>(m_gpu, Iova(regs[TIC_POOL], regs[TIC_POOL + 1]), regs[TIC_MAX],
-                                                   Iova(regs[TSC_POOL], regs[TSC_POOL + 1]), regs[TSC_MAX]);
+                                                   Iova(regs[TSC_POOL], regs[TSC_POOL + 1]), regs[TSC_MAX], &m_gpu.Textures());
     st.tex_cb = std::min<u32>(regs[BINDLESS_TEXTURE] & 0x1F, 17);
     st.vs = std::make_unique<ShaderProgram>(region + regs[PIPELINE + 0x10 * 1 + 1], read);
     st.fs = std::make_unique<ShaderProgram>(region + regs[PIPELINE + 0x10 * 5 + 1], read);
@@ -700,11 +731,21 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
         }
         start = end + 1;
     }
-    if (!st.failed && !st.tris.empty()) RasterizeAll(st);
+    if (!st.failed && !st.tris.empty()) {
+        RasterizeAll(st);
+        // Lo dibujado puede ser una textura que la cache tiene decodificada
+        for (const auto& t : st.targets) st.mm->NotifyWrite(t.surf.address, t.surf.SizeBytes());
+        if (st.depth_enabled && st.depth_write) st.mm->NotifyWrite(st.zsurf.address, st.zsurf.SizeBytes());
+    }
     if (st.failed) {
         m_gpu.Warn("fs:" + st.error, st.error);
         ++stats.shader_errors;
     }
+    if (static const bool dbg = std::getenv("NEXO2_DRAW_DEBUG") != nullptr; dbg)
+        std::fprintf(stderr, "draw %llu: tris %llu pix %llu fs %llx rt %u fmt %X blend %d tex %d box %u,%u-%u,%u\n", (unsigned long long)stats.draws,
+            (unsigned long long)st.triangles, (unsigned long long)st.pixels, (unsigned long long)(st.fs ? st.fs->Address() : 0),
+            st.targets.empty() ? 0 : st.targets[0].surf.width, st.targets.empty() ? 0 : st.targets[0].format,
+            st.targets.empty() ? 0 : int(st.targets[0].blend), 0, st.bx0, st.by0, st.bx1, st.by1);
     ++stats.draws;
     stats.triangles += st.triangles;
     stats.pixels += st.pixels;
@@ -809,12 +850,14 @@ public:
 
     u32 ReadConst(u32 index, u32 offset) override { return read_const(index, offset); }
     u32 ReadAttribute(u32 addr) override {
+        varying = true;
         if (addr == 0x3FC) return front ? 0xFFFFFFFFu : 0;   // gl_FrontFacing
         if (addr >= 0x70 && addr < 0x80) return U(frag[(addr - 0x70) / 4]);
         return 0;
     }
     void WriteAttribute(u32, u32) override {}
     float Interpolate(u32 addr, u32 mode) override {
+        varying = true;
         if (addr >= 0x70 && addr < 0x80) return frag[(addr - 0x70) / 4];
         if (addr == 0x3FC) return front ? 1.0f : 0.0f;
         if (addr >= 0x400) return 0.0f;
@@ -826,11 +869,15 @@ public:
         return l[0] * a0 * inv_w[0] + l[1] * a1 * inv_w[1] + l[2] * a2 * inv_w[2];
     }
     u32 SystemRegister(u32 sr) override {
+        if (sr != 0x12) varying = true;
         if (sr == 0x12) return U(y_direction);   // SR_Y_DIRECTION
         return 0;
     }
-    void SampleTexture(u32 handle, const TextureRequest& req, u32 out[4]) override { tex->Sample(handle, req, out); }
-    void QueryTexture(u32 handle, u32 lod, u32 out[4]) override { tex->Query(handle, lod, out); }
+    void SampleTexture(u32 handle, const TextureRequest& req, u32 out[4]) override { varying = true; tex->Sample(handle, req, out); }
+    void QueryTexture(u32 handle, u32 lod, u32 out[4]) override { varying = true; tex->Query(handle, lod, out); }
+    // El shader leyo algo que cambia de un pixel a otro (atributos, texturas...). Si no, su
+    // resultado es el mismo en todo el triangulo y basta con ejecutarlo una vez.
+    bool varying = false;
     u32 TextureConstbuf() override { return tex_cb; }
     TextureSampler* tex = nullptr;
     u32 tex_cb = 0;
@@ -872,6 +919,12 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, Worker& w, const Raste
 
     PixelEnv env;
     env.read_const = [&st](u32 i, u32 o2) { return st.ReadConst(st.fs_group, i, o2); };
+    env.cb_direct = st.fs_group < 5;
+    if (env.cb_direct)
+        for (u32 i = 0; i < 18; ++i) {
+            env.cb_data[i] = st.cb_cache[st.fs_group][i].data();
+            env.cb_words[i] = u32(st.cb_cache[st.fs_group][i].size());
+        }
     for (int i = 0; i < 3; ++i) { env.v[i] = sv[o[i]].v; env.inv_w[i] = sv[o[i]].inv_w; }
     env.provoking = tri.provoking;
     env.tex = w.tex;
@@ -886,32 +939,64 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, Worker& w, const Raste
 
     auto& rows = w.rows;
     auto& zrow = w.zrow;
+    bool uniform = false;                         // el shader da lo mismo en todo el triangulo
+    bool uniform_enc_ready = false;
+    std::array<std::array<u8, 16>, 8> uniform_enc{};
+    std::array<bool, 8> uniform_enc_ok{};
+    // Si cada pixel de la fila se va a escribir entero (sin mezcla, sin mascara, sin
+    // profundidad y sin pixeles descartados), no hace falta leer antes la fila
+    bool overwrite = !st.depth_enabled && !w.fs->Header().KillsPixels();
+    for (const auto& tg : st.targets)
+        if (tg.blend || ColorWriteByteMask(tg.format, tg.write_mask) != (1u << tg.surf.bytes_per_pixel) - 1) overwrite = false;
     for (s64 py = miny; py < maxy && !w.failed; ++py) {
         if (bands > 1 && u32(py >> 2) % bands != band) continue;   // fila de otro hilo
         const s64 cy = py * 256 + 128;
-        // Que pixeles de esta fila estan dentro (para no leer/escribir filas vacias)
+        // Que pixeles de esta fila estan dentro (para no leer/escribir filas vacias).
+        // Las aristas cambian lo mismo en cada pixel: se suman en vez de recalcularlas.
         s64 first = -1, lastx = -1;
-        for (s64 px = minx; px < maxx; ++px) {
-            const s64 cx = px * 256 + 128;
-            if (eval(e12, cx, cy) + e12.bias >= 0 && eval(e20, cx, cy) + e20.bias >= 0 && eval(e01, cx, cy) + e01.bias >= 0) {
-                if (first < 0) first = px;
-                lastx = px;
+        {
+            const s64 cx0 = minx * 256 + 128;
+            s64 a = eval(e12, cx0, cy) + e12.bias, b = eval(e20, cx0, cy) + e20.bias, c = eval(e01, cx0, cy) + e01.bias;
+            const s64 sa = -e12.dy * 256, sb = -e20.dy * 256, sc = -e01.dy * 256;
+            for (s64 px = minx; px < maxx; ++px, a += sa, b += sb, c += sc) {
+                if ((a | b | c) >= 0) {
+                    if (first < 0) first = px;
+                    lastx = px;
+                } else if (first >= 0) {
+                    break;   // un triangulo es convexo: despues del tramo de dentro ya no hay mas
+                }
             }
         }
         if (first < 0) continue;
         const u32 fx = u32(first), n = u32(lastx - first + 1);
+        // Camino rapido: color fijo que tapa la fila entera -> rellenar y escribir
+        if (uniform && overwrite && uniform_enc_ready) {
+            bool all = true;
+            for (size_t t = 0; t < st.targets.size(); ++t) all = all && t < uniform_enc_ok.size() && uniform_enc_ok[t];
+            if (all) {
+                for (size_t t = 0; t < st.targets.size(); ++t) {
+                    const u32 bpp = st.targets[t].surf.bytes_per_pixel;
+                    rows[t].resize(size_t(n) * bpp);
+                    for (u32 i = 0; i < n; ++i) std::memcpy(&rows[t][size_t(i) * bpp], uniform_enc[t].data(), bpp);
+                    WritePixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), w.ms_tmp);
+                }
+                w.pixels += n;
+                continue;
+            }
+        }
         for (size_t t = 0; t < st.targets.size(); ++t) {
             rows[t].resize(size_t(n) * st.targets[t].surf.bytes_per_pixel);
-            ReadPixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), w.ms_tmp);
+            if (!overwrite) ReadPixels(*st.mm, st.targets[t].surf, st.msx, st.msy, fx, u32(py), n, rows[t].data(), w.ms_tmp);
         }
         if (st.depth_enabled) {
             zrow.resize(size_t(n) * st.zsurf.bytes_per_pixel);
             ReadPixels(*st.mm, st.zsurf, st.msx, st.msy, fx, u32(py), n, zrow.data(), w.ms_tmp);
         }
         bool zdirty = false;
+        const s64 fcx = first * 256 + 128;
+        s64 w0 = eval(e12, fcx, cy) + e12.dy * 256, w1 = eval(e20, fcx, cy) + e20.dy * 256, w2 = eval(e01, fcx, cy) + e01.dy * 256;
         for (s64 px = first; px <= lastx; ++px) {
-            const s64 cx = px * 256 + 128;
-            const s64 w0 = eval(e12, cx, cy), w1 = eval(e20, cx, cy), w2 = eval(e01, cx, cy);
+            w0 -= e12.dy * 256; w1 -= e20.dy * 256; w2 -= e01.dy * 256;
             if (w0 + e12.bias < 0 || w1 + e20.bias < 0 || w2 + e01.bias < 0) continue;
             env.l[0] = float(double(w0) * inv_area);
             env.l[1] = float(double(w1) * inv_area);
@@ -929,9 +1014,22 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, Worker& w, const Raste
                 DecodeDepth(st.zformat, zpx, stored);
                 if (!CompareFunc(st.depth_func, std::clamp(z, 0.0f, 1.0f), stored)) continue;
             }
-            const auto res = w.interp.Run(*w.fs, env);
-            if (!res.ok) { w.failed = true; w.error = "shader de pixeles: " + res.error; break; }
-            if (res.killed) continue;
+            if (!uniform) {
+                env.varying = false;
+                const auto res = w.interp.Run(*w.fs, env);
+                w.fs_steps += w.interp.steps;
+                if (!res.ok) { w.failed = true; w.error = "shader de pixeles: " + res.error; break; }
+                if (res.killed) {
+                    if (overwrite)   // la fila no se leyo: este pixel tiene que quedar como estaba
+                        for (size_t t = 0; t < st.targets.size(); ++t)
+                            ReadPixels(*st.mm, st.targets[t].surf, st.msx, st.msy, u32(px), u32(py), 1,
+                                       &rows[t][size_t(px - first) * st.targets[t].surf.bytes_per_pixel], w.ms_tmp);
+                    continue;
+                }
+                // Color fijo (por ejemplo un rectangulo de un solo color): los registros de
+                // salida ya tienen el resultado para todos los pixeles que quedan
+                if (!env.varying) { uniform = true; uniform_enc_ready = false; }
+            }
             ++w.pixels;
             if (st.depth_reg >= 0) z = w.interp.RegF(u32(st.depth_reg));
             z = std::clamp(z, 0.0f, 1.0f);
@@ -965,8 +1063,21 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, Worker& w, const Raste
                     }
                     std::memcpy(src, res2, sizeof(src));
                 }
-                u8 enc[16];
-                if (!EncodeColor(tg.format, src, enc)) continue;
+                u8 enc_buf[16];
+                const u8* enc = enc_buf;
+                if (uniform && !tg.blend && t < uniform_enc.size()) {
+                    if (!uniform_enc_ready) {
+                        for (size_t k = 0; k < st.targets.size() && k < uniform_enc.size(); ++k) uniform_enc_ok[k] = false;
+                        uniform_enc_ready = true;
+                    }
+                    if (!uniform_enc_ok[t]) {
+                        uniform_enc_ok[t] = EncodeColor(tg.format, src, uniform_enc[t].data());
+                        if (!uniform_enc_ok[t]) continue;
+                    }
+                    enc = uniform_enc[t].data();
+                } else if (!EncodeColor(tg.format, src, enc_buf)) {
+                    continue;
+                }
                 const u32 bytes_mask = ColorWriteByteMask(tg.format, tg.write_mask);
                 for (u32 bi = 0; bi < tg.surf.bytes_per_pixel; ++bi)
                     if (bytes_mask & (1u << bi)) dst_px[bi] = enc[bi];

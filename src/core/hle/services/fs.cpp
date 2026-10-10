@@ -222,8 +222,11 @@ FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
         std::error_code ec;
         const auto ft = fs::last_write_time(p, ec);
         if (ec) { ctx.SetResult(RESULT_PATH_NOT_FOUND); return; }
-        const auto sys = std::chrono::file_clock::to_sys(ft);
-        const u64 secs = u64(std::max<s64>(0, std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count()));
+        // file_clock -> system_clock sin file_clock::to_sys (MSVC no lo tiene): por diferencia con "ahora"
+        const auto sys = std::chrono::system_clock::now() +
+            std::chrono::duration_cast<std::chrono::system_clock::duration>(ft - fs::file_time_type::clock::now());
+        const s64 since_epoch = s64(std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count());
+        const u64 secs = since_epoch > 0 ? u64(since_epoch) : 0;
         ctx.Push<u64>(secs);   // creado
         ctx.Push<u64>(secs);   // accedido
         ctx.Push<u64>(secs);   // modificado

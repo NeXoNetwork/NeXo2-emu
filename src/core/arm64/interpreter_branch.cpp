@@ -166,9 +166,9 @@ bool Interpreter::ExecSystemRegister(u32 instr) {
             case SysReg::TPIDR_EL0:   value = m_state.tpidr_el0;   break;
             case SysReg::TPIDRRO_EL0: value = m_state.tpidrro_el0; break;
             case SysReg::CNTFRQ_EL0:  value = TICK_FREQUENCY;      break;
-            // INSTRUCTIONS_PER_TICK instrucciones = 1 tick (la interfaz lo ata a la hora real)
+            // CPU a CPU_FREQUENCY: ver GetTicks() (la interfaz lo ata a la hora real)
             case SysReg::CNTPCT_EL0:
-            case SysReg::CNTVCT_EL0:  value = m_instructionCount / INSTRUCTIONS_PER_TICK;  break;
+            case SysReg::CNTVCT_EL0:  value = GetTicks();  break;
             case SysReg::CTR_EL0:     value = CTR_EL0_VALUE;       break;
             case SysReg::DCZID_EL0:   value = 4;                   break;
             default: return false;

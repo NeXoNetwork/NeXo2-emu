@@ -268,13 +268,13 @@ public:
 
     // ------------------------------------------------------------------
     // UserCallbacks: tiempo. Para dynarmic un "tick" es una instruccion ejecutada; el
-    // contador del sistema (CNTPCT) es instrucciones / INSTRUCTIONS_PER_TICK.
+    // contador del sistema (CNTPCT) sale de las instrucciones con GetTicks().
     // ------------------------------------------------------------------
     void AddTicks(u64 ticks) override { m_cpu.m_instructionCount += ticks; }
     u64 GetTicksRemaining() override {
         return m_end > m_cpu.m_instructionCount ? m_end - m_cpu.m_instructionCount : 0;
     }
-    u64 GetCNTPCT() override { return m_cpu.m_instructionCount / Interpreter::INSTRUCTIONS_PER_TICK; }
+    u64 GetCNTPCT() override { return m_cpu.GetTicks(); }
 
 private:
     Interpreter& m_cpu;

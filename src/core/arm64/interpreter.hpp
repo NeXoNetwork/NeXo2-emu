@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstring>
 #include <array>
 #include <functional>
@@ -47,11 +48,13 @@ public:
     // Frecuencia del contador del sistema en Switch 2 (ver
     // docs/05-switch2-system/compatibility-mode.md). La Switch 1 usaba 19.2 MHz.
     static constexpr u64 TICK_FREQUENCY = 31'250'000;
-    // Velocidad de la CPU emulada respecto al contador: 32 instrucciones por tick = 1000
-    // millones de instrucciones por segundo, mas o menos lo que hace un nucleo de la consola.
-    // (Con 1 instruccion = 1 tick la CPU emulada parecia de 31 MHz: con el reloj ligado al
-    // tiempo real, los programas que calculan mucho por fotograma iban a camara lenta.)
-    static constexpr u64 INSTRUCTIONS_PER_TICK = 32;
+    // Velocidad de la CPU emulada: la de la consola en modo portatil, 998,4 MHz (Cortex-A78C).
+    // Contamos una instruccion por ciclo, asi que el contador del sistema avanza
+    // TICK_FREQUENCY / CPU_FREQUENCY ticks por instruccion (625 / 19968, unas 32 instrucciones
+    // por tick). Con el reloj ligado al tiempo real, el programa ve una CPU de 998,4 MHz.
+    static constexpr u64 CPU_FREQUENCY = 998'400'000;
+    static constexpr u64 TICKS_NUM = 625, TICKS_DEN = 19968;   // TICK_FREQUENCY / CPU_FREQUENCY simplificado
+    static_assert(TICK_FREQUENCY * TICKS_DEN == CPU_FREQUENCY * TICKS_NUM, "fraccion de ticks incorrecta");
 
     // Se llama cuando el programa ejecuta "SVC #imm" (llamada al kernel).
     // En la Fase 4 aqui ira el kernel HLE. Por defecto solo se registra en el log.
@@ -92,9 +95,13 @@ public:
     // kernel cuando un hilo se bloquea (espera, duerme...) para cambiar a otro hilo.
     void RequestStop() { m_stopRequested = true; m_attention = true; if (m_jit) NotifyJitStop(); }
     // Adelanta el reloj (CNTPCT) sin ejecutar nada: todos los hilos estan dormidos.
-    void AddTicks(u64 ticks) { m_instructionCount += ticks * INSTRUCTIONS_PER_TICK; }
+    void AddTicks(u64 ticks) {
+        const u64 target = GetTicks() + ticks;   // menos instrucciones que lleguen a 'target' ticks
+        m_instructionCount = std::max(m_instructionCount, (target * TICKS_DEN + TICKS_NUM - 1) / TICKS_NUM);
+    }
     // Contador del sistema (CNTPCT_EL0, svcGetSystemTick), a TICK_FREQUENCY
-    u64 GetTicks() const { return m_instructionCount / INSTRUCTIONS_PER_TICK; }
+    u64 GetTicks() const { return TicksFor(m_instructionCount); }
+    static u64 TicksFor(u64 instructions) { return instructions / TICKS_DEN * TICKS_NUM + instructions % TICKS_DEN * TICKS_NUM / TICKS_DEN; }
     // Al cambiar de hilo se pierde la reserva de LDXR (como en la CPU real).
     void ClearExclusive() { m_exclusiveValid = false; if (m_jit) ClearJitExclusive(); }
 

@@ -7,6 +7,17 @@
 
 namespace NeXo2::Core {
 
+// Compare-and-swap atomico de 1, 2, 4 u 8 bytes. Si falla, 'expected' recibe el valor actual.
+static bool CasMemory(Memory& mem, u64 addr, unsigned bytes, u64& expected, u64 desired) {
+    switch (bytes) {
+        case 1: { u8  e = u8(expected);  const bool ok = mem.CompareExchange<u8>(addr, e, u8(desired));   expected = e; return ok; }
+        case 2: { u16 e = u16(expected); const bool ok = mem.CompareExchange<u16>(addr, e, u16(desired)); expected = e; return ok; }
+        case 4: { u32 e = u32(expected); const bool ok = mem.CompareExchange<u32>(addr, e, u32(desired)); expected = e; return ok; }
+        default: return mem.CompareExchange<u64>(addr, expected, desired);
+    }
+}
+
+
 using namespace NeXo2::Common;
 
 namespace {
@@ -101,28 +112,33 @@ bool Interpreter::ExecLoadStore(u32 instr) {
             SetX(rt, ReadMemory(XorSP(rn), bytes));
             return true;
         }
+        if (o3 && aop != 0) return false;   // LDAPR ya visto; el resto no existe
         const u64 address = XorSP(rn);
-        const u64 old = ReadMemory(address, bytes);
         const u64 mask = Ones(bytes * 8);
         const u64 operand = X(rs) & mask;
-        const s64 sold = SignExtend(old, bytes * 8), sop = SignExtend(operand, bytes * 8);
-        u64 result;
-        if (o3) {
-            if (aop != 0) return false;   // LDAPR y otros: pendiente
-            result = operand;             // SWP
-        } else {
-            switch (aop) {
-                case 0b000: result = old + operand;               break; // LDADD
-                case 0b001: result = old & ~operand;              break; // LDCLR
-                case 0b010: result = old ^ operand;               break; // LDEOR
-                case 0b011: result = old | operand;               break; // LDSET
-                case 0b100: result = (sold > sop) ? old : operand; break; // LDSMAX
-                case 0b101: result = (sold < sop) ? old : operand; break; // LDSMIN
-                case 0b110: result = (old > operand) ? old : operand; break; // LDUMAX
-                default:    result = (old < operand) ? old : operand; break; // LDUMIN
+        // Leer, calcular y escribir de forma atomica (otro nucleo puede tocar la misma
+        // direccion): se repite si la memoria cambio entre medias.
+        u64 old = ReadMemory(address, bytes);
+        for (;;) {
+            const s64 sold = SignExtend(old, bytes * 8), sop = SignExtend(operand, bytes * 8);
+            u64 result;
+            if (o3) {
+                result = operand;             // SWP
+            } else {
+                switch (aop) {
+                    case 0b000: result = old + operand;               break; // LDADD
+                    case 0b001: result = old & ~operand;              break; // LDCLR
+                    case 0b010: result = old ^ operand;               break; // LDEOR
+                    case 0b011: result = old | operand;               break; // LDSET
+                    case 0b100: result = (sold > sop) ? old : operand; break; // LDSMAX
+                    case 0b101: result = (sold < sop) ? old : operand; break; // LDSMIN
+                    case 0b110: result = (old > operand) ? old : operand; break; // LDUMAX
+                    default:    result = (old < operand) ? old : operand; break; // LDUMIN
+                }
             }
+            if (CasMemory(m_memory, address, bytes, old, result & mask)) break;   // si no, 'old' = actual
         }
-        WriteMemory(address, result & mask, bytes);
+        if (m_exclusiveValid && m_exclusiveAddr == address) m_exclusiveValid = false;
         SetX(rt, old);
         return true;
     } else {
@@ -194,18 +210,19 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
 
     if (!o2 && !o1) {
         if (load) {
-            // LDXR / LDAXR: lee y "reserva" la direccion
-            SetX(rt, ReadMemory(addr, bytes));
+            // LDXR / LDAXR: lee y "reserva" la direccion (y recuerda el valor)
+            const u64 v = ReadMemory(addr, bytes);
+            SetX(rt, v);
             m_exclusiveValid = true;
             m_exclusiveAddr  = addr;
+            m_exclusiveValue[0] = v;
         } else {
-            // STXR / STLXR: escribe solo si la reserva sigue viva. Ws = 0 exito, 1 fallo.
-            if (m_exclusiveValid && m_exclusiveAddr == addr) {
-                WriteMemory(addr, X(rt), bytes);
-                SetX(rs, 0, false);
-            } else {
-                SetX(rs, 1, false);
-            }
+            // STXR / STLXR: escribe solo si la reserva sigue viva y nadie (ni otro nucleo)
+            // ha cambiado la memoria desde el LDXR. Ws = 0 exito, 1 fallo.
+            u64 expected = m_exclusiveValue[0];
+            const bool ok = m_exclusiveValid && m_exclusiveAddr == addr &&
+                            CasMemory(m_memory, addr, bytes, expected, X(rt) & Ones(bytes * 8));
+            SetX(rs, ok ? 0 : 1, false);
             m_exclusiveValid = false;
         }
         return true;
@@ -221,15 +238,21 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
             SetX(rt2, hi, sf);
             m_exclusiveValid = true;
             m_exclusiveAddr  = addr;
+            m_exclusiveValue[0] = lo;
+            m_exclusiveValue[1] = hi;
         } else {
-            if (m_exclusiveValid && m_exclusiveAddr == addr) {
+            bool ok = m_exclusiveValid && m_exclusiveAddr == addr;
+            if (ok) {
                 const u64 lo = X(rt, sf), hi = X(rt2, sf);   // leer antes: Rs podria ser uno de ellos
-                WriteMemory(addr, lo, eb);
-                WriteMemory(addr + eb, hi, eb);
-                SetX(rs, 0, false);
-            } else {
-                SetX(rs, 1, false);
+                if (sf) {
+                    u64 el = m_exclusiveValue[0], eh = m_exclusiveValue[1];
+                    ok = m_memory.CompareExchange128(addr, el, eh, lo, hi);
+                } else {   // dos W = 8 bytes: un solo CAS de 64 bits
+                    u64 e = (m_exclusiveValue[0] & 0xFFFFFFFFu) | (m_exclusiveValue[1] << 32);
+                    ok = m_memory.CompareExchange<u64>(addr, e, (lo & 0xFFFFFFFFu) | (hi << 32));
+                }
             }
+            SetX(rs, ok ? 0 : 1, false);
             m_exclusiveValid = false;
         }
         return true;
@@ -241,10 +264,15 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
         const bool sf = Bit(instr, 30);
         const unsigned eb = sf ? 8 : 4;
         const u64 mask = Ones(eb * 8);
-        const u64 old_lo = ReadMemory(addr, eb), old_hi = ReadMemory(addr + eb, eb);
-        if (old_lo == (X(rs, sf) & mask) && old_hi == (X(rs + 1, sf) & mask)) {
-            WriteMemory(addr, X(rt, sf), eb);
-            WriteMemory(addr + eb, X(rt + 1, sf), eb);
+        u64 old_lo = X(rs, sf) & mask, old_hi = X(rs + 1, sf) & mask;
+        const u64 new_lo = X(rt, sf) & mask, new_hi = X(rt + 1, sf) & mask;
+        if (sf) {
+            m_memory.CompareExchange128(addr, old_lo, old_hi, new_lo, new_hi);   // si falla: valores actuales
+        } else {
+            u64 e = old_lo | (old_hi << 32);
+            m_memory.CompareExchange<u64>(addr, e, new_lo | (new_hi << 32));
+            old_lo = e & 0xFFFFFFFFu;
+            old_hi = e >> 32;
         }
         SetX(rs, old_lo, sf);
         SetX(rs + 1, old_hi, sf);
@@ -263,8 +291,8 @@ bool Interpreter::ExecLoadStoreExclusive(u32 instr) {
     if (rt2 == 0b11111) {
         // CAS / CASA / CASL / CASAL: si mem == Rs, mem = Rt. Rs recibe el valor viejo.
         const u64 mask = Ones(bytes * 8);
-        const u64 old  = ReadMemory(addr, bytes);
-        if (old == (X(rs) & mask)) WriteMemory(addr, X(rt) & mask, bytes);
+        u64 old = X(rs) & mask;
+        CasMemory(m_memory, addr, bytes, old, X(rt) & mask);   // si falla, 'old' = valor actual
         SetX(rs, old, size == 3);
         return true;
     }

@@ -15,14 +15,14 @@ namespace {
 bool g_defaultJit = false;   // ver SetDefaultJitEnabled()
 }
 
-Interpreter::Interpreter(Memory& memory) : m_memory(memory) {
-    m_memory.SetCodeWriteFlag(&m_attention);
+Interpreter::Interpreter(Memory& memory, u32 core_index) : m_memory(memory), m_coreIndex(core_index) {
+    m_memory.AddCodeWriteFlag(&m_attention);
     Reset();
     if (g_defaultJit) SetJitEnabled(true);
 }
 Interpreter::~Interpreter() {
     m_jit.reset();
-    m_memory.SetCodeWriteFlag(nullptr);
+    m_memory.RemoveCodeWriteFlag(&m_attention);
 }
 
 bool Interpreter::JitAvailable() { return JitBackend::Available(); }
@@ -127,12 +127,11 @@ Interpreter::CachePage* Interpreter::GetCachePage(u64 page_base) {
 void Interpreter::HandleCodeWrites() {
     std::array<u64, 8> pages;
     size_t count = 0;
-    if (m_memory.TakeCodeWrites(pages, count)) {
+    if (m_memory.TakeCodeWrites(m_seenCodeWrites, pages, count)) {
         for (size_t i = 0; i < count; ++i) m_decodeCache.erase(pages[i]);
     } else {
         m_decodeCache.clear();                  // demasiadas paginas: empezar de cero
     }
-    m_seenCodeWrites = m_memory.CodeWriteCount();
 }
 
 u64 Interpreter::RunCached(u64 max_steps) {

@@ -31,7 +31,7 @@ While translated code runs, dynarmic calls us back (`UserCallbacks`):
 | :--- | :--- |
 | `MemoryReadCode` | returns the instruction, and marks the page as code (`Memory::MarkCode`) |
 | `MemoryRead*/Write*` | `Memory::Read/Write` (only for pages not in the page table, see below) |
-| `MemoryWriteExclusive*` | STXR: write only if memory still holds what LDXR read |
+| `MemoryWriteExclusive*` | STXR: atomic compare-and-swap with what LDXR read (`Memory::CompareExchange`); one `ExclusiveMonitor` shared by all cores |
 | `CallSVC` | the HLE kernel, with the state exactly as the interpreter would give it |
 | `InterpreterFallback`, `ExceptionRaised` | instructions dynarmic does not know (PAC, half-precision...) are run by **our interpreter**; `BRK` stops the CPU like before |
 | `AddTicks`, `GetTicksRemaining`, `GetCNTPCT` | 1 tick = 1 instruction, same clock as the interpreter |

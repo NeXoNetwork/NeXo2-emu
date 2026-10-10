@@ -1,10 +1,12 @@
 #include "kernel.hpp"
+#include <cstdlib>
 #include "firmware.hpp"
 #include "ipc.hpp"
 #include "services/apm.hpp"
 #include "services/applet.hpp"
 #include "services/fs.hpp"
 #include "services/hid.hpp"
+#include "services/misc.hpp"
 #include "services/nvdrv.hpp"
 #include "services/set.hpp"
 #include "services/sm.hpp"
@@ -34,9 +36,11 @@ std::string Hex(u64 v) {
 namespace ConfigKey {
     constexpr u32 EndOfList            = 0;
     constexpr u32 MainThreadHandle     = 1;
+    constexpr u32 NextLoadPath         = 2;    // donde el programa deja "que cargar despues" (hbmenu)
     constexpr u32 Argv                 = 5;
     constexpr u32 SyscallAvailableHint = 6;
     constexpr u32 AppletType           = 7;
+    constexpr u32 ProcessHandle        = 10;   // handle del propio proceso (para mapear codigo)
     constexpr u32 HosVersion           = 16;
 }
 constexpr u32 CONFIG_FLAG_MANDATORY = 1;
@@ -44,13 +48,24 @@ constexpr u32 CONFIG_FLAG_MANDATORY = 1;
 
 Kernel::Kernel(Core::Memory& memory, Core::Interpreter& cpu)
     : m_memory(memory), m_cpu(cpu) {
-    m_cpu.SetSvcHandler([this](u32 imm, CPUState& state) { HandleSvc(imm, state); });
+    // Cada SVC con el candado del kernel: con varios nucleos, otro puede estar en el kernel a la vez
+    m_cpu.SetSvcHandler([this](u32 imm, CPUState& state) {
+        std::lock_guard lock(m_lock);
+        HandleSvc(imm, state);
+    });
     RegisterDefaultServices();
 }
 
 // Servicios que sm: sabe entregar. Cada servicio nuevo se anade aqui.
 void Kernel::RegisterDefaultServices() {
     m_services.Register("set:sys",  [] { return std::make_shared<SystemSettings>(); });
+    m_services.Register("set",      [] { return std::make_shared<Settings>(); });
+    m_services.Register("psm",      [] { return std::make_shared<PsmService>(); });
+    m_services.Register("bsd:u",    [] { return std::make_shared<BsdService>("bsd:u"); });
+    m_services.Register("bsd:s",    [] { return std::make_shared<BsdService>("bsd:s"); });
+    m_services.Register("nifm:u",   [] { return std::make_shared<NifmService>("nifm:u"); });
+    m_services.Register("ts",       [] { return std::make_shared<TsService>(); });
+    m_services.Register("pl:u",     [] { return std::make_shared<PlService>(); });
     m_services.Register("apm",      [] { return std::make_shared<ApmManager>(); });
     m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
     m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
@@ -68,7 +83,12 @@ void Kernel::RegisterDefaultServices() {
 }
 
 void Kernel::Reset() {
+    StopCores();        // los nucleos en hilos del PC paran antes de borrar nada
     m_gpu.WaitIdle();   // la GPU (si va en su hilo) no puede seguir usando nada de lo que se borra
+    std::lock_guard lock(m_lock);
+    m_coresHalted = false;
+    m_coreHaltReason.clear();
+    for (auto& c : m_extraCpus) if (c) c->Resume();
     m_heapSize = 0;
     m_imageSize = 0;
     m_exited = false;
@@ -144,6 +164,14 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
     };
     add_entry(ConfigKey::MainThreadHandle, CONFIG_FLAG_MANDATORY, MAIN_THREAD_HANDLE, 0);
     add_entry(ConfigKey::AppletType, 0, 0 /* Application */, 0);
+    // Buffers para envSetNextLoad: el hbmenu escribe ahi la ruta del .nro elegido y su argv
+    // y termina; el loader carga ese programa (ver System::ChainLoad).
+    m_memory.WriteBytes(Layout::NEXT_LOAD_PATH, std::string(Layout::NEXT_LOAD_PATH_SIZE, '\0').data(), Layout::NEXT_LOAD_PATH_SIZE);
+    m_memory.WriteBytes(Layout::NEXT_LOAD_ARGV, std::string(Layout::NEXT_LOAD_ARGV_SIZE, '\0').data(), Layout::NEXT_LOAD_ARGV_SIZE);
+    add_entry(ConfigKey::NextLoadPath, 0, Layout::NEXT_LOAD_PATH, Layout::NEXT_LOAD_ARGV);
+    // Handle del propio proceso: lo usan los cargadores de librerias (.so) de los ports para
+    // mapear su codigo con svcMapProcessCodeMemory. Damos el pseudo-handle "proceso actual".
+    add_entry(ConfigKey::ProcessHandle, 0, CURRENT_PROCESS_PSEUDO_HANDLE, 0);
     add_entry(ConfigKey::Argv, 0, 0, argv_str);
     add_entry(ConfigKey::SyscallAvailableHint, 0, ~0ULL, ~0ULL);
     add_entry(ConfigKey::HosVersion, 0, Firmware::HOS_VERSION, 0);
@@ -171,6 +199,22 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
 // ============================================================================
 
 void Kernel::HandleSvc(u32 imm, CPUState& s) {
+    // NEXO2_SVC_TRACE=1: cada SVC con sus argumentos y su resultado (para buscar fallos)
+    static const bool trace = [] { const char* e = std::getenv("NEXO2_SVC_TRACE"); return e && e[0] == '1'; }();
+    if (trace) {
+        char buf[160];
+        const u64 a0 = s.x[0], a1 = s.x[1], a2 = s.x[2], a3 = s.x[3];
+        HandleSvcImpl(imm, s);
+        std::snprintf(buf, sizeof(buf), "[SVC] %s(%llX, %llX, %llX, %llX) -> %X", SvcName(imm),
+                      (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2,
+                      (unsigned long long)a3, unsigned(s.x[0]));
+        Logger::Log(Logger::Level::Debug, buf);
+        return;
+    }
+    HandleSvcImpl(imm, s);
+}
+
+void Kernel::HandleSvcImpl(u32 imm, CPUState& s) {
     switch (imm) {
         case 0x01: SvcSetHeapSize(s);       return;
         case 0x02: SvcSetMemoryPermission(s); return;
@@ -189,10 +233,15 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
         case 0x0D: SvcSetThreadPriority(s); return;
         case 0x0E: SvcGetThreadCoreMask(s); return;
         case 0x0F: SvcSetThreadCoreMask(s); return;
-        case 0x10: s.x[0] = static_cast<u64>(m_currentCore); return; // GetCurrentProcessorNumber
+        case 0x10: s.x[0] = static_cast<u64>(CurCore()); return; // GetCurrentProcessorNumber
         case 0x11: SvcSignalEvent(s);       return;
         case 0x12: SvcClearEvent(s);        return;
+        case 0x04: SvcMapMemory(s, true);   return;
+        case 0x05: SvcMapMemory(s, false);  return;
         case 0x13: SvcMapSharedMemory(s);   return;
+        case 0x73: SvcSetProcessMemoryPermission(s); return;
+        case 0x77: SvcMapProcessCodeMemory(s, true);  return;
+        case 0x78: SvcMapProcessCodeMemory(s, false); return;
         case 0x14: SvcUnmapSharedMemory(s); return;
         case 0x17: SvcClearEvent(s);        return; // ResetSignal: igual que ClearEvent aqui
         case 0x18: SvcWaitSynchronization(s); return;
@@ -228,7 +277,7 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
             char buf[96];
             std::snprintf(buf, sizeof(buf), "SVC 0x%02X (%s) no implementada", imm, SvcName(imm));
             Logger::Log(Logger::Level::Warning, std::string("[HLE] ") + buf);
-            m_cpu.Halt(buf);
+            Cpu().Halt(buf);
             return;
         }
     }
@@ -265,6 +314,71 @@ void Kernel::SvcSetMemoryPermission(CPUState& s) {
     SetResult(s, Result::Success);
 }
 
+// svcMapMemory(dst = X0, src = X1, size = X2): la memoria de 'src' (heap) pasa a verse en
+// 'dst' (zona de pilas o alias) y 'src' queda inaccesible. libnx lo usa para las pilas de
+// los hilos. svcUnmapMemory(dst, src, size) la devuelve.
+void Kernel::SvcMapMemory(CPUState& s, bool map) {
+    const u64 dst = s.x[0], src = s.x[1], size = s.x[2];
+    constexpr u64 PAGE = Core::Memory::PAGE_SIZE;
+    if (dst % PAGE || src % PAGE || size % PAGE || size == 0) { SetResult(s, Result::InvalidAddress); return; }
+    if (map) {
+        const Core::MemoryRegion r = m_memory.QueryRegion(src);
+        if (r.state == MemoryState::Free || src + size > r.End()) { SetResult(s, Result::InvalidState); return; }
+        if (m_memory.QueryRegion(dst).state != MemoryState::Free) { SetResult(s, Result::InvalidCurrentMemory); return; }
+        m_memory.MovePages(dst, src, size);
+        m_memory.MapRegion(dst, size, MemoryState::Stack, MemoryPermission::ReadWrite, "pila (svcMapMemory)");
+        m_memory.MapRegion(src, size, r.state, MemoryPermission::None, r.name + " (mapeada en otro sitio)");
+    } else {
+        m_memory.MovePages(src, dst, size);
+        m_memory.UnmapRegion(dst, size);
+        const Core::MemoryRegion r = m_memory.QueryRegion(src);
+        m_memory.MapRegion(src, size, r.state, MemoryPermission::ReadWrite, "heap");
+    }
+    SetResult(s, Result::Success);
+}
+
+// svcMapProcessCodeMemory(proceso = W0, dst = X1, src = X2, size = X3): como MapMemory, pero
+// 'dst' queda como codigo (sin permisos hasta svcSetProcessMemoryPermission). Lo usan los
+// cargadores de librerias (.so) de los ports. Unmap (0x78) la devuelve a 'src'.
+void Kernel::SvcMapProcessCodeMemory(CPUState& s, bool map) {
+    const u32 process = static_cast<u32>(s.x[0]);
+    const u64 dst = s.x[1], src = s.x[2], size = s.x[3];
+    constexpr u64 PAGE = Core::Memory::PAGE_SIZE;
+    if (process != CURRENT_PROCESS_PSEUDO_HANDLE) { SetResult(s, Result::InvalidHandle); return; }
+    if (dst % PAGE || src % PAGE || size % PAGE || size == 0) { SetResult(s, Result::InvalidAddress); return; }
+    if (map) {
+        const Core::MemoryRegion r = m_memory.QueryRegion(src);
+        if (r.state == MemoryState::Free || src + size > r.End()) { SetResult(s, Result::InvalidState); return; }
+        if (m_memory.QueryRegion(dst).state != MemoryState::Free) { SetResult(s, Result::InvalidCurrentMemory); return; }
+        m_memory.MovePages(dst, src, size);
+        m_memory.MapRegion(dst, size, MemoryState::Code, MemoryPermission::ReadWrite, "codigo cargado (.so)");
+        m_memory.MapRegion(src, size, r.state, MemoryPermission::None, r.name + " (mapeada como codigo)");
+    } else {
+        m_memory.MovePages(src, dst, size);
+        m_memory.UnmapRegion(dst, size);
+        const Core::MemoryRegion r = m_memory.QueryRegion(src);
+        m_memory.MapRegion(src, size, r.state, MemoryPermission::ReadWrite, "heap");
+    }
+    SetResult(s, Result::Success);
+}
+
+// svcSetProcessMemoryPermission(proceso = W0, addr = X1, size = X2, permisos = W3)
+// (R-X para el .text de una .so cargada, R-- para .rodata, RW- para .data)
+void Kernel::SvcSetProcessMemoryPermission(CPUState& s) {
+    const u32 process = static_cast<u32>(s.x[0]);
+    const u64 addr = s.x[1], size = s.x[2];
+    const u32 perm = static_cast<u32>(s.x[3]);
+    if (process != CURRENT_PROCESS_PSEUDO_HANDLE) { SetResult(s, Result::InvalidHandle); return; }
+    if (addr % Core::Memory::PAGE_SIZE || size % Core::Memory::PAGE_SIZE || size == 0) {
+        SetResult(s, Result::InvalidAddress);
+        return;
+    }
+    const Core::MemoryRegion r = m_memory.QueryRegion(addr);
+    if (r.state == MemoryState::Free) { SetResult(s, Result::InvalidState); return; }
+    m_memory.MapRegion(addr, size, r.state, static_cast<MemoryPermission>(perm), r.name);
+    SetResult(s, Result::Success);
+}
+
 // svcQueryMemory(MemoryInfo* out = X0, addr = X2) -> W0 = resultado, W1 = PageInfo
 void Kernel::SvcQueryMemory(CPUState& s) {
     const u64 out  = s.x[0];
@@ -289,19 +403,19 @@ void Kernel::SvcExitProcess(CPUState&) {
     m_exited = true;
     // El proceso entero termina: todos sus hilos tambien
     for (auto& t : m_threads) {
-        if (t.get() == m_current.get()) t->ctx = m_cpu.GetState();
+        if (t.get() == Cur().get()) t->ctx = Cpu().GetState();
         t->state = KThread::State::Terminated;
         t->wait = KThread::Wait::None;
     }
-    m_cpu.Halt("svcExitProcess: el programa ha terminado");
+    Cpu().Halt("svcExitProcess: el programa ha terminado");
 }
 
 // svcSleepThread(ns = X0). 0, -1 y -2 significan "cede el turno" (yield).
 void Kernel::SvcSleepThread(CPUState& s) {
     const s64 ns = static_cast<s64>(s.x[0]);
-    if (!m_current) return;                       // programa sin proceso: nada que hacer
-    if (ns <= 0) { m_cpu.RequestStop(); return; } // yield: el planificador elige otro
-    Block(*m_current, KThread::Wait::Sleep, ns);
+    if (!Cur()) return;                       // programa sin proceso: nada que hacer
+    if (ns <= 0) { Cpu().RequestStop(); return; } // yield: el planificador elige otro
+    Block(*Cur(), KThread::Wait::Sleep, ns);
 }
 
 // svcCloseHandle(handle = W0)
@@ -316,12 +430,12 @@ void Kernel::SvcCloseHandle(CPUState& s) {
 
 // svcGetSystemTick -> X0 = ticks. Mismo contador que CNTPCT_EL0.
 void Kernel::SvcGetSystemTick(CPUState& s) {
-    s.x[0] = m_cpu.GetTicks();
+    s.x[0] = Cpu().GetTicks();
 }
 
 // svcBreak(reason = X0, arg = X1, size = X2): el programa ha fallado (abort, assert...).
 void Kernel::SvcBreak(CPUState& s) {
-    m_cpu.Halt("svcBreak (razon " + Hex(s.x[0]) + "): el programa ha abortado");
+    Cpu().Halt("svcBreak (razon " + Hex(s.x[0]) + "): el programa ha abortado");
 }
 
 // svcOutputDebugString(str = X0, size = X1)
@@ -423,14 +537,14 @@ u32 Kernel::CreateSessionHandle(std::shared_ptr<ServiceObject> service) {
 
 void Kernel::HaltWithMessage(const std::string& message) {
     Logger::Log(Logger::Level::Warning, "[HLE] " + message);
-    m_cpu.Halt(message);
+    Cpu().Halt(message);
 }
 
 void Kernel::ReportUnimplemented(const std::string& service_name, u32 command_id) {
     const std::string msg = "Servicio '" + service_name + "': comando " + std::to_string(command_id) +
                             " no implementado";
     Logger::Log(Logger::Level::Warning, "[HLE] " + msg);
-    m_cpu.Halt(msg);
+    Cpu().Halt(msg);
 }
 
 // svcConnectToNamedPort(nombre = X1) -> W0 = resultado, W1 = handle
@@ -491,7 +605,7 @@ u32 Kernel::ProcessIpcRequest(u32 handle, u64 message) {
     const bool is_request = req.type == CommandType::Request || req.type == CommandType::RequestWithContext;
     const bool is_control = req.type == CommandType::Control || req.type == CommandType::ControlWithContext;
     if (!is_request && !is_control) {
-        m_cpu.Halt("Mensaje IPC de tipo " + std::to_string(req.type) + " no soportado");
+        Cpu().Halt("Mensaje IPC de tipo " + std::to_string(req.type) + " no soportado");
         return Result::Success;
     }
 
@@ -521,7 +635,7 @@ u32 Kernel::ProcessIpcRequest(u32 handle, u64 message) {
         }
         auto it = state->domain_objects.find(object_id);
         if (it == state->domain_objects.end()) {
-            m_cpu.Halt("IPC: objeto de dominio " + std::to_string(object_id) + " no existe");
+            Cpu().Halt("IPC: objeto de dominio " + std::to_string(object_id) + " no existe");
             return Result::Success;
         }
         target = it->second;

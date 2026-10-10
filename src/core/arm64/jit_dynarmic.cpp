@@ -19,6 +19,7 @@
 
 #ifdef NEXO2_HAS_JIT
 #include <array>
+#include <atomic>
 #include <optional>
 #include <dynarmic/interface/A64/a64.h>
 #include <dynarmic/interface/A64/config.h>
@@ -32,15 +33,23 @@ using NeXo2::Common::Logger;
 
 #ifdef NEXO2_HAS_JIT
 
+// Monitor exclusivo comun a todos los nucleos (LDXR en uno, STXR en otro...).
+// Dynarmic lo usa para que solo un nucleo a la vez haga su "escritura exclusiva".
+Dynarmic::ExclusiveMonitor& SharedMonitor() {
+    static Dynarmic::ExclusiveMonitor monitor(8);
+    return monitor;
+}
+
 class JitImpl final : public Dynarmic::A64::UserCallbacks {
 public:
     using VAddr  = Dynarmic::A64::VAddr;
     using Vector = Dynarmic::A64::Vector;
 
-    JitImpl(Interpreter& cpu, Memory& memory) : m_cpu(cpu), m_mem(memory), m_monitor(1) {
+    JitImpl(Interpreter& cpu, Memory& memory)
+        : m_cpu(cpu), m_mem(memory), m_monitor(SharedMonitor()), m_core(cpu.CoreIndex() % 8) {
         Dynarmic::A64::UserConfig conf{};
         conf.callbacks = this;
-        conf.processor_id = 0;
+        conf.processor_id = m_core;
         conf.global_monitor = &m_monitor;
         // Registros de sistema que el codigo traducido lee directamente de nuestro CPUState
         conf.tpidrro_el0 = &cpu.m_state.tpidrro_el0;
@@ -102,7 +111,7 @@ public:
         if (m_running) m_jit->HaltExecution(Dynarmic::HaltReason::UserDefined1);
     }
     void ClearExclusive() {
-        m_monitor.ClearProcessor(0);
+        m_monitor.ClearProcessor(m_core);
         m_jit->ClearExclusiveState();
     }
     void ClearCache() { m_jit->ClearCache(); }
@@ -162,10 +171,9 @@ public:
     // El programa (o el HLE) escribio en paginas con codigo traducido: tirar esos bloques
     void CheckCodeWrites() {
         if (m_mem.CodeWriteCount() == m_seenCodeWrites) return;
-        m_seenCodeWrites = m_mem.CodeWriteCount();
         std::array<VAddr, 8> pages;
         size_t count = 0;
-        if (!m_mem.TakeCodeWrites(pages, count)) {
+        if (!m_mem.TakeCodeWrites(m_seenCodeWrites, pages, count)) {
             m_jit->ClearCache();
             stats.invalidations += 8;
             return;
@@ -201,11 +209,11 @@ public:
         CheckCodeWrites();
     }
 
-    // STXR: escribir solo si la memoria sigue teniendo lo que leyo LDXR
+    // STXR: escribir solo si la memoria sigue teniendo lo que leyo LDXR (atomico de verdad:
+    // otro nucleo puede estar escribiendo ahi a la vez)
     template <typename T>
     bool WriteExclusive(VAddr a, T value, T expected) {
-        if (m_mem.Read<T>(a) != expected) return false;
-        m_mem.Write<T>(a, value);
+        if (!m_mem.CompareExchange<T>(a, expected, value)) return false;
         CheckCodeWrites();
         return true;
     }
@@ -214,8 +222,9 @@ public:
     bool MemoryWriteExclusive32(VAddr a, u32 v, u32 e) override { return WriteExclusive(a, v, e); }
     bool MemoryWriteExclusive64(VAddr a, u64 v, u64 e) override { return WriteExclusive(a, v, e); }
     bool MemoryWriteExclusive128(VAddr a, Vector v, Vector e) override {
-        if (m_mem.Read<u64>(a) != e[0] || m_mem.Read<u64>(a + 8) != e[1]) return false;
-        MemoryWrite128(a, v);
+        u64 lo = e[0], hi = e[1];
+        if (!m_mem.CompareExchange128(a, lo, hi, v[0], v[1])) return false;
+        CheckCodeWrites();
         return true;
     }
 
@@ -279,12 +288,13 @@ public:
 private:
     Interpreter& m_cpu;
     Memory& m_mem;
-    Dynarmic::ExclusiveMonitor m_monitor;
+    Dynarmic::ExclusiveMonitor& m_monitor;
+    u32 m_core;
     std::unique_ptr<Dynarmic::A64::Jit> m_jit;
     u64 m_end = 0;
     u64 m_generation = 0;
     u64 m_seenCodeWrites = 0;
-    bool m_running = false;
+    std::atomic<bool> m_running{false};   // RequestHalt puede llegar desde otro hilo del PC
     s64 m_stepFallback = -1;   // instrucciones que hizo el interprete en un Step() (-1 = ninguna)
 };
 

@@ -49,6 +49,24 @@ NeXo follows the same layout as libnx (`nx/include/switch/sf/hipc.h`, `cmif.h`, 
   `ctx.WriteBuffer(i)` writes to B (or C if B is empty).
 - **Out interfaces:** `ctx.PushInterface(obj)` returns a new session handle, or an object id in a domain.
 
+## Small services for hbmenu and ports
+
+`src/core/hle/services/misc.cpp` and others answer like a handheld console with a full
+battery and no network:
+
+| Service | What it answers |
+| :--- | :--- |
+| `set` | Language `es`, region Europe, the list of language codes |
+| `set:sys` | Firmware version, `GetColorSetId` = dark theme |
+| `psm` | Battery 100 %, official charger, a state-change event that never fires |
+| `ts` | Temperature 35 °C |
+| `bsd:u`, `bsd:s` | Sockets: registration works, every operation returns -1 / `ENETDOWN` |
+| `nifm:u` | Network status: no connection |
+| `pl:u` | Shared fonts: a TrueType font from the PC (`NEXO2_FONT`, else Segoe UI / Arial on Windows, DejaVu on Linux) for every font type |
+| `ICommonStateGetter` 66 | `SetCpuBoostMode` (stub) |
+| `IFileSystem` 14 | `GetFileTimeStampRaw` (the PC's modification time) |
+| `ITimeZoneService` 100/201/202 | Calendar <-> POSIX time in UTC |
+
 ## Missing services stop the CPU with a clear message
 
 If a program asks `sm:` for a service NeXo does not have, it still gets a handle

@@ -57,6 +57,7 @@ CommonStateGetter::CommonStateGetter() : ServiceObject("ICommonStateGetter") {
     RegisterCommand(5, "GetOperationMode",    Reply<u8>(OPERATION_MODE_HANDHELD));
     RegisterCommand(6, "GetPerformanceMode",  Reply<u32>(0));
     RegisterCommand(9, "GetCurrentFocusState", Reply<u8>(FOCUS_STATE_IN_FOCUS));
+    RegisterStub(66, "SetCpuBoostMode");   // modo turbo de la CPU (cargas): nada que cambiar aqui
 }
 
 SelfController::SelfController() : ServiceObject("ISelfController") {

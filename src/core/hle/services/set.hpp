@@ -14,4 +14,10 @@ private:
     void GetFirmwareVersion(IpcContext& ctx);
 };
 
+// "set": ajustes que puede leer cualquier programa (idioma y region de la consola).
+class Settings final : public ServiceObject {
+public:
+    Settings();
+};
+
 } // namespace NeXo2::HLE

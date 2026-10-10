@@ -41,3 +41,21 @@ TEST(Memory_ReadWriteAndPageBorders) {
     CHECK_EQ(mem.Read<u32>(0x80000010), 0);
     CHECK(mem.Generation() != gen);
 }
+
+// svcMapMemory / svcMapProcessCodeMemory: las paginas pasan a verse en otra direccion
+TEST(Memory_MovePagesForMapMemory) {
+    Core::Memory mem;
+    const u64 src = 0x8010'0000, dst = 0x1'0400'0000;
+    mem.Write<u64>(src + 0x10, 0x1122334455667788ull);
+    mem.Write<u32>(src + 0x1FF0, 0xCAFEBABE);          // segunda pagina
+    mem.MovePages(dst, src, 0x2000);
+    CHECK_EQ(mem.Read<u64>(dst + 0x10), 0x1122334455667788ull);
+    CHECK_EQ(mem.Read<u32>(dst + 0x1FF0), 0xCAFEBABEu);
+    CHECK_EQ(mem.Read<u64>(src + 0x10), 0ull);          // el origen queda sin paginas
+    CHECK(mem.PagePointer(src) == nullptr);
+    mem.Write<u32>(dst + 0x20, 7);                      // escribir en el destino y devolver
+    mem.MovePages(src, dst, 0x2000);
+    CHECK_EQ(mem.Read<u32>(src + 0x20), 7u);
+    CHECK_EQ(mem.Read<u64>(src + 0x10), 0x1122334455667788ull);
+    CHECK(mem.PagePointer(dst) == nullptr);
+}

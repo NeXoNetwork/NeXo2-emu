@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <array>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -60,7 +61,8 @@ public:
     // En la Fase 4 aqui ira el kernel HLE. Por defecto solo se registra en el log.
     using SvcHandler = std::function<void(u32 imm, CPUState& state)>;
 
-    explicit Interpreter(Memory& memory);
+    // 'core_index': nucleo emulado de esta CPU (el JIT lo usa en el monitor exclusivo comun)
+    explicit Interpreter(Memory& memory, u32 core_index = 0);
     ~Interpreter();
     Interpreter(const Interpreter&) = delete;
     Interpreter& operator=(const Interpreter&) = delete;
@@ -93,14 +95,21 @@ public:
 
     // Termina Run() despues de la instruccion actual, SIN parar la CPU. Lo usa el
     // kernel cuando un hilo se bloquea (espera, duerme...) para cambiar a otro hilo.
+    // Se puede llamar desde otro hilo del PC (el kernel parando un nucleo).
     void RequestStop() { m_stopRequested = true; m_attention = true; if (m_jit) NotifyJitStop(); }
     // Adelanta el reloj (CNTPCT) sin ejecutar nada: todos los hilos estan dormidos.
+    // (Con un reloj externo no hace nada: ese reloj ya es la hora real.)
     void AddTicks(u64 ticks) {
+        if (m_clock) return;
         const u64 target = GetTicks() + ticks;   // menos instrucciones que lleguen a 'target' ticks
         m_instructionCount = std::max(m_instructionCount, (target * TICKS_DEN + TICKS_NUM - 1) / TICKS_NUM);
     }
     // Contador del sistema (CNTPCT_EL0, svcGetSystemTick), a TICK_FREQUENCY
-    u64 GetTicks() const { return TicksFor(m_instructionCount); }
+    u64 GetTicks() const { return m_clock ? m_clock(m_clockCtx) : TicksFor(m_instructionCount); }
+    // Reloj externo: con varios nucleos en hilos del PC cada uno ejecuta a su ritmo, asi que
+    // el contador sale de un reloj comun (la hora real, ver Kernel). nullptr = instrucciones.
+    using ClockFn = u64 (*)(const void* ctx);
+    void SetClock(ClockFn fn, const void* ctx) { m_clock = fn; m_clockCtx = ctx; }
     static u64 TicksFor(u64 instructions) { return instructions / TICKS_DEN * TICKS_NUM + instructions % TICKS_DEN * TICKS_NUM / TICKS_DEN; }
     // Al cambiar de hilo se pierde la reserva de LDXR (como en la CPU real).
     void ClearExclusive() { m_exclusiveValid = false; if (m_jit) ClearJitExclusive(); }
@@ -114,6 +123,9 @@ public:
     const JitBackend* GetJit() const { return m_jit.get(); }
     // Valor inicial para las CPUs que se creen despues (los tests lo cambian con NEXO2_TEST_JIT)
     static void SetDefaultJitEnabled(bool enabled);
+
+    // Numero de nucleo emulado de esta CPU (0..5)
+    u32  CoreIndex() const { return m_coreIndex; }
 
     u64 GetInstructionCount() const { return m_instructionCount; }
 
@@ -202,13 +214,20 @@ private:
     bool m_halted = false;
     // "Hay que mirar algo": la CPU se paro o el programa escribio en codigo.
     // Asi el bucle rapido solo comprueba una variable por instruccion.
-    bool m_attention = false;
-    bool m_stopRequested = false;   // ver RequestStop()
+    // (Atomicas: otro hilo del PC puede activarlas: escrituras en codigo, parar el nucleo.)
+    std::atomic<bool> m_attention{false};
+    std::atomic<bool> m_stopRequested{false};   // ver RequestStop()
     std::string m_haltReason;
 
-    // Monitor exclusivo para LDXR/STXR (mutex y atomicos). Version de un solo nucleo.
+    // Monitor exclusivo para LDXR/STXR. Se guarda lo que leyo LDXR y STXR solo escribe si
+    // la memoria sigue igual (compare-and-swap atomico): funciona con varios nucleos a la vez.
     bool m_exclusiveValid = false;
     u64  m_exclusiveAddr  = 0;
+    u64  m_exclusiveValue[2] = {0, 0};   // valor(es) leidos (LDXP lee dos)
+
+    ClockFn     m_clock = nullptr;
+    const void* m_clockCtx = nullptr;
+    u32         m_coreIndex = 0;
 
     bool m_cacheEnabled = true;
     std::unordered_map<u64, std::unique_ptr<CachePage>> m_decodeCache;  // base de pagina -> cache

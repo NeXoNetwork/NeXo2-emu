@@ -1,4 +1,5 @@
 #include "fs.hpp"
+#include <chrono>
 #include "hle/kernel.hpp"
 #include "common/logger.hpp"
 #include <algorithm>
@@ -165,7 +166,10 @@ FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
         if (!HostPath(ctx, 0, p)) return;
         if (fs::is_directory(p))         { ctx.Push<u32>(0); ctx.SetResult(Result::Success); }
         else if (fs::is_regular_file(p)) { ctx.Push<u32>(1); ctx.SetResult(Result::Success); }
-        else ctx.SetResult(RESULT_PATH_NOT_FOUND);
+        else {
+            Logger::Log(Logger::Level::Info, "[fs] GetEntryType(" + ToUtf8(p) + "): no existe");
+            ctx.SetResult(RESULT_PATH_NOT_FOUND);
+        }
     });
     // 8 OpenFile(u32 modo, ruta) -> IFile
     RegisterCommand(8, "OpenFile", [this](IpcContext& ctx) {
@@ -189,7 +193,11 @@ FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
         const u32 filter = ctx.Pop<u32>();
         fs::path p;
         if (!HostPath(ctx, 0, p)) return;
-        if (!fs::is_directory(p)) { ctx.SetResult(RESULT_PATH_NOT_FOUND); return; }
+        if (!fs::is_directory(p)) {
+            Logger::Log(Logger::Level::Info, "[fs] OpenDirectory(" + ToUtf8(p) + "): no existe");
+            ctx.SetResult(RESULT_PATH_NOT_FOUND);
+            return;
+        }
         ctx.PushInterface(std::make_shared<DirectoryObject>(p, filter));
         ctx.SetResult(Result::Success);
     });
@@ -205,6 +213,22 @@ FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
         std::error_code ec;
         for (const auto& e : fs::directory_iterator(p, ec)) fs::remove_all(e.path(), ec);
         ctx.SetResult(ec ? ErrorFor(ec) : Result::Success);
+    });
+    // 14 GetFileTimeStampRaw(ruta) -> creado, accedido, modificado (u64, segundos POSIX),
+    //    u8 "es hora local" y relleno hasta 0x20 bytes. En el PC solo hay fecha de modificacion.
+    RegisterCommand(14, "GetFileTimeStampRaw", [this](IpcContext& ctx) {
+        fs::path p;
+        if (!HostPath(ctx, 0, p)) return;
+        std::error_code ec;
+        const auto ft = fs::last_write_time(p, ec);
+        if (ec) { ctx.SetResult(RESULT_PATH_NOT_FOUND); return; }
+        const auto sys = std::chrono::file_clock::to_sys(ft);
+        const u64 secs = u64(std::max<s64>(0, std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count()));
+        ctx.Push<u64>(secs);   // creado
+        ctx.Push<u64>(secs);   // accedido
+        ctx.Push<u64>(secs);   // modificado
+        ctx.Push<u64>(1);      // valido (u8) + relleno
+        ctx.SetResult(Result::Success);
     });
 }
 

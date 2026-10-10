@@ -81,7 +81,31 @@ struct SpeedMeter {
 };
 static SpeedMeter g_speed;
 
+// Candado del kernel que tiene la interfaz durante su fotograma (nullptr fuera de el)
+static std::unique_lock<std::recursive_mutex>* g_uiKernelLock = nullptr;
+
+// Modo multinucleo: parar los nucleos desde la interfaz. Hay que soltar un momento el
+// candado del kernel: los nucleos lo necesitan para terminar su franja y guardar registros.
+static void StopCoresFromUi(System& sys) {
+    auto& k = sys.GetKernel();
+    if (!k.CoresRunning()) return;
+    const bool held = g_uiKernelLock && g_uiKernelLock->owns_lock();
+    if (held) g_uiKernelLock->unlock();
+    k.StopCores();
+    if (held) g_uiKernelLock->lock();
+}
+
+// Instrucciones ejecutadas por todos los nucleos (para el medidor de velocidad)
+static unsigned long long TotalInstructions(System& sys) {
+    auto& k = sys.GetKernel();
+    unsigned long long n = 0;
+    for (int c = 0; c < NeXo2::HLE::NUM_CORES; ++c)
+        if (auto* cpu = k.CoreCpu(c)) n += cpu->GetInstructionCount();
+    return n;
+}
+
 static void SetRunning(System& sys, bool run) {
+    if (!run) StopCoresFromUi(sys);   // antes de cargar, reiniciar... no puede quedar nada corriendo
     if (run == g_emuRunning) return;
     auto& cpu = sys.GetCpu();
     if (run && cpu.IsHalted()) return;   // parada: hay que reiniciar o cargar otro programa
@@ -105,6 +129,7 @@ public:
     ~EmuThread() {
         m_quit = true;
         m_thread.join();
+        m_sys.GetKernel().StopCores();
     }
 
     // La interfaz pide el candado: avisa para que el hilo de emulacion lo suelte pronto
@@ -116,8 +141,36 @@ public:
     }
 
 private:
+    // Modo multinucleo: cada nucleo emulado corre solo en su hilo del PC (Kernel::StartCores);
+    // aqui solo se arrancan y se paran. El reloj ya es la hora real: no hace falta PaceToRealTime.
+    // Devuelve false si este programa no puede ir asi (sin hilos, como la demo).
+    bool RunMulticore() {
+        auto& k = m_sys.GetKernel();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (k.CoresHalted()) {
+                k.StopCores();
+                if (m_sys.ContinueAfterExit()) {
+                    ++g_runGeneration;   // el hbmenu eligio un programa (o se vuelve a el)
+                } else {
+                    g_emuRunning = false;
+                    NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
+                        "[UI] Parada (multinucleo): " + m_sys.GetCpu().GetHaltReason());
+                }
+            } else if (g_emuRunning && !k.CoresRunning()) {
+                k.StartCores();
+                if (!k.CoresRunning()) return false;
+            } else if (!g_emuRunning && k.CoresRunning()) {
+                k.StopCores();
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        return true;
+    }
+
     void Loop() {
         while (!m_quit) {
+            if (m_sys.GetKernel().IsMulticore() && RunMulticore()) continue;
             if (!g_emuRunning || m_uiWaiting) {
                 // En pausa, o la interfaz quiere el candado: ceder un momento
                 std::this_thread::sleep_for(std::chrono::microseconds(g_emuRunning ? 0 : 2000));
@@ -130,7 +183,9 @@ private:
                 auto& cpu = m_sys.GetCpu();
                 g_runInstructions += m_sys.Run(200'000);
                 sleep_ns = PaceToRealTime(cpu);
-                if (cpu.IsHalted()) {
+                if (cpu.IsHalted() && m_sys.ContinueAfterExit()) {
+                    ++g_runGeneration;   // otro programa (lo eligio el hbmenu, o se vuelve a el)
+                } else if (cpu.IsHalted()) {
                     g_emuRunning = false;
                     NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
                         "[UI] Run: " + std::to_string(g_runInstructions.load()) + " instrucciones ejecutadas. " +
@@ -302,6 +357,12 @@ int main(int argc, char** argv) {
     System sys;
     // JIT activado por defecto (si NeXo se compilo con dynarmic). Se puede apagar en Diagnostics.
     sys.GetCpu().SetJitEnabled(true);
+    // Los 6 nucleos emulados, cada uno en su propio hilo del PC. NEXO2_MULTICORE=0 vuelve al
+    // modo de un hilo (los nucleos se turnan; es determinista, como en los tests).
+    {
+        const char* env = std::getenv("NEXO2_MULTICORE");
+        sys.GetKernel().SetMulticore(!(env && env[0] == '0'));
+    }
     // GPU en su propio hilo (dibuja mientras la CPU emulada sigue). NEXO2_GPU_ASYNC=0 la
     // vuelve sincrona, como en los tests (util para buscar fallos).
     {
@@ -358,6 +419,9 @@ int main(int argc, char** argv) {
         // Candado de la consola durante todo el fotograma de la interfaz (~1 ms);
         // se suelta antes de dibujar y esperar el vsync
         std::unique_lock<std::mutex> emuLock = emu.LockForUi();
+        // Con los nucleos en sus hilos, el kernel (hilos, salida...) tiene su propio candado
+        auto kernelLock = sys.GetKernel().Lock();
+        g_uiKernelLock = &kernelLock;
 
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -437,6 +501,7 @@ int main(int argc, char** argv) {
         bool decodeCache = cpu.IsDecodeCacheEnabled();
         if (ImGui::Checkbox("Cache de instrucciones decodificadas", &decodeCache)) {
             LogUi(decodeCache ? "Cache de decodificacion: activada" : "Cache de decodificacion: desactivada");
+            StopCoresFromUi(sys);
             cpu.SetDecodeCacheEnabled(decodeCache);
         }
         ImGui::SameLine();
@@ -453,7 +518,11 @@ int main(int argc, char** argv) {
         ImGui::Text("Paginas RAM activas: %zu (%.2f MB)",
                     mem.AllocatedPages(), mem.AllocatedBytes() / (1024.0 * 1024.0));
 
-        if (ImGui::Button("Step CPU")) { LogUi("Boton Step CPU"); cpu.Step(); }
+        if (ImGui::Button("Step CPU")) {
+            LogUi("Boton Step CPU");
+            if (kernel.IsMulticore()) LogUi("Step: solo en el modo de un hilo (NEXO2_MULTICORE=0)");
+            else cpu.Step();
+        }
         ImGui::SameLine();
         if (ImGui::Button("Reiniciar programa")) { LogUi("Boton Reiniciar programa"); SetRunning(sys, false); sys.Restart(); }
         ImGui::SameLine();
@@ -465,6 +534,7 @@ int main(int argc, char** argv) {
             bool useJit = cpu.IsJitEnabled();
             if (ImGui::Checkbox("JIT (dynarmic)", &useJit)) {
                 LogUi(useJit ? "JIT: activado" : "JIT: desactivado (interprete)");
+                StopCoresFromUi(sys);   // el hilo de emulacion los vuelve a arrancar con el cambio
                 cpu.SetJitEnabled(useJit);
             }
             if (const auto* j = cpu.GetJit(); j && cpu.IsJitEnabled()) {
@@ -518,7 +588,11 @@ int main(int argc, char** argv) {
         ImGui::SameLine();
         if (ImGui::Button(g_emuRunning ? "Pausa" : "Run")) { LogUi("Boton Run/Pausa"); SetRunning(sys, !g_emuRunning); }
         ImGui::SameLine();
-        if (ImGui::Button("Step")) { LogUi("Boton Step"); cpu.Step(); }
+        if (ImGui::Button("Step")) {
+            LogUi("Boton Step");
+            if (kernel.IsMulticore()) LogUi("Step: solo en el modo de un hilo (NEXO2_MULTICORE=0)");
+            else cpu.Step();
+        }
         ImGui::SameLine();
         if (ImGui::Button("Reiniciar")) { LogUi("Boton Reiniciar"); SetRunning(sys, false); sys.Restart(); }
         if (cpu.IsHalted())
@@ -553,10 +627,13 @@ int main(int argc, char** argv) {
 
         ImGui::TextDisabled("Tarjeta SD (sdmc:/): %s", sdmcRoot.c_str());
 
-        // Hilos del programa (6 nucleos emulados que se turnan)
+        // Hilos del programa (6 nucleos emulados: a la vez en hilos del PC, o por turnos)
         if (!kernel.Threads().empty() &&
             ImGui::CollapsingHeader("Hilos", ImGuiTreeNodeFlags_DefaultOpen)) {
             const auto& st = kernel.Stats();
+            ImGui::Text("Nucleos: %s", kernel.IsMulticore()
+                ? (kernel.CoresRunning() ? "6, cada uno en su hilo del PC (en marcha)" : "6, cada uno en su hilo del PC")
+                : "6 por turnos en un hilo del PC");
             ImGui::TextDisabled("Cambios de hilo: %llu   esperas de mutex: %llu   condvar: %llu",
                                 (unsigned long long)st.context_switches, (unsigned long long)st.mutex_waits,
                                 (unsigned long long)st.condvar_waits);
@@ -584,8 +661,9 @@ int main(int argc, char** argv) {
                                   : t->wait == TW::CondVar ? "Espera condvar" : "Esperando";
                             break;
                     }
-                    const bool running = kernel.CurrentThread() == t.get();
-                    const unsigned long long pc = running ? cpu.GetState().pc : t->ctx.pc;
+                    const bool on_cpu = kernel.CurrentThread() == t.get();
+                    const bool running = on_cpu || t->on_core >= 0;   // multinucleo: cargado en su nucleo
+                    const unsigned long long pc = on_cpu ? cpu.GetState().pc : t->ctx.pc;
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn(); ImGui::Text("%llu", (unsigned long long)t->id);
                     ImGui::TableNextColumn(); ImGui::Text("%s%s", t->name.c_str(), running ? " *" : "");
@@ -640,7 +718,7 @@ int main(int argc, char** argv) {
                 shownFrame = frame.count;
             }
         }
-        g_speed.Update(cpu.GetInstructionCount(), frameCount, g_emuRunning);
+        g_speed.Update(TotalInstructions(sys), frameCount, g_emuRunning);
         ImGui::SetNextWindowPos(ImVec2(60 * main_scale, 80 * main_scale), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(660 * main_scale, 420 * main_scale), ImGuiCond_FirstUseEver);
         ImGui::Begin("Pantalla");
@@ -670,6 +748,8 @@ int main(int argc, char** argv) {
         ImGui::End();
 
         ImGui::Render();
+        g_uiKernelLock = nullptr;
+        kernelLock.unlock();
         emuLock.unlock();   // a partir de aqui no se toca la consola: la emulacion sigue
 
         SDL_SetRenderDrawColor(renderer, 10, 10, 15, 255);

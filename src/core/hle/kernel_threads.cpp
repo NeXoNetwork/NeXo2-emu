@@ -1,6 +1,11 @@
 // Hilos, planificador y sincronizacion del kernel HLE.
 //
-// MODELO (fase 1): 6 nucleos emulados que se turnan en UN hilo del PC.
+// Dos modos:
+//   - Run(): 6 nucleos emulados que se turnan en UN hilo del PC (determinista; tests).
+//   - Multinucleo (StartCores): cada nucleo emulado en su propio hilo del PC, con su
+//     propia CPU. Comparten la memoria y el kernel (un candado: m_lock). Ver al final.
+//
+// MODELO de un hilo:
 //   - Cada hilo del programa es un KThread con sus registros guardados (ctx).
 //   - Kernel::Run() reparte "franjas" de SCHEDULER_SLICE instrucciones: va rotando
 //     por los nucleos y en cada uno ejecuta el hilo listo de mayor prioridad
@@ -26,6 +31,8 @@
 #include "arm64/fp_ops.hpp"
 #include "common/logger.hpp"
 #include <algorithm>
+#include <bit>
+#include <chrono>
 #include <cstdio>
 
 namespace NeXo2::HLE {
@@ -38,7 +45,23 @@ using Core::MemoryState;
 namespace {
 constexpr u64 NEVER = ~0ull;
 void SetResult(CPUState& s, u32 result) { s.x[0] = result; }
+// Nucleo emulado que corre en este hilo del PC (-1 = no es un hilo de nucleo)
+thread_local s32 t_core = -1;
 } // namespace
+
+Core::Interpreter& Kernel::Cpu() { return t_core >= 0 ? *CoreCpu(t_core) : m_cpu; }
+std::shared_ptr<KThread>& Kernel::Cur() { return t_core >= 0 ? m_coreThread[size_t(t_core)] : m_current; }
+s32 Kernel::CurCore() const { return t_core >= 0 ? t_core : m_currentCore; }
+
+void Kernel::SetReg(KThread& t, unsigned index, u64 value) {
+    if (t.on_core >= 0 && &t != Cur().get()) {
+        // Cargado en otro nucleo que lo esta descargando: se aplica al guardar sus registros
+        t.pending_mask |= u8(1u << index);
+        t.pending_x[index] = value;
+        return;
+    }
+    Ctx(t).x[index] = value;
+}
 
 u64 Kernel::NsToTicks(s64 ns) {
     if (ns <= 0) return 0;
@@ -47,11 +70,11 @@ u64 Kernel::NsToTicks(s64 ns) {
 }
 
 CPUState& Kernel::Ctx(KThread& t) {
-    return (&t == m_current.get()) ? m_cpu.GetState() : t.ctx;
+    return (&t == Cur().get()) ? Cpu().GetState() : t.ctx;
 }
 
 std::shared_ptr<KThread> Kernel::ThreadFromHandle(u32 handle) {
-    if (handle == CURRENT_THREAD_PSEUDO_HANDLE) return m_current;
+    if (handle == CURRENT_THREAD_PSEUDO_HANDLE) return Cur();
     return m_handles.Get<KThread>(handle);
 }
 
@@ -116,25 +139,26 @@ void Kernel::Block(KThread& t, KThread::Wait kind, s64 timeout_ns) {
     t.wait = kind;
     t.wait_order = ++m_waitCounter;
     t.deadline = (timeout_ns < 0) ? NEVER : Now() + NsToTicks(timeout_ns);
-    if (&t == m_current.get()) m_cpu.RequestStop();   // cambiar de hilo tras esta SVC
+    if (&t == Cur().get()) Cpu().RequestStop();   // cambiar de hilo tras esta SVC
 }
 
 void Kernel::SleepCurrentUntil(u64 deadline) {
-    if (!m_current || deadline <= Now()) return;
-    KThread& t = *m_current;
+    if (!Cur() || deadline <= Now()) return;
+    KThread& t = *Cur();
     t.state = KThread::State::Waiting;
     t.wait = KThread::Wait::Sleep;      // al despertar no se cambia X0 (el resultado del servicio)
     t.wait_order = ++m_waitCounter;
     t.deadline = deadline;
-    m_cpu.RequestStop();
+    Cpu().RequestStop();
 }
 
 void Kernel::Wake(KThread& t, u32 result) {
-    Ctx(t).x[0] = result;
+    SetReg(t, 0, result);
     t.state = KThread::State::Ready;
     t.wait = KThread::Wait::None;
     t.wait_objects.clear();
     t.deadline = NEVER;
+    if (m_multicore) m_coreCv.notify_all();   // su nucleo puede estar esperando trabajo
 }
 
 // Da el mutex de 'addr' al hilo de mayor prioridad que lo espera, o lo deja libre.
@@ -161,18 +185,22 @@ void Kernel::ReleaseMutex(u64 addr) {
 // recuperar su mutex: si esta libre lo coge ya; si no, se pone a esperarlo.
 void Kernel::AcquireMutexAfterWait(KThread& t, u32 result) {
     const u64 addr = t.mutex_addr;
-    const u32 value = m_memory.Read<u32>(addr);
     t.cv_key = 0;
-    if (value == 0) {
-        m_memory.Write<u32>(addr, t.mutex_tag);
-        Wake(t, result);
-    } else {
-        m_memory.Write<u32>(addr, value | MUTEX_HAS_WAITERS);
-        t.wait = KThread::Wait::Mutex;
-        t.pending_result = result;
-        t.deadline = NEVER;
-        t.wait_order = ++m_waitCounter;
+    // Con compare-and-swap: con varios nucleos, otro hilo puede estar cogiendo el mutex
+    // desde el programa (sin entrar en el kernel) justo ahora.
+    u32 value = m_memory.Read<u32>(addr);
+    for (;;) {
+        if (value == 0) {
+            if (!m_memory.CompareExchange<u32>(addr, value, t.mutex_tag)) continue;
+            Wake(t, result);
+            return;
+        }
+        if ((value & MUTEX_HAS_WAITERS) || m_memory.CompareExchange<u32>(addr, value, value | MUTEX_HAS_WAITERS)) break;
     }
+    t.wait = KThread::Wait::Mutex;
+    t.pending_result = result;
+    t.deadline = NEVER;
+    t.wait_order = ++m_waitCounter;
 }
 
 void Kernel::UpdateWaits() {
@@ -187,7 +215,7 @@ void Kernel::UpdateWaits() {
                 for (size_t i = 0; i < t.wait_objects.size(); ++i) {
                     if (t.wait_objects[i]->IsSignaled()) {
                         Wake(t, Result::Success);
-                        Ctx(t).x[1] = i;
+                        SetReg(t, 1, i);
                         break;
                     }
                 }
@@ -199,6 +227,7 @@ void Kernel::UpdateWaits() {
                     t.state = KThread::State::Ready;
                     t.wait = KThread::Wait::None;
                     t.deadline = NEVER;
+                    if (m_multicore) m_coreCv.notify_all();
                 }
                 break;
             case KThread::Wait::CondVar:
@@ -248,6 +277,7 @@ void Kernel::SwitchTo(const std::shared_ptr<KThread>& t) {
 }
 
 u64 Kernel::Run(u64 budget) {
+    if (CoresRunning()) return 0;   // los nucleos ya corren en sus hilos (StartCores)
     // Sin proceso (programa suelto de la demo o de los tests): CPU directa
     if (m_threads.empty()) return m_cpu.Run(budget);
 
@@ -332,23 +362,24 @@ void Kernel::SvcStartThread(CPUState& s) {
     if (!t) { SetResult(s, Result::InvalidHandle); return; }
     if (t->state != KThread::State::Created) { SetResult(s, Result::InvalidState); return; }
     t->state = KThread::State::Ready;
+    if (m_multicore) m_coreCv.notify_all();
     SetResult(s, Result::Success);
 }
 
 // svcExitThread(): el hilo actual termina
 void Kernel::SvcExitThread(CPUState&) {
-    KThread& t = *m_current;
+    KThread& t = *Cur();
     t.state = KThread::State::Terminated;
     t.wait = KThread::Wait::None;
     FreeTls(t.tls);
-    m_cpu.RequestStop();
+    Cpu().RequestStop();
     Logger::Log(Logger::Level::Info, "[HLE] svcExitThread: " + t.name + " ha terminado");
 
     const bool any_alive = std::any_of(m_threads.begin(), m_threads.end(),
         [](const auto& x) { return x->state != KThread::State::Terminated; });
     if (!any_alive) {
         m_exited = true;
-        m_cpu.Halt("Todos los hilos han terminado");
+        Cpu().Halt("Todos los hilos han terminado");
     }
 }
 
@@ -387,6 +418,10 @@ void Kernel::SvcSetThreadCoreMask(CPUState& s) {
     if (!t) { SetResult(s, Result::InvalidHandle); return; }
     if (core == -3) core = t->core;                 // "no cambiar el nucleo ideal"
     if (core == -2) core = 0;
+    if (core == -1) {                               // "da igual": el actual si esta en la mascara
+        if (mask == 0 || (mask >> NUM_CORES) != 0) { SetResult(s, Result::InvalidCombination); return; }
+        core = ((mask >> t->core) & 1) ? t->core : std::countr_zero(mask);
+    }
     if (core < 0 || core >= NUM_CORES) { SetResult(s, Result::InvalidCoreId); return; }
     if (mask == 0) mask = 1ull << core;
     if (!((mask >> core) & 1) || (mask >> NUM_CORES) != 0) { SetResult(s, Result::InvalidCombination); return; }
@@ -425,13 +460,13 @@ void Kernel::SvcWaitSynchronization(CPUState& s) {
     std::vector<std::shared_ptr<KObject>> objects;
     for (u32 i = 0; i < count; ++i) {
         const u32 h = m_memory.Read<u32>(handles_ptr + i * 4);
-        auto obj = (h == CURRENT_THREAD_PSEUDO_HANDLE) ? std::shared_ptr<KObject>(m_current) : m_handles.Get(h);
+        auto obj = (h == CURRENT_THREAD_PSEUDO_HANDLE) ? std::shared_ptr<KObject>(Cur()) : m_handles.Get(h);
         if (!obj) { SetResult(s, Result::InvalidHandle); return; }
         objects.push_back(std::move(obj));
     }
 
-    if (m_current && m_current->cancel_pending) {
-        m_current->cancel_pending = false;
+    if (Cur() && Cur()->cancel_pending) {
+        Cur()->cancel_pending = false;
         SetResult(s, Result::Cancelled);
         return;
     }
@@ -443,15 +478,15 @@ void Kernel::SvcWaitSynchronization(CPUState& s) {
         }
     }
     if (timeout == 0) { SetResult(s, Result::TimedOut); return; }
-    if (!m_current) {
+    if (!Cur()) {
         // Programa suelto sin proceso (sin hilos): nadie podra despertarlo nunca
         HaltWithMessage("svcWaitSynchronization: espera sin fin en un programa sin hilos");
         return;
     }
 
-    m_current->wait_objects = std::move(objects);
+    Cur()->wait_objects = std::move(objects);
     ++m_stats.sync_waits;
-    Block(*m_current, KThread::Wait::Sync, timeout);
+    Block(*Cur(), KThread::Wait::Sync, timeout);
 }
 
 // svcCancelSynchronization(handle = W0): saca al hilo de su espera (Cancelled)
@@ -474,7 +509,7 @@ void Kernel::SvcArbitrateLock(CPUState& s) {
     // Si mientras tanto el mutex cambio, el programa lo vuelve a intentar
     if (m_memory.Read<u32>(addr) != (owner | MUTEX_HAS_WAITERS)) { SetResult(s, Result::Success); return; }
 
-    KThread& t = *m_current;
+    KThread& t = *Cur();
     t.mutex_addr = addr;
     t.mutex_tag = tag;
     t.pending_result = Result::Success;
@@ -499,7 +534,7 @@ void Kernel::SvcWaitProcessWideKeyAtomic(CPUState& s) {
 
     ReleaseMutex(addr);                      // 1) soltar el mutex
     m_memory.Write<u32>(key, 1);             // 2) "hay hilos esperando en esta variable"
-    KThread& t = *m_current;
+    KThread& t = *Cur();
     t.mutex_addr = addr;
     t.mutex_tag = tag;
     t.cv_key = key;
@@ -522,6 +557,172 @@ void Kernel::SvcSignalProcessWideKey(CPUState& s) {
     const size_t n = (count <= 0) ? waiters.size() : std::min<size_t>(size_t(count), waiters.size());
     for (size_t i = 0; i < n; ++i) AcquireMutexAfterWait(*waiters[i], Result::Success);
     if (n == waiters.size()) m_memory.Write<u32>(key, 0);    // ya no queda nadie esperando
+}
+
+// ============================================================================
+//  Multinucleo: cada nucleo emulado en su propio hilo del PC
+// ============================================================================
+//
+// Cada nucleo repite: coger el candado -> UpdateWaits -> elegir el mejor hilo listo de
+// ese nucleo -> cargar sus registros en la CPU del nucleo -> soltar el candado ->
+// ejecutar SCHEDULER_SLICE instrucciones (las SVC cogen el candado) -> guardar los
+// registros. Sin trabajo, espera (como mucho 1 ms o hasta el primer plazo) a que algo
+// lo despierte (m_coreCv). Un hilo solo corre en su nucleo (t->core), como en Horizon.
+//
+// La memoria es compartida: LDXR/STXR, CAS y LDADD son atomicos de verdad
+// (Memory::CompareExchange), y cada CPU se entera de las escrituras en codigo.
+
+u64 Kernel::WallClock(const void* kernel) {
+    const auto* k = static_cast<const Kernel*>(kernel);
+    const u64 base = k->m_clockBase.load(std::memory_order_acquire);
+    if (!k->m_clockRunning.load(std::memory_order_acquire)) return base;
+    const s64 now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const s64 elapsed = now - k->m_clockStartNs.load(std::memory_order_acquire);
+    return base + (elapsed > 0 ? u64(elapsed) / 32 : 0);   // 31,25 MHz: 1 tick = 32 ns
+}
+
+void Kernel::SetMulticore(bool on) {
+    StopCores();
+    std::lock_guard lock(m_lock);
+    if (on == m_multicore) return;
+    if (on) {
+        m_clockBase = m_cpu.GetTicks();       // el reloj real sigue desde donde iba
+        m_clockRunning = false;
+        m_cpu.SetClock(&WallClock, this);
+    } else {
+        const u64 ticks = WallClock(this);
+        m_cpu.SetClock(nullptr, nullptr);
+        if (ticks > m_cpu.GetTicks()) m_cpu.AddTicks(ticks - m_cpu.GetTicks());
+    }
+    for (auto& c : m_extraCpus) if (c) c->SetClock(on ? &WallClock : nullptr, on ? this : nullptr);
+    m_multicore = on;
+}
+
+Core::Interpreter& Kernel::EnsureCoreCpu(s32 core) {
+    if (core == 0) return m_cpu;
+    auto& slot = m_extraCpus[size_t(core)];
+    if (!slot) {
+        slot = std::make_unique<Core::Interpreter>(m_memory, u32(core));
+        slot->SetSvcHandler([this](u32 imm, CPUState& state) {
+            std::lock_guard lock(m_lock);
+            HandleSvc(imm, state);
+        });
+        slot->SetClock(&WallClock, this);
+    }
+    // Mismas opciones que la CPU principal (la interfaz cambia la de m_cpu)
+    if (slot->IsJitEnabled() != m_cpu.IsJitEnabled()) slot->SetJitEnabled(m_cpu.IsJitEnabled());
+    if (slot->IsDecodeCacheEnabled() != m_cpu.IsDecodeCacheEnabled()) slot->SetDecodeCacheEnabled(m_cpu.IsDecodeCacheEnabled());
+    return *slot;
+}
+
+void Kernel::StartCores() {
+    std::unique_lock lock(m_lock);
+    if (!m_multicore || !m_coreThreads.empty() || m_threads.empty() || m_cpu.IsHalted()) return;
+    // Los registros del hilo cargado en la CPU (modo de un hilo) vuelven a su KThread
+    if (m_current) {
+        if (m_current->state != KThread::State::Terminated) m_current->ctx = m_cpu.GetState();
+        m_current.reset();
+    }
+    for (s32 c = 0; c < NUM_CORES; ++c) EnsureCoreCpu(c).Resume();
+    m_coresStop = false;
+    m_coresHalted = false;
+    m_coreHaltReason.clear();
+    m_clockStartNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_clockRunning = true;
+    for (s32 c = 0; c < NUM_CORES; ++c) m_coreThreads.emplace_back([this, c] { CoreLoop(c); });
+}
+
+void Kernel::StopCores() {
+    if (m_coreThreads.empty()) return;
+    m_coresStop = true;
+    {
+        std::lock_guard lock(m_lock);
+        for (s32 c = 0; c < NUM_CORES; ++c)
+            if (auto* cpu = CoreCpu(c)) cpu->RequestStop();
+        m_coreCv.notify_all();
+    }
+    for (auto& t : m_coreThreads) t.join();
+    m_coreThreads.clear();
+
+    std::lock_guard lock(m_lock);
+    m_clockBase = WallClock(this);
+    m_clockRunning = false;
+    // La parada de cualquier nucleo se ve en la CPU principal (la interfaz y los tests miran esa)
+    if (m_coresHalted && !m_cpu.IsHalted()) m_cpu.Halt(m_coreHaltReason);
+    for (auto& c : m_extraCpus) if (c) c->Resume();
+}
+
+KThread* Kernel::PickNextOnCore(s32 core) {
+    KThread* best = nullptr;
+    for (auto& t : m_threads) {
+        if (t->state != KThread::State::Ready || t->core != core || t->on_core >= 0) continue;
+        if (!best || t->priority < best->priority ||
+            (t->priority == best->priority && t->last_run < best->last_run))
+            best = t.get();
+    }
+    return best;
+}
+
+void Kernel::CoreLoop(s32 core) {
+    t_core = core;
+    std::unique_lock lock(m_lock);
+    Core::Interpreter& cpu = *CoreCpu(core);
+    const KThread* last = nullptr;
+    while (!m_coresStop) {
+        UpdateWaits();
+        KThread* next = PickNextOnCore(core);
+        if (!next) {
+            // Nada que hacer en este nucleo: esperar a que despierten a alguien (o al primer plazo)
+            auto wait = std::chrono::microseconds(1000);
+            u64 earliest = NEVER;
+            for (auto& t : m_threads)
+                if (t->state == KThread::State::Waiting && t->deadline < earliest) earliest = t->deadline;
+            if (earliest != NEVER) {
+                const u64 now = Now();
+                const u64 us = earliest > now ? (earliest - now) * 32 / 1000 + 1 : 0;
+                wait = std::min(wait, std::chrono::microseconds(us));
+            }
+            if (wait.count() > 0) m_coreCv.wait_for(lock, wait);
+            continue;
+        }
+        std::shared_ptr<KThread> thread;
+        for (auto& t : m_threads) if (t.get() == next) { thread = t; break; }
+        thread->on_core = core;
+        m_coreThread[size_t(core)] = thread;
+        cpu.GetState() = thread->ctx;
+        cpu.ClearExclusive();
+        if (thread.get() != last) ++m_stats.context_switches;
+        last = thread.get();
+        thread->last_run = ++m_runCounter;
+
+        lock.unlock();
+        cpu.Run(SCHEDULER_SLICE);   // sin el candado: aqui es donde los nucleos van a la vez
+        lock.lock();
+
+        Core::FP::FoldHostFlags(cpu.GetState().fpsr);
+        thread->ctx = cpu.GetState();
+        for (unsigned i = 0; i < 2; ++i)
+            if (thread->pending_mask & (1u << i)) thread->ctx.x[i] = thread->pending_x[i];
+        thread->pending_mask = 0;
+        thread->on_core = -1;
+        m_coreThread[size_t(core)].reset();
+
+        if (cpu.IsHalted()) {
+            // Fin del programa o error en este nucleo: parar todos
+            if (!m_coresHalted) {
+                m_coreHaltReason = cpu.GetHaltReason();
+                m_coresHalted = true;
+            }
+            m_coresStop = true;
+            for (s32 c = 0; c < NUM_CORES; ++c)
+                if (auto* other = CoreCpu(c); other && c != core) other->RequestStop();
+            m_coreCv.notify_all();
+            break;
+        }
+    }
+    t_core = -1;
 }
 
 } // namespace NeXo2::HLE

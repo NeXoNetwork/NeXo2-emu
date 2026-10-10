@@ -124,15 +124,37 @@ TimeZoneService::TimeZoneService() : ServiceObject("ITimeZoneService") {
         ctx.PushBytes(name, sizeof(name));
         ctx.SetResult(Result::Success);
     });
-    // ToCalendarTimeWithMyRule(u64 tiempo) -> CalendarTime + CalendarAdditionalInfo
-    RegisterCommand(101, "ToCalendarTimeWithMyRule", [](IpcContext& ctx) {
+    // ToCalendarTime(u64 tiempo, buffer con la regla) / ToCalendarTimeWithMyRule(u64 tiempo)
+    //   -> CalendarTime + CalendarAdditionalInfo. Siempre UTC: la regla no se mira.
+    auto to_calendar = [](IpcContext& ctx) {
         CalendarTime cal{};
         CalendarAdditionalInfo info{};
         ToCalendarTime(ctx.Pop<s64>(), cal, info);
         ctx.Push(cal);
         ctx.Push(info);
         ctx.SetResult(Result::Success);
-    });
+    };
+    RegisterCommand(100, "ToCalendarTime", to_calendar);
+    RegisterCommand(101, "ToCalendarTimeWithMyRule", to_calendar);
+    // ToPosixTime(CalendarTime, regla) / ToPosixTimeWithMyRule(CalendarTime)
+    //   -> u32 cuantos + buffer de s64 (puede haber 2 en un cambio de hora; en UTC siempre 1)
+    auto to_posix = [](IpcContext& ctx) {
+        const CalendarTime cal = ctx.Pop<CalendarTime>();
+        // Dias desde 1970-01-01 (algoritmo "days from civil" de H. Hinnant)
+        const s64 y = s64(cal.year) - (cal.month <= 2 ? 1 : 0);
+        const s64 era = (y >= 0 ? y : y - 399) / 400;
+        const s64 yoe = y - era * 400;
+        const s64 m = cal.month;
+        const s64 doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + cal.day - 1;
+        const s64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        const s64 days = era * 146097 + doe - 719468;
+        const s64 t = days * 86400 + s64(cal.hour) * 3600 + s64(cal.minute) * 60 + cal.second;
+        ctx.WriteBuffer(&t, sizeof(t), 0);
+        ctx.Push<u32>(1);
+        ctx.SetResult(Result::Success);
+    };
+    RegisterCommand(201, "ToPosixTime", to_posix);
+    RegisterCommand(202, "ToPosixTimeWithMyRule", to_posix);
 }
 
 } // namespace NeXo2::HLE

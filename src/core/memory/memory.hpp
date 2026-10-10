@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include "common/types.hpp"
 
@@ -68,7 +69,6 @@ public:
         if (m_flat) std::fill_n(m_flat.get(), FLAT_ENTRIES, nullptr);
         m_regions.clear();
         m_codeWrites = 0;
-        m_pendingCount = 0;
         ++m_generation;
     }
 
@@ -81,7 +81,9 @@ public:
     // si el programa escribe en una de esas paginas, hay que tirar esa cache.
     //   MarkCode(addr)    -> la CPU avisa: "tengo esta pagina decodificada"
     //   CodeWriteCount()  -> sube cada vez que se escribe en una pagina marcada
-    //   TakeCodeWrites()  -> que paginas eran (y se olvida de ellas)
+    //   TakeCodeWrites()  -> que paginas eran desde la ultima vez que pregunto ESA CPU
+    // Con varios nucleos cada CPU lleva su propio "cursor": las escrituras se guardan
+    // en un anillo y cada una lee las que le faltan.
     // ---------------------------------------------------------------------
     void MarkCode(VAddr addr) {
         if (addr >= ADDRESS_SPACE) return;
@@ -114,20 +116,84 @@ public:
         }
         return m_flat.get();
     }
-    u64 CodeWriteCount() const { return m_codeWrites.load(std::memory_order_relaxed); }
-    // Variable que se pone a true en cada escritura en codigo (la CPU la mira en su bucle)
-    void SetCodeWriteFlag(bool* flag) { m_codeWriteFlag = flag; }
-
-    // Copia en 'out' las paginas de codigo escritas (direccion base de cada una).
-    // Devuelve false si fueron demasiadas para recordarlas: entonces hay que tirarlo todo.
-    template <size_t N>
-    bool TakeCodeWrites(std::array<VAddr, N>& out, size_t& count) {
+    u64 CodeWriteCount() const { return m_codeWrites.load(std::memory_order_acquire); }
+    // Variables que se ponen a true en cada escritura en codigo (cada CPU mira la suya en su bucle)
+    void AddCodeWriteFlag(std::atomic<bool>* flag) {
         std::lock_guard lock(m_codeMutex);
-        const bool overflow = m_pendingCount > m_pending.size();
-        count = std::min(m_pendingCount, std::min(N, m_pending.size()));
-        for (size_t i = 0; i < count; ++i) out[i] = m_pending[i];
-        m_pendingCount = 0;
-        return !overflow;
+        m_codeWriteFlags.push_back(flag);
+    }
+    void RemoveCodeWriteFlag(std::atomic<bool>* flag) {
+        std::lock_guard lock(m_codeMutex);
+        std::erase(m_codeWriteFlags, flag);
+    }
+
+    // Copia en 'out' las paginas de codigo escritas desde 'cursor' (lo que ya vio esa CPU)
+    // y adelanta el cursor. Devuelve false si fueron demasiadas: entonces hay que tirarlo todo.
+    template <size_t N>
+    bool TakeCodeWrites(u64& cursor, std::array<VAddr, N>& out, size_t& count) {
+        std::lock_guard lock(m_codeMutex);
+        const u64 now = m_codeWrites.load(std::memory_order_relaxed);
+        const u64 pending = now - cursor;
+        cursor = now;
+        count = 0;
+        if (pending > N || pending > m_ring.size()) return false;
+        for (u64 i = now - pending; i < now; ++i) out[count++] = m_ring[i % m_ring.size()];
+        return true;
+    }
+
+    // Mueve las paginas de [src, src+size) a [dst, dst+size): los datos pasan a verse en 'dst'
+    // y 'src' queda sin paginas. Es lo que hace svcMapMemory (la memoria original queda
+    // inaccesible mientras esta mapeada en otro sitio) y, al reves, svcUnmapMemory.
+    void MovePages(VAddr dst, VAddr src, u64 size) {
+        if (dst + size > ADDRESS_SPACE || src + size > ADDRESS_SPACE) return;
+        std::lock_guard lock(m_pageMutex);
+        for (u64 off = 0; off < size; off += PAGE_SIZE) {
+            const u64 si = (src + off) / PAGE_SIZE, di = (dst + off) / PAGE_SIZE;
+            L2Table* sl2 = m_table[si >> L2_BITS].load(std::memory_order_relaxed);
+            Page* page = sl2 ? (*sl2)[si & (L2_SIZE - 1)].exchange(nullptr, std::memory_order_acq_rel) : nullptr;
+            SetFlat(si, nullptr);
+            auto& dl1 = m_table[di >> L2_BITS];
+            L2Table* dl2 = dl1.load(std::memory_order_relaxed);
+            if (!dl2) {
+                if (!page) continue;
+                m_l2Tables.push_back(std::make_unique<L2Table>());
+                dl2 = m_l2Tables.back().get();
+                dl1.store(dl2, std::memory_order_release);
+            }
+            (*dl2)[di & (L2_SIZE - 1)].store(page, std::memory_order_release);
+            SetFlat(di, page && !page->code.load(std::memory_order_relaxed) ? page->bytes.data() : nullptr);
+        }
+        ++m_generation;   // las CPUs guardan instrucciones por direccion: que lo tiren todo
+    }
+
+    // ---------------------------------------------------------------------
+    // Operaciones atomicas de verdad (varios nucleos a la vez): LDXR/STXR, CAS, LDADD...
+    // Si [addr, addr+sizeof(T)) esta alineado (siempre en ARM para estas instrucciones)
+    // se hace con una instruccion atomica del PC sobre la memoria emulada.
+    // ---------------------------------------------------------------------
+    template <typename T>
+    bool CompareExchange(VAddr addr, T& expected, T desired) {
+        if (addr % sizeof(T) || addr >= ADDRESS_SPACE) [[unlikely]] {
+            std::lock_guard lock(m_slowAtomicMutex);   // desalineado: sin garantias, como mucho entre si
+            const T v = Read<T>(addr);
+            if (v != expected) { expected = v; return false; }
+            Write<T>(addr, desired);
+            return true;
+        }
+        Page* page = GetOrCreatePage(addr / PAGE_SIZE);
+        std::atomic_ref<T> ref(*reinterpret_cast<T*>(page->bytes.data() + (addr & (PAGE_SIZE - 1))));
+        if (!ref.compare_exchange_strong(expected, desired, std::memory_order_acq_rel)) return false;
+        if (page->code.load(std::memory_order_relaxed)) [[unlikely]] NoteCodeWrite(page, addr);
+        return true;
+    }
+    // 16 bytes (STXP de dos X, CASP): sin instruccion de 128 bits portable; con candado
+    bool CompareExchange128(VAddr addr, u64& lo, u64& hi, u64 new_lo, u64 new_hi) {
+        std::lock_guard lock(m_slowAtomicMutex);
+        const u64 vl = Read<u64>(addr), vh = Read<u64>(addr + 8);
+        if (vl != lo || vh != hi) { lo = vl; hi = vh; return false; }
+        Write<u64>(addr, new_lo);
+        Write<u64>(addr + 8, new_hi);
+        return true;
     }
 
     // Puntero a los 4 KB de la pagina que contiene 'addr', o nullptr si no existe.
@@ -198,13 +264,22 @@ public:
 
     // Lectura/escritura de un valor. Camino rapido: el valor cabe entero en una pagina
     // (casi siempre). Si cruza el borde entre dos paginas, va por ReadBytes/WriteBytes.
+    // Un entero alineado se lee/escribe "de una vez" (atomico relajado: en el PC es la
+    // misma instruccion de siempre). Asi, con varios nucleos, un valor nunca se ve a medias
+    // y convive bien con los CompareExchange de otro nucleo, como en la CPU real.
     template <typename T>
     T Read(VAddr addr) {
         T value{};
         const u64 offset = addr & (PAGE_SIZE - 1);
         if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
-            if (const Page* page = FindPage(addr / PAGE_SIZE))
-                std::memcpy(&value, page->bytes.data() + offset, sizeof(T));
+            if (Page* page = FindPage(addr / PAGE_SIZE)) {
+                u8* p = page->bytes.data() + offset;
+                if constexpr (std::is_integral_v<T> && sizeof(T) <= 8) {
+                    if ((addr & (sizeof(T) - 1)) == 0)
+                        return std::atomic_ref<T>(*reinterpret_cast<T*>(p)).load(std::memory_order_relaxed);
+                }
+                std::memcpy(&value, p, sizeof(T));
+            }
             return value;
         }
         ReadBytes(addr, &value, sizeof(T));
@@ -217,7 +292,14 @@ public:
         if (offset + sizeof(T) <= PAGE_SIZE && addr < ADDRESS_SPACE) {
             Page* page = GetOrCreatePage(addr / PAGE_SIZE);
             if (page->code.load(std::memory_order_relaxed)) [[unlikely]] NoteCodeWrite(page, addr);
-            std::memcpy(page->bytes.data() + offset, &value, sizeof(T));
+            u8* p = page->bytes.data() + offset;
+            if constexpr (std::is_integral_v<T> && sizeof(T) <= 8) {
+                if ((addr & (sizeof(T) - 1)) == 0) {
+                    std::atomic_ref<T>(*reinterpret_cast<T*>(p)).store(value, std::memory_order_relaxed);
+                    return;
+                }
+            }
+            std::memcpy(p, &value, sizeof(T));
             return;
         }
         WriteBytes(addr, &value, sizeof(T));
@@ -263,7 +345,7 @@ public:
 
 private:
     struct Page {
-        std::array<u8, PAGE_SIZE> bytes{};   // los 4 KB (a cero al crearla)
+        alignas(64) std::array<u8, PAGE_SIZE> bytes{};   // los 4 KB (a cero al crearla)
         std::atomic<bool> code{false};       // la CPU tiene instrucciones decodificadas de aqui
     };
 
@@ -278,10 +360,10 @@ private:
         std::lock_guard lock(m_codeMutex);
         if (!page->code.exchange(false, std::memory_order_relaxed)) return;   // otro hilo ya lo hizo
         SetFlat(addr / PAGE_SIZE, page->bytes.data());   // ya no es codigo traducido
-        if (m_pendingCount < m_pending.size()) m_pending[m_pendingCount] = addr & ~(PAGE_SIZE - 1);
-        ++m_pendingCount;
-        ++m_codeWrites;
-        if (m_codeWriteFlag) *m_codeWriteFlag = true;
+        const u64 n = m_codeWrites.load(std::memory_order_relaxed);
+        m_ring[n % m_ring.size()] = addr & ~(PAGE_SIZE - 1);
+        m_codeWrites.store(n + 1, std::memory_order_release);
+        for (auto* flag : m_codeWriteFlags) flag->store(true, std::memory_order_relaxed);
     }
 
     // Tabla de paginas de dos niveles (como la de una CPU real):
@@ -327,9 +409,9 @@ private:
     std::array<std::atomic<L2Table*>, L1_SIZE> m_table{};
     u64 m_generation = 0;
     std::atomic<u64> m_codeWrites{0};           // escrituras en paginas de codigo
-    std::array<VAddr, 8> m_pending{};           // que paginas eran
-    size_t m_pendingCount = 0;
-    bool* m_codeWriteFlag = nullptr;
+    std::array<VAddr, 64> m_ring{};             // que paginas eran (las ultimas 64)
+    std::vector<std::atomic<bool>*> m_codeWriteFlags;   // una por CPU
+    std::mutex m_slowAtomicMutex;
     std::unique_ptr<void*[]> m_flat;            // tabla plana para el JIT (solo si se pide)
     std::map<VAddr, MemoryRegion> m_regions; // ordenadas por direccion
 };

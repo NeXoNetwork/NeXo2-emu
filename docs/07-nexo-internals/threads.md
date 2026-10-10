@@ -2,10 +2,19 @@
 
 How NeXo 2 runs programs with several threads (`src/core/hle/kernel_threads.cpp`).
 
-## Model (phase 1: time-sliced cores)
+## Two modes
 
 The program sees **6 cores** (CoreMask `0x3F`; the Switch 2 has 8, 2 belong to the system).
-In this phase all 6 emulated cores take turns on **one host thread**:
+They can run in two ways:
+
+| Mode | Who uses it | How |
+| :--- | :--- | :--- |
+| Single thread (`Kernel::Run`) | tests, `NEXO2_MULTICORE=0` | the 6 cores take turns on the calling host thread; deterministic |
+| Multicore (`Kernel::StartCores`) | the app (default) | each emulated core has its own host thread and CPU; they run at the same time |
+
+## Single-thread model (time-sliced cores)
+
+All 6 emulated cores take turns on **one host thread**:
 
 ```
 Kernel::Run(budget)
@@ -87,9 +96,12 @@ The mutex word is `0` (free) or the owner's thread handle, plus bit `0x40000000`
 
 ## Time
 
-The system clock (`CNTPCT_EL0`, `svcGetSystemTick`) is the instruction counter at 31.25 MHz:
-1 tick = 32 ns. Sleeping 1 ms = 31 250 ticks. When every thread sleeps, the scheduler jumps
-the clock forward (`Interpreter::AddTicks`) instead of executing nothing.
+The system clock (`CNTPCT_EL0`, `svcGetSystemTick`) runs at 31.25 MHz: 1 tick = 32 ns,
+sleeping 1 ms = 31 250 ticks. In single-thread mode it comes from the instruction counter
+(a 998.4 MHz CPU, one instruction per cycle); when every thread sleeps, the scheduler jumps
+the clock forward (`Interpreter::AddTicks`) instead of executing nothing, and the app ties it
+to real time. In multicore mode every core reads the same real-time clock
+(`Interpreter::SetClock` -> `Kernel::WallClock`), which only advances while the cores run.
 
 ## Tests
 
@@ -103,13 +115,61 @@ cache, and that a deadlock is reported.
 
 Breaking `ReleaseMutex` on purpose makes the test fail (the threads deadlock).
 
+## Multicore mode
+
+`Kernel::SetMulticore(true)` + `StartCores()` start one host thread per emulated core. Core 0
+uses the `System` CPU; cores 1-5 get their own `Interpreter` (and JIT) the first time they are
+needed, with the same JIT/decode-cache settings. Each core loops:
+
+```
+lock the kernel (m_lock)
+  UpdateWaits()                      same as the single-thread mode
+  PickNextOnCore(core)               best Ready thread whose ideal core is this one
+  nothing? wait on m_coreCv          at most 1 ms, or until the first deadline
+  load its registers into this core's CPU (thread->on_core = core)
+unlock
+cpu.Run(SCHEDULER_SLICE)             the cores really run in parallel here
+lock
+  save its registers (+ pending X0/X1, see below), on_core = -1
+  CPU halted (exit, svcBreak, unknown opcode)? stop every core
+```
+
+A thread only runs on its ideal core (as on Horizon, where a thread created with core -2
+stays on the process' default core). Programs that want parallelism create threads on
+several cores.
+
+**Kernel lock.** Every SVC takes `m_lock` (a recursive mutex), so the kernel, the services and
+IPC run one at a time. Waking a thread notifies `m_coreCv`. If another core wakes a thread
+that is still loaded on its core (it blocked a moment ago and is being saved), the result
+registers go to `pending_x` and are applied when the core saves the thread (`SetReg`).
+`Cpu()`, `Cur()` and `CurCore()` return the CPU, thread and core number of the core running
+the current SVC (a `thread_local`), or the single-thread ones.
+
+**Memory.** Shared by all cores:
+
+- Page lookups are lock-free (atomic page-table pointers); creating a page takes a mutex.
+- Aligned integer reads/writes are relaxed atomics (the same instruction on x86), so a value
+  is never seen half-written.
+- LDXR/STXR, LDXP/STXP, CAS/CASP and the LSE atomics (LDADD...) are real atomic operations:
+  LDXR remembers the value, STXR does a compare-and-swap with it (`Memory::CompareExchange`).
+  The JIT uses one dynarmic `ExclusiveMonitor` shared by all cores (processor id = core).
+- Writes to code pages go into a ring of the last 64 pages; every CPU has its own cursor
+  (`TakeCodeWrites`) and its own "attention" flag, so each invalidates its own decode cache /
+  JIT blocks.
+- The kernel's own mutex handoff (`AcquireMutexAfterWait`) uses compare-and-swap too.
+
+**App.** `EmuThread` (main.cpp) starts the cores on Run and stops them on pause, on a halt or
+before loading/restarting. The UI takes the kernel lock during its frame (to read threads,
+output, regions); to stop the cores from the UI it releases it for a moment
+(`StopCoresFromUi`). Step only works in single-thread mode. `NEXO2_MULTICORE=0` turns
+multicore off.
+
+**Tests** (`tests/multicore_tests.cpp`): `threads.nro` on 4 host threads (4 rounds, cores 1-3
+must have executed code), libnx `__appInit` and IPC, `gpu.nro`, and stopping/resuming
+hundreds of times mid-program. Clean with ThreadSanitizer (also running the deko3d examples
+with the GPU thread).
+
 ## UI
 
 The "Programa" window lists every thread (core, priority, state, what it waits for, PC;
-`*` = the one on the CPU) and the scheduler counters.
-
-## Next (phase 2)
-
-Run each emulated core on its own host thread. That needs: a lock-free or locked memory
-model for `Memory`, a real global exclusive monitor for LDXR/STXR, per-core decode caches,
-and kernel state protected by a lock.
+`*` = running on a CPU) and the scheduler counters, and says which mode the cores use.

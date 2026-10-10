@@ -1,6 +1,11 @@
 #pragma once
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 #include "common/types.hpp"
@@ -35,6 +40,10 @@ namespace Layout {
     constexpr u64 STACK_REGION_SIZE = 0x0000'0000'1000'0000;
     constexpr u64 MAIN_STACK_SIZE   = 0x0000'0000'0010'0000; // 1 MB
     constexpr u64 LOADER_PAGE       = 0x0000'0001'FFFE'0000; // stub de salida + config del loader
+    constexpr u64 NEXT_LOAD_PATH    = LOADER_PAGE + 0x600;   // envSetNextLoad: ruta (0x200 bytes)
+    constexpr u64 NEXT_LOAD_PATH_SIZE = 0x200;
+    constexpr u64 NEXT_LOAD_ARGV    = LOADER_PAGE + 0x800;   // envSetNextLoad: argv (0x800 bytes)
+    constexpr u64 NEXT_LOAD_ARGV_SIZE = 0x800;
     constexpr u64 TLS_PAGE          = 0x0000'0001'FFFF'0000; // TLS del hilo principal
     // TLS de los demas hilos: paginas hacia abajo desde TLS_PAGE (8 hilos por pagina)
     constexpr u64 TLS_SLOT_SIZE     = 0x200;
@@ -78,7 +87,7 @@ class Kernel {
 public:
     // Se registra como manejador de SVC del interprete.
     Kernel(Core::Memory& memory, Core::Interpreter& cpu);
-    ~Kernel() { for (auto& t : m_threads) t->wait_objects.clear(); }
+    ~Kernel() { StopCores(); for (auto& t : m_threads) t->wait_objects.clear(); }
 
     // Vuelve al estado inicial (sin heap, sin salida de texto).
     void Reset();
@@ -90,6 +99,7 @@ public:
 
     // Llamada desde el interprete al ejecutar "svc #imm".
     void HandleSvc(u32 imm, Core::CPUState& state);
+    void HandleSvcImpl(u32 imm, Core::CPUState& state);
 
     // --- Hilos y planificador (kernel_threads.cpp) ---
     // Ejecuta hasta 'budget' instrucciones repartidas entre los hilos listos
@@ -97,6 +107,25 @@ public:
     u64 Run(u64 budget);
     const std::vector<std::shared_ptr<KThread>>& Threads() const { return m_threads; }
     const KThread* CurrentThread() const { return m_current.get(); }
+
+    // --- Varios nucleos en hilos del PC (kernel_threads.cpp) ---
+    // Run() ejecuta los 6 nucleos emulados por turnos en el hilo que llama: es
+    // determinista y lo usan los tests. En modo multinucleo (la app) cada nucleo emulado
+    // tiene su propio hilo del PC y corre a la vez que los demas:
+    //   SetMulticore(true)  elegir el modo (con los nucleos parados)
+    //   StartCores()        arrancar los hilos; StopCores() pararlos y esperarlos
+    //   CoresHalted()       algun nucleo paro la CPU (fin, error): hay que llamar a StopCores()
+    // El reloj (CNTPCT) pasa a ser la hora real. Toda SVC coge el candado del kernel (Lock()).
+    void SetMulticore(bool on);
+    bool IsMulticore() const { return m_multicore; }
+    void StartCores();
+    void StopCores();
+    bool CoresRunning() const { return !m_coreThreads.empty(); }
+    bool CoresHalted() const { return m_coresHalted.load(); }
+    // Candado del kernel: la interfaz lo coge para leer hilos, salida, etc. con los nucleos en marcha
+    std::unique_lock<std::recursive_mutex> Lock() { return std::unique_lock(m_lock); }
+    // CPU de un nucleo (0 = la de System). nullptr si ese nucleo aun no ha hecho falta.
+    Core::Interpreter* CoreCpu(s32 core) { return core == 0 ? &m_cpu : m_extraCpus[size_t(core)].get(); }
 
     // Contadores para la interfaz y los tests
     struct SchedulerStats {
@@ -152,6 +181,16 @@ public:
         m_selfNro = std::make_shared<const std::vector<u8>>(std::move(data));
     }
     const std::string& GetSelfNroPath() const { return m_selfNroPath; }
+    // Lo que el programa pidio cargar al terminar (envSetNextLoad del hbmenu): ruta "sdmc:/..."
+    // y argv. Vacio si no pidio nada.
+    std::string GetNextLoadPath() { return ReadGuestString(Layout::NEXT_LOAD_PATH, Layout::NEXT_LOAD_PATH_SIZE); }
+    std::string GetNextLoadArgv() { return ReadGuestString(Layout::NEXT_LOAD_ARGV, Layout::NEXT_LOAD_ARGV_SIZE); }
+    std::string ReadGuestString(u64 addr, u64 max) {
+        std::string out(max, '\0');
+        m_memory.ReadBytes(addr, out.data(), max);
+        out.resize(out.find('\0') == std::string::npos ? max : out.find('\0'));
+        return out;
+    }
     std::shared_ptr<const std::vector<u8>> GetSelfNro() const { return m_selfNro; }
 
     // Mandos: memoria compartida de hid (una por proceso) y estado nuevo de los botones
@@ -183,6 +222,9 @@ private:
     void SvcWaitSynchronization(Core::CPUState& s);
     void SvcMapSharedMemory(Core::CPUState& s);
     void SvcUnmapSharedMemory(Core::CPUState& s);
+    void SvcMapMemory(Core::CPUState& s, bool map);
+    void SvcMapProcessCodeMemory(Core::CPUState& s, bool map);
+    void SvcSetProcessMemoryPermission(Core::CPUState& s);
 
     // --- Hilos (kernel_threads.cpp) ---
     void SvcCreateThread(Core::CPUState& s);
@@ -208,7 +250,7 @@ public:
     // Duerme el hilo actual hasta 'deadline' (ticks) sin tocar su X0: para que un servicio
     // (vi) haga esperar al programa despues de contestarle, como la sincronizacion vertical.
     void SleepCurrentUntil(u64 deadline);
-    u64  Ticks() const { return m_cpu.GetTicks(); }   // reloj del sistema (CNTPCT)
+    u64  Ticks() { return Cpu().GetTicks(); }   // reloj del sistema (CNTPCT)
     // Siguiente sincronizacion vertical (60 Hz) despues de 'now', en ticks
     static u64 NextVsync(u64 now) {
         constexpr u64 PERIOD = Core::Interpreter::TICK_FREQUENCY / 60;
@@ -223,7 +265,18 @@ private:
     void SwitchTo(const std::shared_ptr<KThread>& t);
     u64  AllocateTls();
     void FreeTls(u64 tls);
-    u64  Now() const { return m_cpu.GetTicks(); }
+    u64  Now() { return Cpu().GetTicks(); }
+    // El nucleo que esta ejecutando esta SVC: su CPU, su hilo y su numero. En el modo de
+    // un hilo, la unica CPU (m_cpu) y el hilo cargado en ella (m_current).
+    Core::Interpreter& Cpu();
+    std::shared_ptr<KThread>& Cur();
+    s32 CurCore() const;
+    // Cambia un registro de un hilo que espera (puede estar aun cargado en otro nucleo)
+    void SetReg(KThread& t, unsigned index, u64 value);
+    void CoreLoop(s32 core);
+    KThread* PickNextOnCore(s32 core);
+    Core::Interpreter& EnsureCoreCpu(s32 core);
+    static u64 WallClock(const void* kernel);
     static u64 NsToTicks(s64 ns);
 
     // Comandos "Control" de CMIF (dominios, clonar sesiones, tamano de buffer)
@@ -245,7 +298,22 @@ private:
     std::shared_ptr<const std::vector<u8>> m_selfNro;
 
     std::vector<std::shared_ptr<KThread>> m_threads;
-    std::shared_ptr<KThread> m_current;    // el hilo cuyos registros estan en la CPU
+    std::shared_ptr<KThread> m_current;    // el hilo cuyos registros estan en la CPU (modo de un hilo)
+
+    // Modo multinucleo
+    std::recursive_mutex m_lock;
+    std::condition_variable_any m_coreCv;  // un hilo pasa a listo / hay que parar
+    bool m_multicore = false;
+    std::array<std::unique_ptr<Core::Interpreter>, NUM_CORES> m_extraCpus{};   // nucleos 1..5
+    std::array<std::shared_ptr<KThread>, NUM_CORES> m_coreThread{};            // hilo cargado en cada nucleo
+    std::vector<std::thread> m_coreThreads;
+    std::atomic<bool> m_coresStop{false};
+    std::atomic<bool> m_coresHalted{false};
+    std::string m_coreHaltReason;
+    // Reloj real: ticks = base + tiempo desde 'start' (solo cuenta con los nucleos en marcha)
+    std::atomic<u64> m_clockBase{0};
+    std::atomic<s64> m_clockStartNs{0};
+    std::atomic<bool> m_clockRunning{false};
     s32  m_currentCore = 0;
     u64  m_nextThreadId = 1;
     u64  m_waitCounter = 0;

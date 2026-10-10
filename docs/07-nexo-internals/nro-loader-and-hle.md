@@ -42,7 +42,21 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 - `X0` = pointer to the loader config list, `X1` = `0xFFFFFFFFFFFFFFFF`.
 - `X30` = exit stub (`svc #0x7`): if the program returns from its entry, it exits cleanly.
 - Config entries given: `MainThreadHandle`, `AppletType` (Application), `Argv`,
-  `SyscallAvailableHint`, `HosVersion` (20.1.0), `EndOfList` (pointer to "NeXo 2 HLE loader").
+  `SyscallAvailableHint`, `HosVersion` (20.1.0), `NextLoadPath`, `ProcessHandle`
+  (the "current process" pseudo-handle, needed by `.so` loaders of ports), `EndOfList`
+  (pointer to "NeXo 2 HLE loader").
+- `argv[0]` is where the `.nro` is on the SD: if the file is inside the emulated SD folder
+  (e.g. `sdmc/switch/game/game.nro`), the program sees `sdmc:/switch/game/game.nro`, so its
+  working directory is its own folder and it finds the files next to it. Otherwise
+  `sdmc:/switch/<name>.nro`.
+
+## Chain loading (hbmenu)
+
+`NextLoadPath` points to two buffers in the loader page (path 0x200 bytes at +0x600, argv
+0x800 bytes at +0x800). hbmenu writes the chosen `.nro` and its argv there with
+`envSetNextLoad` and exits. `System::ContinueAfterExit()` (called by the app when a program
+ends) then loads that file from the SD folder with that argv. When a program launched this
+way exits without asking for anything, it goes back to the menu, like hbloader.
 
 ## Implemented SVCs
 
@@ -51,6 +65,7 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 | 0x01 | SetHeapSize | Size must be a multiple of 2 MB. Heap at `0x80000000`. |
 | 0x02 | SetMemoryPermission | Changes the permission in the region map. |
 | 0x03 | SetMemoryAttribute | Only checks alignment (no caches to emulate). |
+| 0x04 / 0x05 | MapMemory / UnmapMemory | Moves the pages to the new address (`Memory::MovePages`); the source stays inaccessible. libnx uses it for thread stacks. |
 | 0x06 | QueryMemory | Fills `MemoryInfo` from the region map (free gaps included). |
 | 0x07 | ExitProcess | Halts the CPU. |
 | 0x08-0x0F | CreateThread, StartThread, ExitThread, SleepThread, Get/SetThreadPriority, Get/SetThreadCoreMask | Real threads: see [threads.md](threads.md). |
@@ -70,6 +85,10 @@ Following [switchbrew Homebrew_ABI](https://switchbrew.org/wiki/Homebrew_ABI):
 | 0x26 | Break | Halts the CPU (program aborted). |
 | 0x27 | OutputDebugString | Text shown in the "Programa" window and the console. |
 | 0x29 | GetInfo | Region addresses/sizes, memory totals, core mask, entropy, program id. |
+| 0x73 | SetProcessMemoryPermission | Own process only: changes permissions in the region map. |
+| 0x77 / 0x78 | MapProcessCodeMemory / UnmapProcessCodeMemory | Own process only: like MapMemory, the destination becomes code. Used by `.so` loaders. |
+
+`NEXO2_SVC_TRACE=1` logs every SVC with its first 4 arguments and its result.
 
 Any other SVC halts the CPU with its name, e.g. `SVC 0x08 (CreateThread) no implementada`.
 That message tells you exactly what to implement next.

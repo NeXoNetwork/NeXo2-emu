@@ -106,6 +106,12 @@ struct KThread final : KObject {
     bool cancel_pending = false; // svcCancelSynchronization antes de esperar
 
     u64  last_run = 0;           // reparto justo entre hilos de la misma prioridad
+    // Varios nucleos: en que nucleo esta cargado ahora (-1 = en ninguno, registros en ctx).
+    // Si otro nucleo lo despierta mientras aun esta cargado, los registros que cambia
+    // (X0 = resultado, X1 = indice) se guardan aqui y se aplican al descargarlo.
+    s32  on_core = -1;
+    u8   pending_mask = 0;
+    u64  pending_x[2] = {0, 0};
     std::string name;
 
     const char* TypeName() const override { return "KThread"; }

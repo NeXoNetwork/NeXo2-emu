@@ -597,6 +597,14 @@ void Fermi2D::Blit() {
     const u32 dx0 = m_regs[0x22C], dy0 = m_regs[0x22D], w = m_regs[0x22E], h = m_regs[0x22F];
     const u32 bpp = d.bytes_per_pixel;
     if (w == 0 || h == 0 || w > 16384 || h > 16384) return;
+#ifdef NEXO2_HAS_VULKAN
+    // Si la imagen de origen esta en la GPU (por ejemplo, copiar la pantalla a una textura),
+    // la copia se hace alli, sin pasar por la memoria
+    if (VulkanRasterizer* hw = m_gpu.Hw(); hw && hw->Blit2D(s, sfmt, d, dfmt, dx0, dy0, w, h, u0, v0, dudx, dvdy)) {
+        ++m_gpu.GetStats().copies;
+        return;
+    }
+#endif
 
     std::vector<u8> srow(size_t(s.width) * bpp), drow(size_t(w) * bpp);
     for (u32 y = 0; y < h; ++y) {

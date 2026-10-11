@@ -10,6 +10,7 @@
 #include "frontend/theme.hpp"
 #ifdef NEXO2_HAS_VULKAN
 #include "video_core/vulkan/vk_device.hpp"
+#include "video_core/vulkan/vk_rasterizer.hpp"
 #endif
 
 #include <algorithm>
@@ -438,6 +439,31 @@ static void DrawDevWindows(System& sys, float main_scale, const std::string& vul
                         (unsigned long long)gs.draws, (unsigned long long)gs.draws_hw, (unsigned long long)gs.triangles,
                         (unsigned long long)gs.pixels);
             ImGui::Text("Dibujo: %s", gpu.RendererName().c_str());
+#ifdef NEXO2_HAS_VULKAN
+            if (auto* hw = gpu.Hw()) {
+                // Tiempo por segundo de cada parte del dibujo con Vulkan (para ver que lo frena)
+                static NeXo2::GPU::VulkanRasterizer::Stats prev{}, rate{};
+                static auto last = std::chrono::steady_clock::now();
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last >= std::chrono::seconds(1)) {
+                    const auto cur = hw->GetStats();
+                    auto d = [](u64 a, u64 b) { return a >= b ? a - b : 0; };
+                    rate.ns_draw = d(cur.ns_draw, prev.ns_draw); rate.ns_vertex = d(cur.ns_vertex, prev.ns_vertex);
+                    rate.ns_texture = d(cur.ns_texture, prev.ns_texture); rate.ns_images = d(cur.ns_images, prev.ns_images);
+                    rate.ns_wait = d(cur.ns_wait, prev.ns_wait); rate.ns_download = d(cur.ns_download, prev.ns_download);
+                    rate.fallbacks = cur.fallbacks;
+                    prev = cur;
+                    last = now;
+                }
+                ImGui::Text("Vulkan (ms por segundo): draws %llu | vertices %llu | texturas %llu | imagenes %llu | esperando GPU %llu | a memoria %llu",
+                            (unsigned long long)(rate.ns_draw / 1000000), (unsigned long long)(rate.ns_vertex / 1000000),
+                            (unsigned long long)(rate.ns_texture / 1000000), (unsigned long long)(rate.ns_images / 1000000),
+                            (unsigned long long)(rate.ns_wait / 1000000), (unsigned long long)(rate.ns_download / 1000000));
+                if (rate.fallbacks)
+                    ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "Vulkan: %llu dibujos por software (%s)", (unsigned long long)rate.fallbacks,
+                                       hw->LastFallback().c_str());
+            }
+#endif
             if (gs.draws_skipped || gs.shader_errors)
                 ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "GPU: %llu dibujos ignorados, %llu errores de shader (ver registro)",
                                    (unsigned long long)gs.draws_skipped, (unsigned long long)gs.shader_errors);

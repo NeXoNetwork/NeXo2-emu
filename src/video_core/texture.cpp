@@ -1,6 +1,8 @@
 // Texturas: descriptores, formatos, colocacion en memoria y muestreo.
 // Ver texture.hpp y docs/07-nexo-internals/gpu-textures.md.
 #include "texture.hpp"
+#include <cstdlib>
+#include <cstdio>
 #include "surface.hpp"
 #include <algorithm>
 #include <cmath>
@@ -551,6 +553,9 @@ std::shared_ptr<const DecodedLevel> TextureCache::Get(const std::array<u32, 8>& 
     }
     auto lv = DecodeFrom(m_gpu, info, level, r, raws);
     m_decodes.fetch_add(1, std::memory_order_relaxed);
+    if (static const bool dbg = std::getenv("NEXO2_TEX_DEBUG") != nullptr; dbg)
+        std::fprintf(stderr, "tex decode %llx fmt %X %ux%ux%u lvl %u %s\n", (unsigned long long)info.address, info.format,
+                     lv->width, lv->height, lv->depth, level, it == m_entries.end() ? "nueva" : (it->second.dirty ? "sucia" : "hash"));
     const size_t bytes = lv->texels.size() * sizeof(lv->texels[0]);
     if (it == m_entries.end()) {
         // Limite de memoria: si se pasa, se empieza de cero (los draws en curso conservan lo suyo)

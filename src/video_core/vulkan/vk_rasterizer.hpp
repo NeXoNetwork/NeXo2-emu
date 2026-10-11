@@ -46,6 +46,10 @@ public:
     bool Draw(const u32* regs, const ConstbufTable& cbs, const DrawCall& dc);
     // ClearSurface del motor 3D. true = hecho en la GPU; false = hacerlo por software.
     bool Clear(const u32* regs, u32 arg);
+    // Copia del motor 2D (coordenadas de origen en punto fijo 32.32). true = hecha en la GPU;
+    // false = la hace el software (solo se hace aqui si el origen ya es una imagen de la GPU)
+    bool Blit2D(const Surface& src, u32 src_format, const Surface& dst, u32 dst_format, u32 dx0, u32 dy0, u32 w, u32 h,
+                s64 u0, s64 v0, s64 dudx, s64 dvdy);
     // Antes de un draw por software: escribe en memoria sus render targets si estan en la GPU
     void PrepareSoftwareDraw(const u32* regs);
 
@@ -67,6 +71,15 @@ public:
     struct Stats {
         u64 draws = 0, clears = 0, fallbacks = 0, uploads = 0, downloads = 0, submits = 0;
         u64 pipelines = 0, shaders = 0, textures = 0;
+        u64 rt_textures = 0;
+        u64 blits = 0;         // copias del motor 2D hechas en la GPU   // texturas leidas directamente de un render target
+        // Tiempo (ns) de cada parte, en el hilo de la GPU: para ver donde se va
+        u64 ns_draw = 0;       // Draw entero
+        u64 ns_vertex = 0;     // shader de vertices en la CPU
+        u64 ns_texture = 0;    // preparar texturas (decodificar y subir)
+        u64 ns_images = 0;     // render targets: comprobar hash y subir
+        u64 ns_wait = 0;       // esperando a la GPU (Submit)
+        u64 ns_download = 0;   // escribir imagenes en memoria (sin la espera)
     };
     const Stats& GetStats() const { return m_stats; }
     const std::string& LastFallback() const { return m_lastFallback; }
@@ -86,6 +99,9 @@ private:
         u64 hash = 0;             // hash de la memoria la ultima vez que coincidian
         u64 epoch = 0;            // envio en el que se comprobo el hash
         u64 lo = 0, hi = 0;       // direcciones de la GPU que ocupa
+        std::map<u32, VkImageView> sampled;
+        bool rendered = false;    // se ha dibujado o borrado (puede presentarse); si solo se
+                                  // copia con el 2D, no se escribe en memoria al final del envio   // vistas para usarla como textura (por swizzle)
     };
     Image* GetImage(const Surface& surf, u32 guest_format, bool depth, bool will_overwrite);
     bool CreateImage(Image& img);
@@ -109,6 +125,8 @@ private:
     bool PrepareTexture(u32 handle, const SpirvTexture& want, u64 tic_pool, u32 tic_max, u64 tsc_pool, u32 tsc_max,
                         BoundTexture& out);
     VkSampler GetSampler(const SamplerInfo& s, float tic_bias, bool no_mips);
+    // Si la textura es un render target que esta en la GPU, su imagen (sin pasar por memoria)
+    Image* RenderTargetAsTexture(const TextureInfo& info, const SpirvTexture& want);
 
     // ---- Shaders y pipelines ----
     struct FragShader {

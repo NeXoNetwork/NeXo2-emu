@@ -174,6 +174,18 @@ again only when the cache returns a new decode (its memory changed). Samplers co
 level of detail is computed by the GPU from the real derivatives, so mipmapping is better than in the
 software renderer (which always uses level 0 for implicit lod).
 
+**Render targets read as textures.** If a texture is exactly a render target that is already a
+Vulkan image (same address, size, layout and format), the shader samples that image directly: no
+write-back, no CPU decode, no upload. **2D engine copies** (`Fermi2D` blits) whose source is a Vulkan
+image are done with `vkCmdBlitImage` (flips included). NZ:P copies the whole screen to a texture
+every frame this way; doing it on the GPU took it from ~6 to ~20 fps on lavapipe. Images that are
+only blit destinations are not written back at the end of each submit (only when someone reads
+their memory).
+
+**Timing.** `VulkanRasterizer::GetStats()` has the time per part (draw, CPU vertex shader, textures,
+render target checks, waiting for the GPU, writing back); Diagnostics shows it in ms per second.
+`NEXO2_TEX_DEBUG=1` prints every texture decode (to see what gets decoded again and again).
+
 **Clears** (`ClearSurface`) of a target that is already on the GPU, or of a whole surface, are
 `vkCmdClearAttachments`; partial channel masks and stencil-only clears go to software.
 

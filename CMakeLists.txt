@@ -245,5 +245,12 @@ if(NEXO2_BUILD_TESTS)
     target_compile_definitions(nexo2_tests PRIVATE
         NEXO2_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/generated")
     target_link_libraries(nexo2_tests PRIVATE nexo2_core)
+    if(MSVC)
+        # Informacion de depuracion tambien en Release (.pdb): si un test revienta,
+        # test_main.cpp escribe la pila con nombres de funcion y lineas
+        target_compile_options(nexo2_core PRIVATE $<$<CONFIG:Release>:/Zi>)
+        target_compile_options(nexo2_tests PRIVATE $<$<CONFIG:Release>:/Zi>)
+        target_link_options(nexo2_tests PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+    endif()
     add_test(NAME cpu_tests COMMAND nexo2_tests)
 endif()

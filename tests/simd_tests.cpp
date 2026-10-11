@@ -21,7 +21,7 @@ int RunCase(const S::Case& c) {
     constexpr u64 BASE = 0x80000000, STACK = 0xA0000000;
     Memory mem;
     Interpreter cpu(mem);
-    for (size_t i = 0; i < c.code_words; ++i) mem.Write<u32>(BASE + i * 4, c.code[i]);
+    mem.WriteBytes(BASE, c.code, c.code_words * 4);   // de una vez (ver Machine en cpu_tests.cpp)
     cpu.GetState().pc = BASE;
     cpu.GetState().sp = STACK;
     cpu.Run(100000);

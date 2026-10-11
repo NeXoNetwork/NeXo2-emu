@@ -30,7 +30,11 @@ struct Machine {
 
     template <size_t N>
     explicit Machine(const uint32_t (&program)[N]) {
-        for (size_t i = 0; i < N; ++i) mem.Write<u32>(CODE_BASE + i * 4, program[i]);
+        // Todo el programa de una vez. Con un bucle "Write(CODE_BASE + i * 4, program[i])" y un
+        // programa en la pila, MSVC (Release) calcula la direccion de program[i] restando
+        // CODE_BASE (0x80000000) dentro de un desplazamiento de 32 bits que se desborda: lee
+        // fuera del array y revienta (visto en UnimplementedInstructionStopsCpu).
+        mem.WriteBytes(CODE_BASE, program, sizeof(program));
         mem.Write<u32>(RETURN_ADDR, 0xD4200000u); // brk #0
         cpu.GetState().pc = CODE_BASE;
         cpu.GetState().sp = STACK_TOP;

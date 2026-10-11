@@ -33,6 +33,8 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/arm64/fp_ops.cpp"
     "${SRC_DIR}/core/arm64/jit_dynarmic.cpp"
     "${SRC_DIR}/core/loader/nro.cpp"
+    "${SRC_DIR}/core/loader/nso.cpp"
+    "${SRC_DIR}/core/loader/npdm.cpp"
     "${SRC_DIR}/core/hle/kernel.cpp"
     "${SRC_DIR}/core/hle/kernel_threads.cpp"
     "${SRC_DIR}/core/hle/ipc.cpp"

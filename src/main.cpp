@@ -158,7 +158,7 @@ private:
                 k.StopCores();
                 if (m_sys.ContinueAfterExit()) {
                     ++g_runGeneration;   // el hbmenu eligio un programa (o se vuelve a el)
-                } else {
+                } else if (g_emuRunning) {   // (solo una vez: luego CoresHalted sigue siendo true)
                     g_emuRunning = false;
                     NeXo2::Common::Logger::Log(NeXo2::Common::Logger::Level::Info,
                         "[UI] Parada (multinucleo): " + m_sys.GetCpu().GetHaltReason());
@@ -791,9 +791,12 @@ int main(int argc, char** argv) {
     const std::string sdmcRoot = baseDir + "sdmc";
     sys.GetKernel().SetSdmcRoot(Utf8ToPath(sdmcRoot));
     const std::filesystem::path sdSwitch = Utf8ToPath(sdmcRoot) / "switch";
+    // Juegos extraidos (carpeta con exefs/ y romfs.bin): carpeta "games" junto al ejecutable
+    const std::filesystem::path gamesDir = Utf8ToPath(baseDir + "games");
     {
         std::error_code ec;
         std::filesystem::create_directories(sdSwitch, ec);
+        std::filesystem::create_directories(gamesDir, ec);
     }
 
     // Pantalla de la consola: textura que se actualiza con cada imagen nueva
@@ -834,7 +837,7 @@ int main(int argc, char** argv) {
     int selected = -1;
     char search[128] = "";
     auto gameDirs = [&] {
-        std::vector<std::filesystem::path> dirs{sdSwitch};
+        std::vector<std::filesystem::path> dirs{sdSwitch, gamesDir};
         for (const auto& d : settings.game_dirs) dirs.push_back(Utf8ToPath(d));
         return dirs;
     };
@@ -862,14 +865,19 @@ int main(int argc, char** argv) {
         if (audioStream) SDL_ClearAudioStream(audioStream);
         applyEmuSettings();
         std::snprintf(nroPath, sizeof(nroPath), "%s", path.c_str());
-        if (!sys.LoadNroFile(path)) {
+        // Un .nro (homebrew) o un juego extraido (carpeta con ExeFS, o un archivo de dentro)
+        std::string ext = PathToUtf8(Utf8ToPath(path).extension());
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        const bool game = ext != ".nro" && NeXo2::Core::System::IsGameFolder(path);
+        if (!(game ? sys.LoadGame(path) : sys.LoadNroFile(path))) {
             errorPopup = "No se pudo abrir el programa:\n" + path + "\n\n" + sys.GetLastError();
             inGame = false;
             setWindowTitle();
             return;
         }
         const auto* info = sys.GetNroInfo();
-        gameTitle = info && !info->title.empty() ? info->title : PathToUtf8(Utf8ToPath(path).stem());
+        gameTitle = game ? sys.GetProgramName()
+                  : info && !info->title.empty() ? info->title : PathToUtf8(Utf8ToPath(path).stem());
         inGame = true;
         shownFrame = ~0ull;
         setWindowTitle();
@@ -895,8 +903,10 @@ int main(int argc, char** argv) {
         rescan();
     };
     auto showOpenFile = [&] {
-        static const SDL_DialogFileFilter filters[] = {{"Homebrew de Switch (*.nro)", "nro"}, {"Todos los archivos", "*"}};
-        SDL_ShowOpenFileDialog(OnOpenFile, nullptr, window, filters, 2, PathToUtf8(sdSwitch).c_str(), false);
+        static const SDL_DialogFileFilter filters[] = {{"Homebrew de Switch (*.nro)", "nro"},
+                                                       {"Juego extraido (main.npdm del ExeFS)", "npdm"},
+                                                       {"Todos los archivos", "*"}};
+        SDL_ShowOpenFileDialog(OnOpenFile, nullptr, window, filters, 3, PathToUtf8(sdSwitch).c_str(), false);
     };
     auto showAddFolder = [&] { SDL_ShowOpenFolderDialog(OnAddFolder, nullptr, window, nullptr, false); };
 

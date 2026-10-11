@@ -683,7 +683,24 @@ KThread* Kernel::PickNextOnCore(s32 core) {
             (t->priority == best->priority && t->last_run < best->last_run))
             best = t.get();
     }
-    return best;
+    if (best) return best;
+
+    // Nucleo libre: como Horizon, se lleva un hilo listo de otro nucleo si su mascara lo
+    // permite y alli no le iba a tocar (su nucleo esta ocupado con otro igual o mas
+    // importante). Sin esto, un hilo que hace "yield" en bucle con prioridad alta deja sin
+    // ejecutar a los demas de su nucleo aunque haya nucleos parados (GTA Chinatown Wars).
+    KThread* steal = nullptr;
+    for (auto& t : m_threads) {
+        if (t->state != KThread::State::Ready || t->core == core || t->on_core >= 0) continue;
+        if (!((t->affinity >> core) & 1)) continue;
+        const auto& running = m_coreThread[size_t(t->core)];
+        if (!running || running->priority > t->priority) continue;   // en su nucleo le toca ya
+        if (!steal || t->priority < steal->priority ||
+            (t->priority == steal->priority && t->last_run < steal->last_run))
+            steal = t.get();
+    }
+    if (steal) steal->core = core;
+    return steal;
 }
 
 void Kernel::CoreLoop(s32 core) {

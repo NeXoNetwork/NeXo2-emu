@@ -8,6 +8,7 @@ How NeXo 2 itself is built (our code, not the console).
 | [jit.md](jit.md) | JIT with dynarmic: how it fits with the interpreter, page table, self-modifying code, tests, speed |
 | [cpu-fuzzing.md](cpu-fuzzing.md) | Random instructions compared against a reference ARM: how it works, results, known QEMU differences, usage |
 | [nro-loader-and-hle.md](nro-loader-and-hle.md) | NRO loader, process memory layout, Homebrew ABI, HLE kernel SVCs |
+| [games.md](games.md) | Games: extracted ExeFS (NSO with LZ4, main.npdm), how Horizon starts a game, RomFS and save data |
 | [ipc-and-services.md](ipc-and-services.md) | IPC (HIPC/CMIF/TIPC, domains), all services (sm:, applet, hid, time, fs/SD card...), how to add a service |
 | [threads.md](threads.md) | Threads, scheduler (6 cores: time-sliced or one host thread each), mutex/condvar protocol, shared memory and atomics |
 | [network.md](network.md) | Network: sockets (bsd), DNS (sfdnsres), nifm and TLS (ssl with mbedTLS) |

@@ -70,6 +70,7 @@ bool System::LoadNro(const std::vector<u8>& data, const std::string& name, const
     m_lastNro = data;
     m_lastArgv = argv;
     m_lastRaw.clear();
+    m_lastGame.clear();
 
     // Como el hbmenu: argv[0] = ruta del .nro en la SD. El .nro se ve en esa ruta aunque no
     // este de verdad en la SD, para que romfsInit() pueda leer su RomFS.
@@ -85,6 +86,110 @@ bool System::LoadNro(const std::vector<u8>& data, const std::string& name, const
     return true;
 }
 
+namespace {
+std::filesystem::path Utf8Path(const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); }
+
+bool ReadWholeFile(const std::filesystem::path& p, std::vector<u8>& out) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    return true;
+}
+
+// Carpeta del ExeFS de un juego extraido ('path' = la carpeta del juego, la del ExeFS o un
+// archivo de dentro). Vacia si no hay un "main".
+std::filesystem::path FindExefs(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = Utf8Path(path);
+    if (!fs::is_directory(dir, ec)) dir = dir.parent_path();
+    for (const fs::path& d : {dir / "exefs", dir / "ExeFS", dir})
+        if (fs::is_regular_file(d / "main", ec)) return d;
+    return {};
+}
+
+// Nombre del juego en control.nacp (primer idioma que lo tenga)
+std::string NacpTitle(const std::filesystem::path& file) {
+    std::vector<u8> nacp;
+    if (!ReadWholeFile(file, nacp) || nacp.size() < 0x3000) return {};
+    for (int lang = 0; lang < 16; ++lang) {
+        std::string name;
+        for (size_t i = 0; i < 0x200 && nacp[lang * 0x300 + i]; ++i) name += char(nacp[lang * 0x300 + i]);
+        if (!name.empty()) return name;
+    }
+    return {};
+}
+} // namespace
+
+bool System::IsGameFolder(const std::string& path) { return !FindExefs(path).empty(); }
+
+bool System::LoadGame(const std::string& path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path exefs = FindExefs(path);
+    if (exefs.empty()) {
+        m_lastError = "No es un juego extraido (falta el archivo 'main' del ExeFS): " + path;
+        Logger::Log(Logger::Level::Error, "[Loader] " + m_lastError);
+        return false;
+    }
+    const fs::path dir = (exefs.filename() == "exefs" || exefs.filename() == "ExeFS") ? exefs.parent_path() : exefs;
+
+    Loader::NpdmInfo npdm;
+    std::vector<u8> data;
+    if (ReadWholeFile(exefs / "main.npdm", data)) {
+        auto r = Loader::ParseNpdm(data);
+        if (!r.ok) {
+            m_lastError = r.error;
+            Logger::Log(Logger::Level::Error, "[Loader] " + m_lastError);
+            return false;
+        }
+        npdm = r.info;
+    } else {
+        Logger::Log(Logger::Level::Warning, "[Loader] No hay main.npdm: se usan valores por defecto");
+    }
+
+    ResetMachine();
+    // Los modulos van seguidos en memoria, en este orden; se empieza por el primero
+    std::vector<std::string> names = {"rtld", "main"};
+    for (int i = 0; i < 10; ++i) names.push_back("subsdk" + std::to_string(i));
+    names.push_back("sdk");
+    u64 base = HLE::Layout::CODE_BASE, entry = 0;
+    std::string loaded;
+    for (const auto& name : names) {
+        if (!ReadWholeFile(exefs / name, data)) continue;
+        auto r = Loader::LoadNso(data, m_memory, base, name);
+        if (!r.ok) {
+            m_lastError = "NSO no valido: " + r.error;
+            Logger::Log(Logger::Level::Error, "[Loader] " + m_lastError);
+            return false;
+        }
+        if (!entry) entry = base;
+        base += r.image_size;
+        loaded += (loaded.empty() ? "" : ", ") + name;
+    }
+
+    const std::string title = NacpTitle(dir / "control.nacp");
+    m_programName = !title.empty() ? title : !npdm.name.empty() ? npdm.name : dir.filename().string();
+    m_nroInfo = {};
+    m_nroInfo.base = HLE::Layout::CODE_BASE;
+    m_nroInfo.entry = entry;
+    m_nroInfo.image_size = base - HLE::Layout::CODE_BASE;
+    m_nroInfo.title = title;
+    m_hasNro = true;
+    m_lastNro.clear();
+    m_lastRaw.clear();
+    m_lastGame = path;
+    m_currentFile = path;
+
+    for (const fs::path& r : {dir / "romfs.bin", exefs / "romfs.bin"})
+        if (fs::is_regular_file(r, ec)) { m_kernel.SetRomfsFile(r); break; }
+    m_kernel.SetupApplicationProcess(entry, m_nroInfo.image_size, npdm.main_priority, npdm.main_core,
+                                     npdm.main_stack_size, npdm.program_id);
+    Logger::Log(Logger::Level::Info, "[Loader] Juego cargado: " + m_programName + " (modulos: " + loaded + ")" +
+                (m_kernel.GetRomfsFile().empty() ? ", sin romfs.bin" : ", con romfs.bin"));
+    return true;
+}
+
 void System::LoadRawProgram(const u32* words, size_t count, u64 base) {
     ResetMachine();
     for (size_t i = 0; i < count; ++i) m_memory.Write<u32>(base + i * 4, words[i]);
@@ -93,6 +198,7 @@ void System::LoadRawProgram(const u32* words, size_t count, u64 base) {
     m_cpu.GetState().pc = base;
     m_programName = "demo";
     m_lastRaw.assign(words, words + count);
+    m_lastGame.clear();
     m_lastRawBase = base;
     m_lastNro.clear();
 }
@@ -124,7 +230,10 @@ bool System::ContinueAfterExit() {
 }
 
 void System::Restart() {
-    if (!m_lastNro.empty()) {
+    if (!m_lastGame.empty()) {
+        const std::string game = m_lastGame;
+        LoadGame(game);
+    } else if (!m_lastNro.empty()) {
         const std::vector<u8> copy = m_lastNro; // LoadNro reemplaza m_lastNro
         const std::string guest = m_guestPath, argv = m_lastArgv;
         LoadNro(copy, m_programName, guest, argv);

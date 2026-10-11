@@ -169,6 +169,22 @@ must have executed code), libnx `__appInit` and IPC, `gpu.nro`, and stopping/res
 hundreds of times mid-program. Clean with ThreadSanitizer (also running the deko3d examples
 with the GPU thread).
 
+### Idle cores take waiting threads
+
+A thread runs on its ideal core (`t->core`). When a core has nothing to run, `PickNextOnCore`
+behaves like Horizon. It takes a ready thread from another core if two things hold:
+
+- the thread's affinity mask allows this core;
+- its own core is busy with a thread of equal or higher importance.
+
+The stolen thread then stays on the new core.
+
+This matters when `pthread_create` creates threads on core -2 (core 0) and then widens their
+mask with `svcSetThreadCoreMask(-1, mask)`. Android ports such as GTA Chinatown Wars do this.
+Without migration, the main thread (priority 44) yielding in a loop with `svcSleepThread(0)` never
+lets the priority 59 workers run, so the game stays on a black screen.
+Test: `Multicore_IdleCoreTakesWaitingThread` (`tests/programs/nro_migrate`).
+
 ## UI
 
 The "Programa" window lists every thread (core, priority, state, what it waits for, PC;

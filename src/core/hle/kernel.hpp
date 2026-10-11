@@ -99,6 +99,12 @@ public:
     // crea pila, TLS y la lista de configuracion del loader, y pone los registros
     // de entrada (X0 = config, X1 = -1, SP = pila, X30 = stub que llama a svcExitProcess).
     void SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, const std::string& argv);
+    // Prepara el proceso de un juego (NSO + main.npdm), como lo crea Horizon: sin lista de
+    // configuracion (X0 = 0, X1 = handle del hilo principal) y con la prioridad, el nucleo y
+    // la pila que pide su main.npdm.
+    void SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 core, u64 stack_size, u64 program_id);
+    bool IsApplication() const { return m_isApplication; }
+    u64  ProgramId() const { return m_programId; }
 
     // Llamada desde el interprete al ejecutar "svc #imm" (con el candado del kernel cogido).
     void HandleSvc(u32 imm, Core::CPUState& state);
@@ -215,6 +221,11 @@ public:
         m_selfNro = std::make_shared<const std::vector<u8>>(std::move(data));
     }
     const std::string& GetSelfNroPath() const { return m_selfNroPath; }
+    // RomFS del juego (archivo romfs.bin): lo lee fsp-srv OpenDataStorageByCurrentProcess
+    void SetRomfsFile(const std::filesystem::path& p) { m_romfsFile = p; }
+    const std::filesystem::path& GetRomfsFile() const { return m_romfsFile; }
+    // Carpeta del PC donde se guardan las partidas de los juegos (junto a la SD: "save/<id>")
+    std::filesystem::path GetSaveRoot() const;
     // Lo que el programa pidio cargar al terminar (envSetNextLoad del hbmenu): ruta "sdmc:/..."
     // y argv. Vacio si no pidio nada.
     std::string GetNextLoadPath() { return ReadGuestString(Layout::NEXT_LOAD_PATH, Layout::NEXT_LOAD_PATH_SIZE); }
@@ -365,6 +376,10 @@ private:
 
     u64  m_heapSize = 0;
     u64  m_imageSize = 0;
+    u64  m_mainStackSize = Layout::MAIN_STACK_SIZE;
+    bool m_isApplication = false;
+    u64  m_programId = 0x0100000000001000ULL;
+    std::filesystem::path m_romfsFile;
     bool m_exited = false;
     std::string m_debugOutput;
 };

@@ -1,5 +1,5 @@
 #pragma once
-// Biblioteca de juegos: busca los .nro de las carpetas elegidas y lee de cada uno su
+// Biblioteca de juegos: busca los .nro (y los juegos extraidos) de las carpetas elegidas y lee de cada uno su
 // nombre, autor, version e icono (del NACP y el JPEG que van al final del archivo, en
 // la seccion "ASET"). No carga el programa: solo lee esas partes del archivo.
 #include <filesystem>
@@ -19,12 +19,17 @@ struct GameEntry {
     std::vector<u8> icon;    // RGBA (vacio si no tiene)
     int icon_w = 0, icon_h = 0;
     void* texture = nullptr; // textura del icono (la crea y destruye la interfaz)
+    bool is_folder = false;  // juego extraido (carpeta con ExeFS) en vez de un .nro
 };
 
 // Lee la informacion de un .nro. Devuelve false si no es un NRO valido.
 bool ReadNroMetadata(const std::filesystem::path& file, GameEntry& out);
 
-// Busca .nro en las carpetas (y subcarpetas, hasta 3 niveles). Sin repetidos.
+// Juego extraido: carpeta con exefs/main (o main + main.npdm). Lee control.nacp e icon_*.dat.
+bool IsGameDirectory(const std::filesystem::path& dir);
+bool ReadGameFolderMetadata(const std::filesystem::path& dir, GameEntry& out);
+
+// Busca .nro y juegos extraidos en las carpetas (y subcarpetas, hasta 3 niveles). Sin repetidos.
 std::vector<GameEntry> ScanGames(const std::vector<std::filesystem::path>& dirs);
 
 // Conversiones de ruta <-> texto UTF-8 (Windows usa UTF-16 por dentro)

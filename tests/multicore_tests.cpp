@@ -131,3 +131,17 @@ TEST(Multicore_StopAndResumeKeepsState) {
     k.SetMulticore(false);
     CHECK(!k.IsMulticore());
 }
+
+TEST(Multicore_IdleCoreTakesWaitingThread) {
+    // Un hilo de prioridad 44 hace yield en bucle esperando a uno de prioridad 59 creado en
+    // su mismo nucleo con mascara 0x7: un nucleo libre tiene que llevarselo (como Horizon)
+    Core::System sys;
+    CHECK(sys.LoadNro(ReadTestNro("migrate.nro"), "migrate.nro"));
+    Common::Logger::SetMuted(true);
+    const bool finished = RunCores(sys, [](HLE::Kernel&) { return false; }, 10.0);
+    Common::Logger::SetMuted(false);
+    CHECK(finished);
+    const std::string& out = sys.GetKernel().GetDebugOutput();
+    CHECK(out.find("migrar: ok") != std::string::npos);
+    if (out.find("migrar: ok") == std::string::npos) std::printf("%s\n", out.c_str());
+}

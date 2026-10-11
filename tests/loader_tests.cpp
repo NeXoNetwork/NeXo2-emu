@@ -4,6 +4,8 @@
 // tests/programs/nro_hello/): un homebrew minimo que llama a varias SVC y
 // escribe resultados con svcOutputDebugString.
 
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -149,4 +151,118 @@ TEST(Memory_RegionsSplitAndQuery) {
     mem.UnmapRegion(0x10000, 0x8000);
     CHECK_EQ(mem.Regions().size(), 1);
     CHECK_EQ(mem.QueryRegion(0x18000).base, 0x18000);
+}
+
+// ---------------------------------------------------------------------------
+// Juegos extraidos: NSO (con LZ4) + main.npdm + romfs.bin
+// ---------------------------------------------------------------------------
+
+TEST(Nso_Lz4Block) {
+    // "abcd" + copia de 8 bytes 4 atras + "e" = "abcdabcdabcde"
+    const u8 block[] = {0x44, 'a', 'b', 'c', 'd', 0x04, 0x00, 0x10, 'e'};
+    u8 out[13] = {};
+    CHECK(Loader::Lz4DecompressBlock(block, sizeof(block), out, sizeof(out)));
+    CHECK(std::string(reinterpret_cast<char*>(out), 13) == "abcdabcdabcde");
+    // Copia mas larga que su distancia (se solapa) y longitudes de mas de 15
+    const u8 rle[] = {0x1F, 'x', 0x01, 0x00, 0x05, 0x10, 'y'};   // x + 24 x (15+5+4) + y
+    u8 out2[26] = {};
+    CHECK(Loader::Lz4DecompressBlock(rle, sizeof(rle), out2, sizeof(out2)));
+    CHECK(std::string(reinterpret_cast<char*>(out2), 26) == std::string(25, 'x') + "y");
+    // Datos rotos: offset que apunta antes del principio
+    const u8 bad[] = {0x10, 'a', 0x05, 0x00, 0x10, 'b'};
+    u8 out3[8] = {};
+    CHECK(!Loader::Lz4DecompressBlock(bad, sizeof(bad), out3, sizeof(out3)));
+}
+
+namespace {
+// LZ4 "sin comprimir": un solo bloque de literales (valido para cualquier descompresor)
+std::vector<u8> Lz4Literals(const u8* data, size_t n) {
+    std::vector<u8> out;
+    if (n < 15) { out.push_back(u8(n << 4)); }
+    else { out.push_back(0xF0); size_t rest = n - 15; while (rest >= 255) { out.push_back(255); rest -= 255; } out.push_back(u8(rest)); }
+    out.insert(out.end(), data, data + n);
+    return out;
+}
+
+// Convierte hello.nro en un NSO (.text comprimido, el resto tal cual)
+std::vector<u8> NroToNso(const std::vector<u8>& nro) {
+    Loader::NroHeader h{};
+    std::memcpy(&h, nro.data() + 0x10, sizeof(h));
+    Loader::NsoHeader n{};
+    n.magic = 0x304F534E;
+    n.flags = 1;                                      // .text con LZ4
+    const auto text = Lz4Literals(nro.data() + h.text_offset, h.text_size);
+    n.text = {0x100, h.text_offset, h.text_size};
+    n.text_file_size = u32(text.size());
+    n.ro = {u32(0x100 + text.size()), h.ro_offset, h.ro_size};
+    n.ro_file_size = h.ro_size;
+    n.data = {n.ro.file_offset + h.ro_size, h.data_offset, h.data_size};
+    n.data_file_size = h.data_size;
+    n.bss_size = h.bss_size;
+    std::vector<u8> out(sizeof(n));
+    std::memcpy(out.data(), &n, sizeof(n));
+    out.insert(out.end(), text.begin(), text.end());
+    out.insert(out.end(), nro.begin() + h.ro_offset, nro.begin() + h.ro_offset + h.ro_size);
+    out.insert(out.end(), nro.begin() + h.data_offset, nro.begin() + h.data_offset + h.data_size);
+    return out;
+}
+
+std::vector<u8> MakeNpdm(u8 priority, u32 stack, u64 program_id) {
+    std::vector<u8> f(0x80 + 0x40, 0);
+    auto put32 = [&](size_t o, u32 v) { std::memcpy(&f[o], &v, 4); };
+    put32(0, 0x4154454D);                             // META
+    f[0x0C] = 1 | (3 << 1);                           // 64 bits, espacio de 39 bits
+    f[0x0E] = priority;
+    f[0x0F] = 0;
+    put32(0x1C, stack);
+    std::memcpy(&f[0x20], "NeXoTest", 8);
+    put32(0x70, 0x80); put32(0x74, 0x40);             // ACI0
+    put32(0x80, 0x30494341);
+    std::memcpy(&f[0x90], &program_id, 8);
+    return f;
+}
+
+void WriteFile(const std::filesystem::path& p, const std::vector<u8>& d) {
+    std::ofstream f(p, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(d.data()), std::streamsize(d.size()));
+}
+} // namespace
+
+TEST(Game_LoadsExtractedExefs) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "nexo2_test_game";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "exefs");
+    WriteFile(dir / "exefs" / "main", NroToNso(ReadTestFile("hello.nro")));
+    WriteFile(dir / "exefs" / "main.npdm", MakeNpdm(49, 0x40000, 0x0100ABCD00000000ULL));
+    WriteFile(dir / "romfs.bin", std::vector<u8>(0x1234, 0xAB));
+
+    CHECK(Core::System::IsGameFolder(dir.string()));
+    CHECK(!Core::System::IsGameFolder(fs::temp_directory_path().string()));
+    Core::System sys;
+    CHECK(sys.LoadGame(dir.string()));
+    auto& k = sys.GetKernel();
+    CHECK(k.IsApplication());
+    CHECK_EQ(k.ProgramId(), 0x0100ABCD00000000ULL);
+    CHECK(k.GetRomfsFile() == dir / "romfs.bin");
+    CHECK(k.GetSaveRoot().filename() == "0100ABCD00000000");
+    const auto& st = sys.GetCpu().GetState();
+    CHECK_EQ(st.pc, HLE::Layout::CODE_BASE);
+    CHECK_EQ(st.x[0], 0ULL);
+    CHECK_EQ(st.sp, HLE::Layout::STACK_REGION_BASE + 0x40000);
+    CHECK_EQ(k.Threads().front()->priority, 49);
+    const auto text = sys.GetMemory().QueryRegion(HLE::Layout::CODE_BASE);
+    CHECK_EQ(static_cast<u32>(text.perm), static_cast<u32>(MemoryPermission::ReadExecute));
+
+    u64 n = 0;
+    while (n < 50'000'000 && !sys.GetCpu().IsHalted()) n += sys.Run(1'000'000);
+    const std::string& out = k.GetDebugOutput();
+    CHECK(Contains(out, "Hola desde un NRO en NeXo 2!"));
+    CHECK(Contains(out, "Loader: X1=0x10001"));                 // X1 = handle del hilo principal
+    CHECK(Contains(out, "fibonacci(50) = 12586269025"));
+    CHECK(k.HasExited());
+
+    sys.Restart();                                             // vuelve a cargar el juego
+    CHECK(sys.GetKernel().IsApplication());
+    fs::remove_all(dir);
 }

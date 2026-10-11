@@ -11,7 +11,8 @@
   - Ver: list or grid, icon size, developer mode.
   - Ayuda: links, about.
 - **Library:** fills the window when no game is running.
-  - It scans `sdmc/switch` plus the folders added in Settings, up to 3 levels deep.
+  - It scans `sdmc/switch`, `games/` (next to the executable) and the folders added in Settings, up to 3 levels deep.
+  - It lists `.nro` files and extracted games (a folder with `exefs/main`; see [games.md](games.md)).
   - It can be shown as a sortable table (icon, name, author, version, size, file) or as a grid of icons.
   - There is search, a right-click menu, and double click or Enter to play.
 - **Game:** the console image fills the central area at 16:9.

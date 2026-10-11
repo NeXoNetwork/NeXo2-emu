@@ -16,8 +16,11 @@ class FileSystemProxy final : public ServiceObject { public: FileSystemProxy(); 
 // IFileSystem: crear/borrar/abrir archivos y carpetas
 class FileSystem final : public ServiceObject {
 public:
-    explicit FileSystem(std::string name);
+    // 'root' = carpeta del PC que hace de raiz; vacia = la tarjeta SD
+    explicit FileSystem(std::string name, std::filesystem::path root = {});
 private:
+    std::filesystem::path Root(IpcContext& ctx) const;
+    std::filesystem::path m_root;
     // Lee la ruta del buffer X 'index' y la convierte en ruta del PC. false si no es valida.
     bool HostPath(IpcContext& ctx, size_t index, std::filesystem::path& out);
     // Si la ruta es la del propio .nro (y no existe de verdad en la SD), sus datos
@@ -40,6 +43,16 @@ private:
     std::filesystem::path m_path;
     std::fstream m_file;
     u32 m_mode;  // bit 0 leer, bit 1 escribir, bit 2 ampliar al escribir
+};
+
+// IStorage de solo lectura sobre un archivo del PC (la RomFS de un juego: romfs.bin)
+class FileStorage final : public ServiceObject {
+public:
+    explicit FileStorage(const std::filesystem::path& path);
+    bool IsOpen() const { return m_file.is_open(); }
+private:
+    std::ifstream m_file;
+    u64 m_size = 0;
 };
 
 // IDirectory: lista de entradas de una carpeta

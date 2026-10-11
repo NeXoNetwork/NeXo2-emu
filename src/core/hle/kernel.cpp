@@ -1,4 +1,5 @@
 #include "kernel.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include "firmware.hpp"
 #include "ipc.hpp"
@@ -98,6 +99,10 @@ void Kernel::Reset() {
     for (auto& c : m_extraCpus) if (c) c->Resume();
     m_heapSize = 0;
     m_imageSize = 0;
+    m_mainStackSize = Layout::MAIN_STACK_SIZE;
+    m_isApplication = false;
+    m_programId = 0x0100000000001000ULL;
+    m_romfsFile.clear();
     m_exited = false;
     m_debugOutput.clear();
     m_handles.Clear();
@@ -199,6 +204,49 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
     m_cpu.Resume();
 
     Logger::Log(Logger::Level::Info, "[HLE] Proceso homebrew listo. Entrada = " + Hex(entry));
+}
+
+void Kernel::SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 core, u64 stack_size, u64 program_id) {
+    using namespace Layout;
+    m_imageSize = image_size;
+    m_isApplication = true;
+    m_programId = program_id;
+    stack_size = std::clamp<u64>((stack_size + 0xFFF) & ~u64(0xFFF), 0x4000, STACK_REGION_SIZE);
+    m_mainStackSize = stack_size;
+
+    m_memory.MapRegion(STACK_REGION_BASE, stack_size, MemoryState::Stack, MemoryPermission::ReadWrite, "pila principal");
+    m_memory.MapRegion(TLS_PAGE, Core::Memory::PAGE_SIZE, MemoryState::ThreadLocal, MemoryPermission::ReadWrite, "TLS");
+    // Solo los stubs de salida (por si el juego vuelve de su entrada o de un hilo)
+    m_memory.MapRegion(LOADER_PAGE, Core::Memory::PAGE_SIZE, MemoryState::Static, MemoryPermission::ReadExecute, "loader HLE");
+    m_memory.Write<u32>(LOADER_PAGE + 0, 0xD40000E1u);   // svc #0x7 (ExitProcess)
+    m_memory.Write<u32>(LOADER_PAGE + 4, 0xD4200000u);
+    m_memory.Write<u32>(LOADER_PAGE + 8, 0xD4000141u);   // svc #0xA (ExitThread)
+    m_memory.Write<u32>(LOADER_PAGE + 12, 0xD4200000u);
+
+    auto t = CreateMainThread(TLS_PAGE);
+    t->priority = priority;
+    (void)core;   // el hilo principal empieza en el nucleo 0 (como los homebrew)
+
+    CPUState& s = m_cpu.GetState();
+    s.x.fill(0);
+    s.x[0]  = 0;                    // X0 = 0: no hay lista de configuracion (no es homebrew)
+    s.x[1]  = MAIN_THREAD_HANDLE;   // X1 = handle del hilo principal
+    s.x[30] = LOADER_PAGE;
+    s.sp    = STACK_REGION_BASE + stack_size;
+    s.pc    = entry;
+    s.tpidrro_el0 = TLS_PAGE;
+    m_cpu.Resume();
+
+    char id[24];
+    std::snprintf(id, sizeof(id), "%016llX", (unsigned long long)program_id);
+    Logger::Log(Logger::Level::Info, "[HLE] Proceso de juego listo. Entrada = " + Hex(entry) + ", id " + id +
+                ", prioridad " + std::to_string(priority) + ", pila " + Hex(stack_size));
+}
+
+std::filesystem::path Kernel::GetSaveRoot() const {
+    char id[24];
+    std::snprintf(id, sizeof(id), "%016llX", (unsigned long long)m_programId);
+    return m_sdmcRoot.parent_path() / "save" / id;
 }
 
 // ============================================================================
@@ -493,7 +541,7 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 4:  value = HEAP_REGION_BASE;  break;
         case 5:  value = HEAP_REGION_SIZE;  break;
         case 6:  value = TOTAL_MEMORY;      break;             // TotalMemorySize
-        case 7:  value = m_imageSize + MAIN_STACK_SIZE + m_heapSize; break; // UsedMemorySize
+        case 7:  value = m_imageSize + m_mainStackSize + m_heapSize; break; // UsedMemorySize
         case 8:  value = 0; break;                             // DebuggerAttached
         case 11: value = 0x4E65586F32ULL ^ (id1 * 0x9E3779B97F4A7C15ULL); break; // RandomEntropy (fijo)
         case 12: value = ASLR_REGION_BASE;  break;
@@ -501,9 +549,9 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 14: value = STACK_REGION_BASE; break;
         case 15: value = STACK_REGION_SIZE; break;
         case 16: case 17: value = 0; break;                    // SystemResourceSize total/usado
-        case 18: value = 0x0100000000001000ULL; break;         // ProgramId (inventado)
+        case 18: value = m_programId; break;                   // ProgramId (el del main.npdm; inventado en homebrew)
         case 21: value = TOTAL_MEMORY; break;                  // TotalNonSystemMemorySize
-        case 22: value = m_imageSize + MAIN_STACK_SIZE + m_heapSize; break;
+        case 22: value = m_imageSize + m_mainStackSize + m_heapSize; break;
         case 23: value = 1; break;                             // IsApplication
         case 28: value = 0; break;                             // AliasRegionExtraSize [18.0.0+]
         default:

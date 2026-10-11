@@ -69,7 +69,58 @@ FileSystemProxy::FileSystemProxy() : ServiceObject("fsp-srv") {
         ctx.PushInterface(std::make_shared<FileSystem>("IFileSystem (sdmc)"));
         ctx.SetResult(Result::Success);
     });
+    // Partidas guardadas: una carpeta del PC por juego (Kernel::GetSaveRoot)
+    RegisterStub(22, "CreateSaveDataFileSystem");
+    RegisterCommand(51, "OpenSaveDataFileSystem", [](IpcContext& ctx) {
+        const fs::path root = ctx.GetKernel().GetSaveRoot();
+        std::error_code ec;
+        fs::create_directories(root, ec);
+        if (ec) { ctx.SetResult(RESULT_PATH_NOT_FOUND); return; }
+        ctx.PushInterface(std::make_shared<FileSystem>("IFileSystem (save)", root));
+        ctx.SetResult(Result::Success);
+    });
+    // RomFS del juego
+    RegisterCommand(200, "OpenDataStorageByCurrentProcess", [](IpcContext& ctx) {
+        const fs::path& file = ctx.GetKernel().GetRomfsFile();
+        auto storage = file.empty() ? nullptr : std::make_shared<FileStorage>(file);
+        if (!storage || !storage->IsOpen()) {
+            Logger::Log(Logger::Level::Warning, "[fs] El juego pide su RomFS y no hay romfs.bin");
+            ctx.SetResult(RESULT_PATH_NOT_FOUND);
+            return;
+        }
+        ctx.PushInterface(storage);
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(202, "OpenDataStorageByDataId", [](IpcContext& ctx) { ctx.SetResult(RESULT_PATH_NOT_FOUND); });
+    RegisterCommand(203, "OpenPatchDataStorageByCurrentProcess", [](IpcContext& ctx) { ctx.SetResult(RESULT_PATH_NOT_FOUND); });
     RegisterStub(1003, "DisableAutoSaveDataCreation");
+    RegisterCommand(1005, "GetGlobalAccessLogMode", [](IpcContext& ctx) { ctx.Push<u32>(0); ctx.SetResult(Result::Success); });
+    RegisterStub(1006, "OutputAccessLogToSdCard");
+}
+
+// ============================================================================
+//  IStorage (romfs.bin)
+// ============================================================================
+
+FileStorage::FileStorage(const fs::path& path) : ServiceObject("IStorage (romfs)"), m_file(path, std::ios::binary) {
+    std::error_code ec;
+    m_size = m_file.is_open() ? fs::file_size(path, ec) : 0;
+    RegisterCommand(0, "Read", [this](IpcContext& ctx) {
+        const s64 offset = ctx.Pop<s64>();
+        const u64 size = std::min<u64>(ctx.Pop<u64>(), ctx.GetWriteBufferSize(0));
+        if (offset < 0) { ctx.SetResult(RESULT_INVALID_OFFSET); return; }
+        std::vector<u8> data(size_t(size), 0);
+        if (u64(offset) < m_size) {
+            m_file.clear();
+            m_file.seekg(offset);
+            m_file.read(reinterpret_cast<char*>(data.data()), std::streamsize(std::min<u64>(size, m_size - u64(offset))));
+        }
+        if (!data.empty()) ctx.WriteBuffer(data.data(), data.size(), 0);
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(1, "Write", [](IpcContext& ctx) { ctx.SetResult(RESULT_NOT_PERMITTED); });
+    RegisterCommand(2, "Flush", [](IpcContext& ctx) { ctx.SetResult(Result::Success); });
+    RegisterCommand(4, "GetSize", [this](IpcContext& ctx) { ctx.Push<s64>(s64(m_size)); ctx.SetResult(Result::Success); });
 }
 
 // ============================================================================
@@ -80,7 +131,7 @@ bool FileSystem::HostPath(IpcContext& ctx, size_t index, fs::path& out) {
     const auto raw = ctx.ReadBuffer(index);
     std::string guest(reinterpret_cast<const char*>(raw.data()), raw.size());
     guest = guest.substr(0, guest.find('\0'));
-    out = ResolveGuestPath(ctx.GetKernel().GetSdmcRoot(), guest);
+    out = ResolveGuestPath(Root(ctx), guest);
     if (out.empty()) {
         Logger::Log(Logger::Level::Warning, "[fs] Ruta rechazada: " + guest);
         ctx.SetResult(RESULT_INVALID_PATH);
@@ -89,9 +140,13 @@ bool FileSystem::HostPath(IpcContext& ctx, size_t index, fs::path& out) {
     return true;
 }
 
+fs::path FileSystem::Root(IpcContext& ctx) const {
+    return m_root.empty() ? ctx.GetKernel().GetSdmcRoot() : m_root;
+}
+
 std::shared_ptr<const std::vector<u8>> FileSystem::SelfNro(IpcContext& ctx, size_t index) {
     const auto& kernel = ctx.GetKernel();
-    if (kernel.GetSelfNroPath().empty()) return nullptr;
+    if (!m_root.empty() || kernel.GetSelfNroPath().empty()) return nullptr;
     const auto raw = ctx.ReadBuffer(index);
     std::string guest(reinterpret_cast<const char*>(raw.data()), raw.size());
     guest = guest.substr(0, guest.find('\0'));
@@ -101,7 +156,7 @@ std::shared_ptr<const std::vector<u8>> FileSystem::SelfNro(IpcContext& ctx, size
     return kernel.GetSelfNro();
 }
 
-FileSystem::FileSystem(std::string name) : ServiceObject(std::move(name)) {
+FileSystem::FileSystem(std::string name, fs::path root) : ServiceObject(std::move(name)), m_root(std::move(root)) {
     // 0 CreateFile(u32 opcion, s64 tamano, ruta)
     RegisterCommand(0, "CreateFile", [this](IpcContext& ctx) {
         ctx.Pop<u32>(); ctx.Pop<u32>();

@@ -7,6 +7,8 @@
 #include "arm64/interpreter.hpp"
 #include "hle/kernel.hpp"
 #include "loader/nro.hpp"
+#include "loader/npdm.hpp"
+#include "loader/nso.hpp"
 
 // "La consola": junta memoria, CPU y kernel HLE, y sabe cargar programas.
 // La interfaz (main.cpp) y los tests solo hablan con esta clase.
@@ -24,6 +26,13 @@ public:
     // el .nro en la SD ("/switch/juego/juego.nro"); vacio = "/switch/<name>".
     bool LoadNro(const std::vector<u8>& data, const std::string& name, const std::string& guest_path = "",
                  const std::string& argv = "");
+
+    // Carga un juego "extraido": una carpeta con su ExeFS (main, main.npdm, rtld, subsdk*, sdk;
+    // directamente o en una subcarpeta "exefs") y opcionalmente romfs.bin y control.nacp.
+    // 'path' puede ser la carpeta o cualquier archivo de dentro. Ver docs/07-nexo-internals/games.md
+    bool LoadGame(const std::string& path);
+    // true si 'path' parece un juego extraido (lo que acepta LoadGame)
+    static bool IsGameFolder(const std::string& path);
 
     // Carga instrucciones sueltas en 'base' (la demo de main.cpp y algunos tests).
     void LoadRawProgram(const u32* words, size_t count, u64 base);
@@ -62,6 +71,7 @@ private:
     std::string     m_menuPath;      // archivo del menu que lanzo este programa (vacio = ninguno)
     std::string     m_currentFile;   // archivo del programa cargado
     std::string     m_lastArgv;      // argv que se le dio (para Restart)
+    std::string     m_lastGame;      // carpeta del juego cargado con LoadGame (para Restart)
     bool            m_hasNro = false;
     Loader::NroInfo m_nroInfo;
 

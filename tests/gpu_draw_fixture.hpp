@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <string>
 #include <vector>
 #include "memory.hpp"
 #include "video_core/gpu.hpp"
@@ -15,6 +16,11 @@
 
 using namespace NeXo2;
 using NeXo2::Tests::ShaderBin;
+
+// true: los tests de dibujo usan Vulkan en vez del dibujo por software (lo activa el test
+// Vulkan_DrawAndTextureTests, que vuelve a ejecutar los Draw_* y Texture_* asi)
+inline bool g_vulkanDraw = false;
+inline unsigned long long g_drawsTotal = 0, g_drawsHw = 0;   // contados al destruir cada DrawFixture
 
 namespace {
 constexpr u64 CPU_BASE = 0x2000'0000;
@@ -51,10 +57,19 @@ struct DrawFixture {
     DrawFixture() : ch(gpu.CreateChannel()) {
         mem.WriteBytes(CPU_BASE, std::vector<u8>(SIZE, 0).data(), SIZE);
         gpu.MemoryManager().Map(GPU_BASE, CPU_BASE, SIZE);
+        if (g_vulkanDraw) {
+            std::string error;
+            if (!gpu.SetRenderer(GPU::RendererKind::Vulkan, &error)) std::printf("    (sin Vulkan: %s)\n", error.c_str());
+        }
+    }
+    ~DrawFixture() {
+        g_drawsTotal += gpu.GetStats().draws;
+        g_drawsHw += gpu.GetStats().draws_hw;
     }
     void Run(const Push& p) {
         gpu.MemoryManager().WriteBlock(PB, p.w.data(), p.w.size() * 4);
         ch.ProcessPushbuffer(PB, u32(p.w.size()));
+        gpu.FlushRenderer();   // lo dibujado con Vulkan, a memoria
     }
     void Write(u64 va, const void* data, size_t n) { gpu.MemoryManager().WriteBlock(va, data, n); }
 

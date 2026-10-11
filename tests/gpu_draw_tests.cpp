@@ -34,7 +34,7 @@ TEST(Draw_TriangleColorsAndCoverage) {
     // Area: medio cuadrado de 64x64 = 2048 pixeles (con la regla de bordes, exacto +-1 fila)
     const u32 n = f.CountNonBlack();
     CHECK(n >= 2016 && n <= 2080);
-    CHECK_EQ(n, u32(st.pixels));
+    if (!g_vulkanDraw) CHECK_EQ(n, u32(st.pixels));   // (Vulkan no cuenta pixeles)
     // Esquinas de arriba: fuera del triangulo (negro)
     CHECK_EQ(f.Pixel(0, 0)[0], 0);
     CHECK_EQ(f.Pixel(63, 0)[1], 0);
@@ -87,7 +87,7 @@ TEST(Draw_IndexedStripLinearTargetNoGaps) {
     f.Run(p);
     // El cuadrado va de x=16 a x=48 y de y=16 a y=48: exactamente 32x32 pixeles blancos
     CHECK_EQ(f.CountNonBlack(false), 32u * 32u);
-    CHECK_EQ(f.gpu.GetStats().pixels, 32u * 32u);
+    if (!g_vulkanDraw) CHECK_EQ(f.gpu.GetStats().pixels, 32u * 32u);
     CHECK_EQ(f.Pixel(16, 16, false)[0], 255);
     CHECK_EQ(f.Pixel(47, 47, false)[1], 255);
     CHECK_EQ(f.Pixel(48, 47, false)[0], 0);

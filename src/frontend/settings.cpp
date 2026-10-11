@@ -30,6 +30,7 @@ void Settings::Load(const std::string& path) {
         else if (k == "multicore") multicore = ToBool(v);
         else if (k == "decode_cache") decode_cache = ToBool(v);
         else if (k == "gpu_async") gpu_async = ToBool(v);
+        else if (k == "renderer") renderer = v == "software" ? 0 : 1;
         else if (k == "gpu_threads") gpu_threads = std::clamp(ToInt(v, 0), 0, 64);
         else if (k == "linear_filter") linear_filter = ToBool(v);
         else if (k == "audio") audio = ToBool(v);
@@ -48,6 +49,7 @@ bool Settings::Save(const std::string& path) const {
       << "jit=" << jit << "\n"
       << "multicore=" << multicore << "\n"
       << "decode_cache=" << decode_cache << "\n"
+      << "renderer=" << (renderer == 0 ? "software" : "vulkan") << "\n"
       << "gpu_async=" << gpu_async << "\n"
       << "gpu_threads=" << gpu_threads << "\n"
       << "linear_filter=" << linear_filter << "\n"

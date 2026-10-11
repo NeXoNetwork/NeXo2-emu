@@ -12,7 +12,7 @@ Internals: [docs/07-nexo-internals/README.md](docs/07-nexo-internals/README.md)
 
 | Program | Type | Status |
 | :--- | :--- | :--- |
-| **NZ:P (Nazi Zombies Portable)** | Homebrew 3D game (SDL2 + OpenGL/mesa) | Playable, with sound (slow: software GPU) |
+| **NZ:P (Nazi Zombies Portable)** | Homebrew 3D game (SDL2 + OpenGL/mesa) | Playable, with sound (Vulkan renderer) |
 | **hbmenu** | Homebrew menu | Works: lists the SD card, icons, launches other `.nro` (chain loading) |
 | **Homebrew App Store** | SDL2 app | Works: downloads the real catalogue over https |
 | **deko3d examples** | Official 3D samples | 7 of 9 (tessellation and compute missing) |
@@ -32,7 +32,10 @@ Internals: [docs/07-nexo-internals/README.md](docs/07-nexo-internals/README.md)
   `pl:u` (system font), `psm`, `ts`, `csrng`, network and audio. See [ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
 * **GPU (Maxwell):** GPFIFO, macros, DMA/2D engines, a shader interpreter and a multithreaded
   software rasterizer (textures BC1–BC5, mipmaps, MSAA, shared texture cache), running on **its own
-  thread**. Vulkan backend in progress. See [gpu.md](docs/07-nexo-internals/gpu.md), [gpu-rasterizer.md](docs/07-nexo-internals/gpu-rasterizer.md).
+  thread**. **Vulkan renderer**: pixel shaders translated from Maxwell to SPIR-V and run on the PC's
+  graphics card, render targets and textures as Vulkan images; anything it can't draw yet falls back
+  to the software path. See [gpu.md](docs/07-nexo-internals/gpu.md), [gpu-rasterizer.md](docs/07-nexo-internals/gpu-rasterizer.md),
+  [gpu-vulkan.md](docs/07-nexo-internals/gpu-vulkan.md).
 * **Network:** host sockets (`bsd`), DNS (`sfdnsres`), `nifm`, and real **TLS** (`ssl`, mbedTLS) checked
   against the system's root certificates. See [network.md](docs/07-nexo-internals/network.md).
 * **Audio:** `audout:u` played through SDL3 (48 kHz stereo). See [audio.md](docs/07-nexo-internals/audio.md).
@@ -77,7 +80,7 @@ Unzip, put your `.nro` files in `sdmc/switch` and open `NeXo2.exe`.
 5. [x] Software GPU — shaders, textures, 3D
 6. [x] Network and https
 7. [~] Audio — `audout:u` done; `audren:u` next
-8. [~] Vulkan — device init done; Maxwell → SPIR-V translator next
+8. [~] Vulkan — draws on the GPU (pixel shaders, textures, blending, depth); next: vertex shaders on the GPU, MSAA
 9. [ ] Game formats — NSO, NCA, RomFS
 
 ## Legal

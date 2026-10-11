@@ -220,7 +220,7 @@ struct SoftwareRasterizer::DrawState {
     const ConstbufTable* cbs;
     const DrawCall* dc;
     GpuMemoryManager* mm;
-    std::unique_ptr<ShaderProgram> vs, fs;
+    std::unique_ptr<ShaderProgram> fs;
     u32 vs_group = 0, fs_group = 4;
     // Constbufs copiados a memoria la primera vez que se leen
     std::array<std::array<std::vector<u32>, 18>, 5> cb_cache;
@@ -376,16 +376,115 @@ private:
 };
 } // namespace
 
-bool SoftwareRasterizer::RunVertexShader(DrawState& st, u32 index, u32 vertex_id, Vertex& out) {
-    out.attr.fill(0);
-    out.attr[0x7C / 4] = U(1.0f);
-    VertexEnv env(st.regs, *st.mm, *st.dc, index, vertex_id,
-                  [&st](u32 i, u32 o) { return st.ReadConst(st.vs_group, i, o); }, out);
-    env.tex = st.textures.get();
-    env.tex_cb = st.tex_cb;
-    const auto res = st.interp.Run(*st.vs, env);
-    if (!res.ok) { st.failed = true; st.error = "shader de vertices: " + res.error; }
-    return res.ok;
+bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, const DrawCall& dc,
+                                        TextureSampler* tex, u32 tex_cb, VertexStage& out) {
+    GpuMemoryManager& mm = gpu.MemoryManager();
+    auto read = [&mm](u64 a, void* d, size_t n) { mm.ReadBlock(a, d, n); };
+    const u64 region = Iova(regs[PROGRAM_REGION], regs[PROGRAM_REGION + 1]);
+    ShaderProgram vs(region + regs[PIPELINE + 0x10 * 1 + 1], read);
+    const u32 group = std::min<u32>(regs[PIPELINE + 0x10 * 1 + 4] & 7, 4);
+    // Constbufs del grupo de vertices, copiados la primera vez que se leen
+    std::array<std::vector<u32>, 18> cb_cache;
+    std::array<bool, 18> cb_loaded{};
+    auto read_const = [&](u32 index, u32 offset) -> u32 {
+        if (index >= 18) return 0;
+        if (!cb_loaded[index]) {
+            cb_loaded[index] = true;
+            const ConstbufBinding& b = cbs[group][index];
+            if (b.valid && b.size) {
+                cb_cache[index].resize((std::min<u32>(b.size, 0x10000) + 3) / 4);
+                mm.ReadBlock(b.address, cb_cache[index].data(), cb_cache[index].size() * 4);
+            }
+        }
+        return offset / 4 < cb_cache[index].size() ? cb_cache[index][offset / 4] : 0;
+    };
+    ShaderInterpreter interp;
+
+    // --- Vertices: ejecutar el shader de vertices en cada uno (con cache por indice) ---
+    const bool restart = regs[PRIM_RESTART] & 1;
+    const u32 restart_index = regs[PRIM_RESTART_INDEX];
+    const u32 index_size = 1u << std::min<u32>(regs[INDEX_FORMAT] & 3, 2);
+    const u64 index_addr = Iova(regs[INDEX_ADDR], regs[INDEX_ADDR + 1]);
+    std::vector<s64> indices;       // -1 = reinicio de primitiva
+    indices.reserve(dc.count);
+    for (u32 i = 0; i < dc.count; ++i) {
+        if (dc.indexed) {
+            u32 idx = 0;
+            mm.ReadBlock(index_addr + u64(dc.first + i) * index_size, &idx, index_size);
+            if (restart && idx == restart_index) { indices.push_back(-1); continue; }
+            indices.push_back(s64(s32(idx) + dc.vertex_offset) & 0xFFFFFFFF);
+        } else {
+            indices.push_back(s64(dc.first) + i);
+        }
+    }
+    std::map<u32, size_t> cache;
+    auto& verts = out.verts;
+    std::vector<s64> slots;         // posicion en 'verts' de cada indice (-1 = reinicio)
+    slots.reserve(indices.size());
+    for (s64 idx : indices) {
+        if (idx < 0) { slots.push_back(-1); continue; }
+        auto it = cache.find(u32(idx));
+        if (it != cache.end()) { slots.push_back(s64(it->second)); continue; }
+        Vertex& v = verts.emplace_back();
+        v.attr[0x7C / 4] = U(1.0f);
+        const u32 vid = dc.indexed ? u32(idx) : u32(idx - dc.first) + dc.vertex_id_base;
+        VertexEnv env(regs, mm, dc, u32(idx), vid, read_const, v);
+        env.tex = tex;
+        env.tex_cb = tex_cb;
+        const auto res = interp.Run(vs, env);
+        if (!res.ok) { out.failed = true; out.error = "shader de vertices: " + res.error; return false; }
+        cache[u32(idx)] = verts.size() - 1;
+        slots.push_back(s64(verts.size() - 1));
+    }
+
+    // --- Primitivas ---
+    const bool last = regs[PROVOKING_LAST] & 1;
+    auto tri = [&](s64 a, s64 b, s64 c, s64 prov) {
+        if (a < 0 || b < 0 || c < 0) return;
+        out.tris.push_back({u32(a), u32(b), u32(c), u32(prov)});
+    };
+    // Recorre la lista en trozos separados por los reinicios de primitiva
+    size_t start = 0;
+    while (start < slots.size()) {
+        size_t end = start;
+        while (end < slots.size() && slots[end] >= 0) ++end;
+        const s64* s = slots.data() + start;
+        const size_t n = end - start;
+        switch (dc.topology) {
+            case 4:   // triangulos
+                for (size_t i = 0; i + 2 < n; i += 3) tri(s[i], s[i + 1], s[i + 2], last ? s[i + 2] : s[i]);
+                break;
+            case 5:   // tira: cada triangulo nuevo alterna el sentido para que todos giren igual
+                for (size_t i = 0; i + 2 < n; ++i) {
+                    if (i & 1) tri(s[i + 1], s[i], s[i + 2], last ? s[i + 2] : s[i]);
+                    else tri(s[i], s[i + 1], s[i + 2], last ? s[i + 2] : s[i]);
+                }
+                break;
+            case 6: case 9:   // abanico y poligono
+                for (size_t i = 1; i + 1 < n; ++i) tri(s[0], s[i], s[i + 1], dc.topology == 9 ? s[0] : (last ? s[i + 1] : s[0]));
+                break;
+            case 7:   // quads: dos triangulos cada uno
+                for (size_t i = 0; i + 3 < n; i += 4) {
+                    tri(s[i], s[i + 1], s[i + 2], last ? s[i + 3] : s[i]);
+                    tri(s[i], s[i + 2], s[i + 3], last ? s[i + 3] : s[i]);
+                }
+                break;
+            case 8:   // tira de quads
+                for (size_t i = 0; i + 3 < n; i += 2) {
+                    tri(s[i], s[i + 1], s[i + 3], last ? s[i + 3] : s[i]);
+                    tri(s[i], s[i + 3], s[i + 2], last ? s[i + 3] : s[i]);
+                }
+                break;
+            default: {
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "dibujo: primitiva %u no soportada (puntos/lineas)", dc.topology);
+                gpu.Warn("topo" + std::to_string(dc.topology), buf);
+                return false;
+            }
+        }
+        start = end + 1;
+    }
+    return !out.tris.empty();
 }
 
 // ============================================================================
@@ -545,7 +644,6 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
     st.textures = std::make_unique<TextureSampler>(m_gpu, Iova(regs[TIC_POOL], regs[TIC_POOL + 1]), regs[TIC_MAX],
                                                    Iova(regs[TSC_POOL], regs[TSC_POOL + 1]), regs[TSC_MAX], &m_gpu.Textures());
     st.tex_cb = std::min<u32>(regs[BINDLESS_TEXTURE] & 0x1F, 17);
-    st.vs = std::make_unique<ShaderProgram>(region + regs[PIPELINE + 0x10 * 1 + 1], read);
     st.fs = std::make_unique<ShaderProgram>(region + regs[PIPELINE + 0x10 * 5 + 1], read);
     st.vs_group = std::min<u32>(regs[PIPELINE + 0x10 * 1 + 4] & 7, 4);
     st.fs_group = std::min<u32>(regs[PIPELINE + 0x10 * 5 + 4] & 7, 4);
@@ -659,92 +757,16 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
     st.flip_y = (regs[WINDOW_ORIGIN] >> 4) & 1;
     st.y_direction = (regs[WINDOW_ORIGIN] & 1) ? -1.0f : 1.0f;
 
-    // --- Vertices: ejecutar el shader de vertices en cada uno (con cache por indice) ---
-    const bool restart = regs[PRIM_RESTART] & 1;
-    const u32 restart_index = regs[PRIM_RESTART_INDEX];
-    const u32 index_size = 1u << std::min<u32>(regs[INDEX_FORMAT] & 3, 2);
-    const u64 index_addr = Iova(regs[INDEX_ADDR], regs[INDEX_ADDR + 1]);
-    std::vector<s64> indices;       // -1 = reinicio de primitiva
-    indices.reserve(dc.count);
-    for (u32 i = 0; i < dc.count; ++i) {
-        if (dc.indexed) {
-            u32 idx = 0;
-            st.mm->ReadBlock(index_addr + u64(dc.first + i) * index_size, &idx, index_size);
-            if (restart && idx == restart_index) { indices.push_back(-1); continue; }
-            indices.push_back(s64(s32(idx) + dc.vertex_offset) & 0xFFFFFFFF);
-        } else {
-            indices.push_back(s64(dc.first) + i);
-        }
-    }
-    std::map<u32, size_t> cache;
-    std::vector<Vertex> verts;
-    std::vector<s64> slots;         // posicion en 'verts' de cada indice (-1 = reinicio)
-    slots.reserve(indices.size());
-    for (s64 idx : indices) {
-        if (idx < 0) { slots.push_back(-1); continue; }
-        auto it = cache.find(u32(idx));
-        if (it != cache.end()) { slots.push_back(s64(it->second)); continue; }
-        Vertex v;
-        const u32 vid = dc.indexed ? u32(idx) : u32(idx - dc.first) + dc.vertex_id_base;
-        if (!RunVertexShader(st, u32(idx), vid, v)) break;
-        cache[u32(idx)] = verts.size();
-        slots.push_back(s64(verts.size()));
-        verts.push_back(v);
-    }
-    if (st.failed) {
-        m_gpu.Warn("vs:" + st.error, st.error);
+    // --- Vertices y primitivas (shader de vertices en cada vertice) ---
+    VertexStage vstage;
+    RunVertexStage(m_gpu, regs, cbs, dc, st.textures.get(), st.tex_cb, vstage);
+    if (vstage.failed) {
+        m_gpu.Warn("vs:" + vstage.error, vstage.error);
         ++stats.shader_errors;
         return;
     }
-
-    // --- Primitivas ---
-    const bool last = regs[PROVOKING_LAST] & 1;
-    auto tri = [&](s64 a, s64 b, s64 c, s64 prov) {
-        if (a < 0 || b < 0 || c < 0 || st.failed) return;
-        ProcessTriangle(st, verts[a], verts[b], verts[c], verts[prov]);
-    };
-    // Recorre la lista en trozos separados por los reinicios de primitiva
-    size_t start = 0;
-    while (start < slots.size() && !st.failed) {
-        size_t end = start;
-        while (end < slots.size() && slots[end] >= 0) ++end;
-        const s64* s = slots.data() + start;
-        const size_t n = end - start;
-        switch (dc.topology) {
-            case 4:   // triangulos
-                for (size_t i = 0; i + 2 < n; i += 3) tri(s[i], s[i + 1], s[i + 2], last ? s[i + 2] : s[i]);
-                break;
-            case 5:   // tira: cada triangulo nuevo alterna el sentido para que todos giren igual
-                for (size_t i = 0; i + 2 < n; ++i) {
-                    if (i & 1) tri(s[i + 1], s[i], s[i + 2], last ? s[i + 2] : s[i]);
-                    else tri(s[i], s[i + 1], s[i + 2], last ? s[i + 2] : s[i]);
-                }
-                break;
-            case 6: case 9:   // abanico y poligono
-                for (size_t i = 1; i + 1 < n; ++i) tri(s[0], s[i], s[i + 1], dc.topology == 9 ? s[0] : (last ? s[i + 1] : s[0]));
-                break;
-            case 7:   // quads: dos triangulos cada uno
-                for (size_t i = 0; i + 3 < n; i += 4) {
-                    tri(s[i], s[i + 1], s[i + 2], last ? s[i + 3] : s[i]);
-                    tri(s[i], s[i + 2], s[i + 3], last ? s[i + 3] : s[i]);
-                }
-                break;
-            case 8:   // tira de quads
-                for (size_t i = 0; i + 3 < n; i += 2) {
-                    tri(s[i], s[i + 1], s[i + 3], last ? s[i + 3] : s[i]);
-                    tri(s[i], s[i + 3], s[i + 2], last ? s[i + 3] : s[i]);
-                }
-                break;
-            default: {
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "dibujo: primitiva %u no soportada (puntos/lineas)", dc.topology);
-                m_gpu.Warn("topo" + std::to_string(dc.topology), buf);
-                start = slots.size();
-                continue;
-            }
-        }
-        start = end + 1;
-    }
+    for (const auto& t : vstage.tris)
+        ProcessTriangle(st, vstage.verts[t[0]], vstage.verts[t[1]], vstage.verts[t[2]], vstage.verts[t[3]]);
     if (!st.failed && !st.tris.empty()) {
         RasterizeAll(st);
         // Lo dibujado puede ser una textura que la cache tiene decodificada

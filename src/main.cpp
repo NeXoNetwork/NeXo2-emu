@@ -434,9 +434,10 @@ static void DrawDevWindows(System& sys, float main_scale, const std::string& vul
                         (unsigned long long)gs.submits, (unsigned long long)gs.methods,
                         (unsigned long long)gs.clears, (unsigned long long)gs.copies,
                         (unsigned long long)gs.macros);
-            ImGui::Text("GPU: dibujos %llu | triangulos %llu | pixeles %llu",
-                        (unsigned long long)gs.draws, (unsigned long long)gs.triangles,
+            ImGui::Text("GPU: dibujos %llu (%llu con Vulkan) | triangulos %llu | pixeles por software %llu",
+                        (unsigned long long)gs.draws, (unsigned long long)gs.draws_hw, (unsigned long long)gs.triangles,
                         (unsigned long long)gs.pixels);
+            ImGui::Text("Dibujo: %s", gpu.RendererName().c_str());
             if (gs.draws_skipped || gs.shader_errors)
                 ImGui::TextColored(ImVec4(1, 0.7f, 0, 1), "GPU: %llu dibujos ignorados, %llu errores de shader (ver registro)",
                                    (unsigned long long)gs.draws_skipped, (unsigned long long)gs.shader_errors);
@@ -709,6 +710,14 @@ int main(int argc, char** argv) {
         sys.GetCpu().SetDecodeCacheEnabled(settings.decode_cache);
         sys.GetKernel().SetMulticore(settings.multicore && !envOff("NEXO2_MULTICORE"));
         sys.GetKernel().GetGpu().SetAsync(settings.gpu_async && !envOff("NEXO2_GPU_ASYNC"));
+        // Dibujo: Vulkan o software. NEXO2_RENDERER=software|vulkan manda sobre el ajuste.
+        bool want_vk = settings.renderer == 1;
+        if (const char* r = std::getenv("NEXO2_RENDERER")) want_vk = std::string(r) == "vulkan";
+        std::string vk_error;
+        auto& gpu = sys.GetKernel().GetGpu();
+        if (!gpu.SetRenderer(want_vk ? NeXo2::GPU::RendererKind::Vulkan : NeXo2::GPU::RendererKind::Software, &vk_error))
+            LogUi("Vulkan no disponible (" + vk_error + "): se dibuja por software");
+        LogUi("Dibujo: " + gpu.RendererName());
     };
     applyEmuSettings();
 
@@ -769,8 +778,8 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
 
-    // GPU fase 3: abrir Vulkan (de momento solo para comprobar que funciona; el dibujo sigue
-    // siendo por software). NEXO2_VK_VALIDATION=1 activa las capas de validacion.
+    // GPU fase 3: comprobar si hay Vulkan (para la etiqueta de Ajustes y Diagnostico; el
+    // dibujo abre su propio dispositivo). NEXO2_VK_VALIDATION=1 activa las capas de validacion.
 #ifdef NEXO2_HAS_VULKAN
     NeXo2::GPU::Vulkan::Device vulkan;
     const bool vulkan_ok = vulkan.Init(std::getenv("NEXO2_VK_VALIDATION") != nullptr);
@@ -855,10 +864,12 @@ int main(int argc, char** argv) {
     };
     auto showAddFolder = [&] { SDL_ShowOpenFolderDialog(OnAddFolder, nullptr, window, nullptr, false); };
 
-    // Para capturas de la interfaz: NEXO2_UI_OPEN=ajustes|acerca|controles abre esa ventana al empezar
+    // Para capturas de la interfaz: NEXO2_UI_OPEN=ajustes|graficos|acerca|controles abre esa ventana al empezar
+    bool selectGraphicsTab = false;
     if (const char* e = std::getenv("NEXO2_UI_OPEN")) {
         const std::string w = e;
-        openSettings = w == "ajustes";
+        openSettings = w == "ajustes" || w == "graficos";
+        selectGraphicsTab = w == "graficos";
         openAbout = w == "acerca";
         openControls = w == "controles";
     }
@@ -1046,16 +1057,20 @@ int main(int argc, char** argv) {
             // Derecha: velocidad, CPU, GPU, mando, version
             const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
             const unsigned gpuThreads = settings.gpu_threads > 0 ? unsigned(settings.gpu_threads) : std::min(hw, 16u);
+            const bool gpuVk = kernel.GetGpu().Renderer() == NeXo2::GPU::RendererKind::Vulkan;
+            char gpuText[48];
+            if (gpuVk) std::snprintf(gpuText, sizeof(gpuText), "Vulkan");
+            else std::snprintf(gpuText, sizeof(gpuText), "software, %u hilos", gpuThreads);
             char right[256];
             const std::string pad = g_gamepad ? SDL_GetGamepadName(g_gamepad) : "Teclado";
             if (g_emuRunning)
-                std::snprintf(right, sizeof(right), "%.1f FPS   |   %.0f M instr/s   |   CPU: %s, %s   |   GPU: software, %u hilos   |   %s   |   v%s",
+                std::snprintf(right, sizeof(right), "%.1f FPS   |   %.0f M instr/s   |   CPU: %s, %s   |   GPU: %s   |   %s   |   v%s",
                               g_speed.fps, g_speed.mips, cpu.IsJitEnabled() ? "JIT" : "intérprete",
-                              kernel.IsMulticore() ? "6 núcleos" : "1 hilo", gpuThreads, pad.c_str(), NEXO2_VERSION);
+                              kernel.IsMulticore() ? "6 núcleos" : "1 hilo", gpuText, pad.c_str(), NEXO2_VERSION);
             else
-                std::snprintf(right, sizeof(right), "CPU: %s, %s   |   GPU: software, %u hilos   |   %s   |   v%s",
+                std::snprintf(right, sizeof(right), "CPU: %s, %s   |   GPU: %s   |   %s   |   v%s",
                               settings.jit ? "JIT" : "intérprete", settings.multicore ? "6 núcleos" : "1 hilo",
-                              gpuThreads, pad.c_str(), NEXO2_VERSION);
+                              settings.renderer == 1 && vulkan_ok ? "Vulkan" : gpuText, pad.c_str(), NEXO2_VERSION);
             const float rw = ImGui::CalcTextSize(right).x;
             ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 20 * main_scale, ImGui::GetWindowWidth() - rw - 12 * main_scale));
             ImGui::TextDisabled("%s", right);
@@ -1379,9 +1394,15 @@ int main(int argc, char** argv) {
                     ImGui::TextDisabled("Los cambios se aplican al abrir el siguiente juego.");
                     ImGui::EndTabItem();
                 }
-                if (ImGui::BeginTabItem("Gráficos")) {
-                    ImGui::TextUnformatted("Motor: GPU por software (Vulkan en desarrollo)");
+                if (ImGui::BeginTabItem("Gráficos", nullptr, selectGraphicsTab ? ImGuiTabItemFlags_SetSelected : 0)) {
+                    selectGraphicsTab = false;
+                    ImGui::TextUnformatted("Motor de dibujo");
+                    ImGui::RadioButton("Vulkan (tarjeta gráfica)", &pending.renderer, 1);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Software (CPU)", &pending.renderer, 0);
                     ImGui::TextDisabled("%s", vulkan_label.c_str());
+                    note("Vulkan es mucho más rápido. Lo que aún no sabe dibujar lo hace el software. "
+                         "Se aplica al abrir el siguiente juego.");
                     ImGui::Spacing();
                     ImGui::Checkbox("GPU en su propio hilo", &pending.gpu_async);
                     note("Dibuja mientras la CPU emulada sigue. Se aplica al abrir el siguiente juego.");
@@ -1389,7 +1410,7 @@ int main(int argc, char** argv) {
                     ImGui::SetNextItemWidth(200 * main_scale);
                     ImGui::SliderInt("Hilos de dibujo", &pending.gpu_threads, 0, int(std::min(hw, 32u)),
                                      pending.gpu_threads == 0 ? "Automático" : "%d");
-                    note("Automático = todos los del PC (máximo 16). Se aplica al reiniciar NeXo.");
+                    note("Solo para el dibujo por software. Automático = todos los del PC (máximo 16). Se aplica al reiniciar NeXo.");
                     ImGui::Checkbox("Suavizar la imagen al escalar", &pending.linear_filter);
                     note("Sin suavizado se ven los píxeles nítidos.");
                     ImGui::EndTabItem();

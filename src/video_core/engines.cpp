@@ -1,4 +1,7 @@
 #include "engines.hpp"
+#ifdef NEXO2_HAS_VULKAN
+#include "vulkan/vk_rasterizer.hpp"
+#endif
 #include "common/logger.hpp"
 #include <algorithm>
 #include <cmath>
@@ -313,6 +316,9 @@ static void FillSurface(GpuMemoryManager& mm, const Surface& s, const u8* px) {
 }
 
 void Maxwell3D::ClearBuffers(u32 arg) {
+#ifdef NEXO2_HAS_VULKAN
+    if (VulkanRasterizer* hw = m_gpu.Hw(); hw && hw->Clear(m_regs.data(), arg)) return;
+#endif
     const bool clear_z = arg & 1, clear_s = (arg >> 1) & 1;
     const u32 comp_mask = (arg >> 2) & 0xF;
     const u32 target = (arg >> 6) & 0xF;
@@ -456,6 +462,12 @@ void Maxwell3D::DoDraw(bool indexed, u32 first, u32 count, u32 topology) {
     dc.vertex_id_base = ((m_regs[0x593] >> 12) & 1) ? first : 0;      // DrawArraysAddStart
     dc.instance = m_instance;
     dc.base_instance = m_regs[0x50E];                                 // DrawBaseInstance
+#ifdef NEXO2_HAS_VULKAN
+    if (VulkanRasterizer* hw = m_gpu.Hw()) {
+        if (hw->Draw(m_regs.data(), m_constbufs, dc)) return;
+        hw->PrepareSoftwareDraw(m_regs.data());   // este no: por software
+    }
+#endif
     m_raster.Draw(m_regs.data(), m_constbufs, dc);
 }
 

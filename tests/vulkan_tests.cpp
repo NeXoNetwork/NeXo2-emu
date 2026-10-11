@@ -138,3 +138,29 @@ TEST(Vulkan_ComputeSmoke) {
 }
 
 #endif // NEXO2_HAS_VULKAN
+
+// Los tests de dibujo y de texturas otra vez, ahora dibujando con Vulkan (GPU fase 3c):
+// las mismas comprobaciones de pixeles tienen que cumplirse.
+#include "gpu_draw_fixture.hpp"
+TEST(Vulkan_DrawAndTextureTests) {
+    {
+        NeXo2::GPU::Vulkan::Device probe;
+        if (!probe.Init() || !probe.HasDynamicRendering()) {
+            std::printf("    (sin Vulkan con dynamic rendering: %s)\n", probe.Error().c_str());
+            return;
+        }
+    }
+    g_vulkanDraw = true;
+    g_drawsTotal = g_drawsHw = 0;
+    for (const auto& t : NeXo2::Tests::Registry()) {
+        const std::string name = t.name;
+        if (name.rfind("Draw_", 0) != 0 && name.rfind("Texture_", 0) != 0) continue;
+        if (name == "Draw_NroTriangle") continue;   // programa entero (su propia GPU)
+        const int before = NeXo2::Tests::g_failures;
+        t.fn();
+        std::printf("    %s %s\n", NeXo2::Tests::g_failures == before ? "ok   " : "FALLO", t.name);
+    }
+    g_vulkanDraw = false;
+    std::printf("    draws con Vulkan: %llu de %llu\n", g_drawsHw, g_drawsTotal);
+    CHECK(g_drawsHw > 0);
+}

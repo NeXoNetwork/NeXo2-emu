@@ -37,6 +37,11 @@ class Fermi2D;
 class KeplerCompute;
 class InlineToMemory;
 class TextureCache;
+class VulkanRasterizer;
+namespace Vulkan { class Device; }
+
+// Con que se dibuja
+enum class RendererKind { Software, Vulkan };
 
 // ----------------------------------------------------------------------------
 // Memoria virtual de la GPU
@@ -45,6 +50,13 @@ class TextureCache;
 struct GpuWriteObserver {
     virtual ~GpuWriteObserver() = default;
     virtual void OnGpuWrite(u64 va, u64 size) = 0;
+};
+
+// Quien guarda copias de la memoria en otro sitio (el dibujo con Vulkan): antes de que nadie
+// lea o escriba [va, va+size) puede escribir ahi lo que tenga pendiente
+struct GpuAccessHook {
+    virtual ~GpuAccessHook() = default;
+    virtual void BeforeAccess(u64 va, u64 size, bool write) = 0;
 };
 
 class GpuMemoryManager {
@@ -89,6 +101,7 @@ public:
     // La GPU escribio [va, va+size) sin pasar por WriteBlock (el rasterizador): avisar
     void NotifyWrite(u64 va, u64 size) { if (m_observer) m_observer->OnGpuWrite(va, size); }
     void SetWriteObserver(GpuWriteObserver* o) { m_observer = o; }
+    void SetAccessHook(GpuAccessHook* h) { m_hook = h; }
 
 private:
     struct Mapping { u64 size; u64 cpu; };
@@ -97,6 +110,7 @@ private:
 
     Core::Memory& m_memory;
     GpuWriteObserver* m_observer = nullptr;
+    GpuAccessHook* m_hook = nullptr;
     std::map<u64, u64> m_reserved;        // inicio -> tamano (espacio de direcciones ocupado)
     std::map<u64, Mapping> m_maps;        // inicio -> proyeccion
     // Cambia cada vez que cambian las proyecciones (invalida la cache de Find de cada hilo).
@@ -205,10 +219,25 @@ private:
 // ----------------------------------------------------------------------------
 // La GPU
 // ----------------------------------------------------------------------------
-class Gpu {
+class Gpu final : public GpuWriteObserver {
 public:
     explicit Gpu(Core::Memory& memory);
-    ~Gpu();
+    ~Gpu() override;
+
+    // ---- Dibujo: por software o con Vulkan ----------------------------------
+    // Cambia el dibujo (espera a que la GPU termine lo pendiente). Si Vulkan no se puede
+    // usar, se queda por software y devuelve false con el motivo en 'error'.
+    bool SetRenderer(RendererKind kind, std::string* error = nullptr);
+    RendererKind Renderer() const { return m_hw ? RendererKind::Vulkan : RendererKind::Software; }
+    std::string RendererName() const;
+    // El dibujo con Vulkan (nullptr si es por software)
+    VulkanRasterizer* Hw() { return m_hw.get(); }
+    // Escribe en memoria lo que la GPU real tenga pendiente. 'depth' = tambien la
+    // profundidad (al final de cada envio solo hace falta el color, que es lo que se presenta;
+    // la profundidad se escribe cuando alguien va a leer su memoria).
+    void FlushRenderer(bool depth = true);
+    // GpuWriteObserver: reparte el aviso entre la cache de texturas y el dibujo con Vulkan
+    void OnGpuWrite(u64 va, u64 size) override;
 
     GpuMemoryManager& MemoryManager() { return m_mm; }
     // Texturas ya decodificadas (compartidas entre draws)
@@ -243,7 +272,8 @@ public:
         u64 clears = 0;           // borrados de render target
         u64 copies = 0;           // copias (DMA, 2D, inline)
         u64 macros = 0;           // macros ejecutadas
-        u64 draws = 0;            // dibujos hechos (rasterizador por software)
+        u64 draws = 0;            // dibujos hechos (por software o con Vulkan)
+        u64 draws_hw = 0;         // de ellos, con Vulkan
         u64 triangles = 0;
         u64 pixels = 0;           // pixeles sombreados
         u64 draws_skipped = 0;    // dibujos ignorados (algo no soportado todavia)
@@ -263,6 +293,8 @@ private:
     Core::Memory& m_memory;
     GpuMemoryManager m_mm;
     std::unique_ptr<TextureCache> m_textures;
+    std::unique_ptr<Vulkan::Device> m_vkDevice;
+    std::unique_ptr<VulkanRasterizer> m_hw;
     Syncpoints m_syncpoints;
     std::vector<std::unique_ptr<Channel>> m_channels;
     Stats m_stats;

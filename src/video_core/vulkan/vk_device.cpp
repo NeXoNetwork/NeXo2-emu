@@ -58,6 +58,14 @@ int TypeScore(VkPhysicalDeviceType t) {
         default: return 0;
     }
 }
+bool HasDeviceExtension(VkPhysicalDevice dev, const char* name) {
+    u32 n = 0;
+    vkEnumerateDeviceExtensionProperties(dev, nullptr, &n, nullptr);
+    std::vector<VkExtensionProperties> ext(n);
+    vkEnumerateDeviceExtensionProperties(dev, nullptr, &n, ext.data());
+    for (const auto& e : ext) if (std::strcmp(e.extensionName, name) == 0) return true;
+    return false;
+}
 } // namespace
 
 bool Device::Fail(const std::string& what, VkResult r) {
@@ -167,16 +175,57 @@ bool Device::Init(bool validation) {
     features.depthClamp = supported.depthClamp;
     features.samplerAnisotropy = supported.samplerAnisotropy;
     features.textureCompressionBC = supported.textureCompressionBC;
+    features.shaderImageGatherExtended = supported.shaderImageGatherExtended;
+    m_features = features;
+
+    // Dibujar sin VkRenderPass ("dynamic rendering"): Vulkan 1.3 o VK_KHR_dynamic_rendering
+    std::vector<const char*> dev_ext;
+    VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR fdr{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    const bool core13 = api >= VK_API_VERSION_1_3 && m_props.apiVersion >= VK_API_VERSION_1_3;
+    void* chain = nullptr;
+    VkPhysicalDeviceVulkan13Features want13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR wantdr{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR};
+    if (core13) {
+        f2.pNext = &f13;
+        vkGetPhysicalDeviceFeatures2(m_physical, &f2);
+        m_dynamicRendering = f13.dynamicRendering;
+        want13.dynamicRendering = f13.dynamicRendering;
+        chain = &want13;
+    } else if (HasDeviceExtension(m_physical, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
+        f2.pNext = &fdr;
+        vkGetPhysicalDeviceFeatures2(m_physical, &f2);
+        if (fdr.dynamicRendering) {
+            m_dynamicRendering = true;
+            dev_ext.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+            if (m_props.apiVersion < VK_API_VERSION_1_2) {   // dependencias de la extension en 1.1
+                dev_ext.push_back(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME);
+                dev_ext.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+            }
+            wantdr.dynamicRendering = VK_TRUE;
+            chain = &wantdr;
+        }
+    }
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    dci.pNext = chain;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.pEnabledFeatures = &features;
-    if (VkResult r = vkCreateDevice(m_physical, &dci, nullptr, &m_device); r != VK_SUCCESS) {
+    dci.enabledExtensionCount = u32(dev_ext.size());
+    dci.ppEnabledExtensionNames = dev_ext.data();
+    const VkResult cr = vkCreateDevice(m_physical, &dci, nullptr, &m_device);
+    if (cr != VK_SUCCESS) {
         m_device = VK_NULL_HANDLE;
-        return Fail("vkCreateDevice", r);
+        return Fail("vkCreateDevice", cr);
     }
     volkLoadDevice(m_device);
     vkGetDeviceQueue(m_device, m_queueFamily, 0, &m_queue);
+    if (m_dynamicRendering) {
+        CmdBeginRendering = core13 ? vkCmdBeginRendering : vkCmdBeginRenderingKHR;
+        CmdEndRendering = core13 ? vkCmdEndRendering : vkCmdEndRenderingKHR;
+        m_dynamicRendering = CmdBeginRendering && CmdEndRendering;
+    }
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

@@ -60,6 +60,7 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/video_core/surface.cpp"
     "${SRC_DIR}/video_core/shader_decode.cpp"
     "${SRC_DIR}/video_core/shader_exec.cpp"
+    "${SRC_DIR}/video_core/shader_spirv.cpp"
     "${SRC_DIR}/video_core/rasterizer.cpp"
     "${SRC_DIR}/video_core/texture.cpp"
 )
@@ -98,6 +99,7 @@ endif()
 if(NEXO2_ENABLE_VULKAN)
     target_sources(nexo2_core PRIVATE
         "${SRC_DIR}/video_core/vulkan/vk_device.cpp"
+        "${SRC_DIR}/video_core/vulkan/vk_rasterizer.cpp"
         "${EXT_DIR}/volk/volk.c"
     )
     target_include_directories(nexo2_core PUBLIC "${EXT_DIR}/Vulkan-Headers/include" "${EXT_DIR}/volk")
@@ -238,6 +240,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/gpu_shader_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_draw_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_texture_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/gpu_spirv_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/vulkan_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")

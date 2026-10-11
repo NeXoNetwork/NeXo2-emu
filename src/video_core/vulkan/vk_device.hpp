@@ -46,6 +46,11 @@ public:
     VkQueue Queue() const { return m_queue; }
     u32 QueueFamily() const { return m_queueFamily; }
     const VkPhysicalDeviceLimits& Limits() const { return m_props.limits; }
+    const VkPhysicalDeviceFeatures& Features() const { return m_features; }   // las activadas
+    // Dibujo sin VkRenderPass (Vulkan 1.3 o VK_KHR_dynamic_rendering): lo usa el rasterizador
+    bool HasDynamicRendering() const { return m_dynamicRendering; }
+    PFN_vkCmdBeginRendering CmdBeginRendering = nullptr;
+    PFN_vkCmdEndRendering CmdEndRendering = nullptr;
 
     // Memoria: tipo que cumpla 'bits' (de vkGet*MemoryRequirements) y 'props'. -1 si no hay.
     s32 FindMemoryType(u32 bits, VkMemoryPropertyFlags props) const;
@@ -76,6 +81,8 @@ private:
     VkPhysicalDeviceProperties m_props{};
     VkPhysicalDeviceMemoryProperties m_memProps{};
     VkPhysicalDeviceType m_type = VK_PHYSICAL_DEVICE_TYPE_OTHER;
+    VkPhysicalDeviceFeatures m_features{};
+    bool m_dynamicRendering = false;
     std::string m_name, m_driver, m_error;
 };
 

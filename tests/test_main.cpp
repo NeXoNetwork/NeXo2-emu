@@ -103,7 +103,9 @@ int main(int argc, char** argv) {
         if ((jit && !run_jit) || (!jit && !run_interp)) continue;
         Interpreter::SetDefaultJitEnabled(jit);
         std::printf("===== CPU: %s =====\n", jit ? "JIT (dynarmic)" : "interprete");
+        const char* filter = std::getenv("NEXO2_TEST_FILTER");   // solo los tests cuyo nombre contenga esto
         for (const auto& t : Registry()) {
+            if (filter && !std::strstr(t.name, filter)) continue;
             const int before = g_failures;
             g_currentTest = t.name;
             g_currentJit = jit;

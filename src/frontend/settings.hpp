@@ -17,6 +17,7 @@ struct Settings {
     bool multicore = true;
     bool decode_cache = true;
     // Graficos
+    int  renderer = 1;                    // 0 software, 1 Vulkan (si no se puede, software)
     bool gpu_async = true;
     int  gpu_threads = 0;                 // hilos de dibujo por software (0 = todos los del PC)
     bool linear_filter = true;            // escalar la imagen suavizando (si no, pixeles nitidos)

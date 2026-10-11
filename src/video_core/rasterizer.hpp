@@ -14,6 +14,7 @@
 // Ver docs/07-nexo-internals/gpu-rasterizer.md.
 #include <array>
 #include <memory>
+#include <string>
 #include <vector>
 #include "gpu.hpp"
 #include "shader.hpp"
@@ -42,6 +43,8 @@ struct DrawCall {
     u32 base_instance = 0;
 };
 
+class TextureSampler;
+
 class SoftwareRasterizer {
 public:
     explicit SoftwareRasterizer(Gpu& gpu);
@@ -55,6 +58,20 @@ public:
         std::array<u32, 256> attr{};
         float Pos(u32 i) const;   // posicion de recorte (clip space): x, y, z, w en a[0x70..0x7C]
     };
+
+    // Primera mitad de un draw, comun al dibujo por software y al de Vulkan: lee los
+    // indices, ejecuta el shader de vertices en cada vertice (en la CPU) y junta los
+    // triangulos (listas, tiras, abanicos, quads) en una lista.
+    struct VertexStage {
+        std::vector<Vertex> verts;
+        // Triangulos: tres indices de 'verts' y el del vertice "que manda" (flat)
+        std::vector<std::array<u32, 4>> tris;
+        bool failed = false;     // el shader de vertices fallo (error)
+        std::string error;
+    };
+    // 'tex' y 'tex_cb': texturas para el shader de vertices. false = no hay nada que dibujar.
+    static bool RunVertexStage(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, const DrawCall& dc,
+                               TextureSampler* tex, u32 tex_cb, VertexStage& out);
 
 private:
     struct ScreenVertex {
@@ -75,7 +92,6 @@ private:
     // Hilos que se reparten las filas de la pantalla
     class ThreadPool;
 
-    bool RunVertexShader(DrawState& st, u32 index, u32 vertex_id, Vertex& out);
     void ProcessTriangle(DrawState& st, const Vertex& a, const Vertex& b, const Vertex& c, const Vertex& provoking);
     // Recorre los pixeles de todos los triangulos (st.tris), repartidos entre los hilos
     void RasterizeAll(DrawState& st);

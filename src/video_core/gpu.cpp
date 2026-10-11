@@ -5,7 +5,12 @@
 #include "engines.hpp"
 #include "memory.hpp"
 #include "common/logger.hpp"
+#ifdef NEXO2_HAS_VULKAN
+#include "vulkan/vk_device.hpp"
+#include "vulkan/vk_rasterizer.hpp"
+#endif
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -101,6 +106,7 @@ std::optional<u64> GpuMemoryManager::Translate(u64 va) const {
 }
 
 void GpuMemoryManager::ReadBlock(u64 va, void* dst, size_t size) const {
+    if (m_hook) m_hook->BeforeAccess(va, size, false);
     auto* out = static_cast<u8*>(dst);
     while (size > 0) {
         const auto* m = Find(va);
@@ -134,6 +140,7 @@ void GpuMemoryManager::Touch(u64 va, u64 size) {
 }
 
 void GpuMemoryManager::WriteBlock(u64 va, const void* src, size_t size) {
+    if (m_hook) m_hook->BeforeAccess(va, size, true);
     NotifyWrite(va, size);
     auto* in = static_cast<const u8*>(src);
     while (size > 0) {
@@ -281,11 +288,15 @@ void Channel::BindSubchannel(u32 subchannel, u32 class_id) {
 void Channel::SubmitGpfifo(const std::vector<u64>& entries) {
     ++m_gpu.GetStats().submits;
     m_gpu.Textures().NewEpoch();   // la CPU puede haber cambiado texturas desde el envio anterior
+#ifdef NEXO2_HAS_VULKAN
+    if (m_gpu.Hw()) m_gpu.Hw()->NewEpoch();
+#endif
     for (u64 entry : entries) {
         const u64 va = entry & 0xFF'FFFF'FFFCull;
         const u32 words = u32((entry >> 42) & 0x1FFFFF);
         if (words) ProcessPushbuffer(va, words);
     }
+    m_gpu.FlushRenderer(false);   // lo dibujado con Vulkan, a memoria (se va a presentar o leer)
 }
 
 void Channel::ProcessPushbuffer(u64 va, u32 words) {
@@ -383,9 +394,70 @@ void Channel::HostMethod(u32 method, u32 arg) {
 // ============================================================================
 
 Gpu::Gpu(Core::Memory& memory) : m_memory(memory), m_mm(memory), m_textures(std::make_unique<TextureCache>(*this)) {
-    m_mm.SetWriteObserver(m_textures.get());
+    m_mm.SetWriteObserver(this);
 }
-Gpu::~Gpu() { SetAsync(false); }
+Gpu::~Gpu() {
+    SetAsync(false);
+    m_mm.SetAccessHook(nullptr);
+    m_hw.reset();
+    m_vkDevice.reset();
+}
+
+void Gpu::OnGpuWrite(u64 va, u64 size) {
+    m_textures->OnGpuWrite(va, size);
+#ifdef NEXO2_HAS_VULKAN
+    if (m_hw) m_hw->OnGpuWrite(va, size);
+#endif
+}
+
+bool Gpu::SetRenderer(RendererKind kind, std::string* error) {
+    WaitIdle();
+    if (kind == Renderer() && (kind == RendererKind::Software || m_hw)) return true;
+#ifdef NEXO2_HAS_VULKAN
+    if (m_hw) {   // dejar Vulkan: primero todo a memoria
+        m_hw->Flush();
+        m_mm.SetAccessHook(nullptr);
+        m_hw.reset();
+    }
+    if (kind == RendererKind::Software) return true;
+    if (!m_vkDevice) {
+        m_vkDevice = std::make_unique<Vulkan::Device>();
+        if (!m_vkDevice->Init(std::getenv("NEXO2_VK_VALIDATION") != nullptr)) {
+            if (error) *error = m_vkDevice->Error();
+            m_vkDevice.reset();
+            return false;
+        }
+    }
+    auto hw = std::make_unique<VulkanRasterizer>(*this, *m_vkDevice);
+    std::string why;
+    if (!hw->Init(why)) {
+        if (error) *error = why;
+        return false;
+    }
+    m_hw = std::move(hw);
+    m_mm.SetAccessHook(m_hw.get());
+    return true;
+#else
+    if (kind == RendererKind::Software) return true;
+    if (error) *error = "NeXo se compilo sin Vulkan";
+    return false;
+#endif
+}
+
+std::string Gpu::RendererName() const {
+#ifdef NEXO2_HAS_VULKAN
+    if (m_hw && m_vkDevice) return "Vulkan (" + m_vkDevice->DeviceName() + ")";
+#endif
+    return "Software";
+}
+
+void Gpu::FlushRenderer(bool depth) {
+#ifdef NEXO2_HAS_VULKAN
+    if (m_hw) m_hw->Flush(depth);
+#else
+    (void)depth;
+#endif
+}
 
 // ---- Hilo de la GPU ----------------------------------------------------------
 
@@ -490,6 +562,9 @@ Channel* Gpu::GetChannel(u32 id) {
 void Gpu::Reset() {
     WaitIdle();
     m_channels.clear();
+#ifdef NEXO2_HAS_VULKAN
+    if (m_hw) m_hw->Reset();
+#endif
     m_mm.Reset();
     m_textures->Clear();
     m_syncpoints.Reset();

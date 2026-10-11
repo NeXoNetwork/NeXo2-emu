@@ -255,6 +255,18 @@ void Maxwell3D::WriteReg(u32 method, u32 arg) {
         case 0x586:   // VertexBeginGl: empieza una primitiva; bits 26/27 = instancia siguiente / misma
             if ((arg >> 26) & 1) ++m_instance;
             else if (!((arg >> 27) & 1)) m_instance = 0;
+            m_inlineIndices.clear();
+            break;
+        // Indices dentro del propio pushbuffer (los usa el OpenGL de mesa/nouveau con indices
+        // en la memoria del programa): DrawInlineIndex = uno de 32 bits, DrawInlineIndex2x16 = dos
+        // de 16 bits (el bajo primero). Se dibujan al llegar VertexEndGl.
+        case 0x57A: m_inlineIndices.push_back(arg); break;
+        case 0x57C: m_inlineIndices.push_back(arg & 0xFFFF); m_inlineIndices.push_back(arg >> 16); break;
+        case 0x585:   // VertexEndGl
+            if (!m_inlineIndices.empty()) {
+                DoDraw(true, 0, u32(m_inlineIndices.size()), m_regs[0x586] & 0xFFFF, &m_inlineIndices);
+                m_inlineIndices.clear();
+            }
             break;
         case 0x35E:   // DrawArraysCount: dibujar 'arg' vertices desde DrawArraysFirst
             DoDraw(false, m_regs[0x35D], arg, m_regs[0x586] & 0xFFFF);
@@ -451,7 +463,7 @@ void Maxwell3D::BindConstbuf(u32 stage, u32 arg) {
     b.size = m_regs[0x8E0] & 0x1FFFF;
 }
 
-void Maxwell3D::DoDraw(bool indexed, u32 first, u32 count, u32 topology) {
+void Maxwell3D::DoDraw(bool indexed, u32 first, u32 count, u32 topology, const std::vector<u32>* inline_indices) {
     if (count == 0) return;
     DrawCall dc;
     dc.topology = topology;
@@ -462,6 +474,7 @@ void Maxwell3D::DoDraw(bool indexed, u32 first, u32 count, u32 topology) {
     dc.vertex_id_base = ((m_regs[0x593] >> 12) & 1) ? first : 0;      // DrawArraysAddStart
     dc.instance = m_instance;
     dc.base_instance = m_regs[0x50E];                                 // DrawBaseInstance
+    dc.inline_indices = inline_indices;
 #ifdef NEXO2_HAS_VULKAN
     if (VulkanRasterizer* hw = m_gpu.Hw()) {
         if (hw->Draw(m_regs.data(), m_constbufs, dc)) return;

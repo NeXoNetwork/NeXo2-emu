@@ -18,6 +18,7 @@ namespace {
 constexpr u32 RT_BASE = 0x200;
 constexpr u32 VIEWPORT_XFORM = 0x280;
 constexpr u32 VIEWPORT = 0x300;
+constexpr u32 DEPTH_MODE = 0x35F;
 constexpr u32 SCISSOR = 0x380;
 constexpr u32 ZT_ADDR = 0x3F8, ZT_FORMAT = 0x3FA, ZT_BLOCK = 0x3FB, ZT_LAYER_SIZE = 0x3FC;
 constexpr u32 SCREEN_SCISSOR_H = 0x3FD, SCREEN_SCISSOR_V = 0x3FE;
@@ -533,6 +534,7 @@ VulkanRasterizer::Image* VulkanRasterizer::GetImage(const Surface& surf, u32 gue
     if (will_overwrite) {
         // Se va a borrar entera: no hace falta lo que haya en memoria
         found->mem_dirty = false;
+        found->hash_known = false;
         found->epoch = m_epoch;
         return found;
     }
@@ -542,7 +544,13 @@ VulkanRasterizer::Image* VulkanRasterizer::GetImage(const Surface& surf, u32 gue
         m_busy = true;
         m_gpu.MemoryManager().ReadBlock(lo, guest.data(), guest.size());
         m_busy = false;
-        if (Hash(guest.data(), guest.size()) != found->hash) {
+        const u64 h = Hash(guest.data(), guest.size());
+        if (!found->hash_known) {
+            // Desde que se borro en la GPU la memoria no se ha escrito desde aqui: lo que tenga
+            // es viejo. Se apunta para ver cambios de la CPU a partir de ahora.
+            found->hash = h;
+            found->hash_known = true;
+        } else if (h != found->hash) {
             if (found->gpu_dirty) {
                 m_gpu.Warn("vkconflict", "Vulkan: la CPU cambio un render target que la GPU tambien cambio (gana la CPU)");
                 found->gpu_dirty = false;
@@ -563,6 +571,7 @@ void VulkanRasterizer::Upload(Image& img) {
     m_gpu.MemoryManager().ReadBlock(s.address, guest.data(), guest.size());
     m_busy = false;
     img.hash = Hash(guest.data(), guest.size());
+    img.hash_known = true;
     const size_t pixels = size_t(s.width) * s.height;
     std::vector<u8> rows(pixels * s.bytes_per_pixel);
     Swizzle<false>(s, guest.data(), rows.data());
@@ -636,6 +645,7 @@ void VulkanRasterizer::Download(const std::vector<Image*>& imgs) {
         mm.WriteBlock(s.address, guest.data(), guest.size());   // avisa a la cache de texturas
         m_busy = false;
         im.hash = Hash(guest.data(), guest.size());
+        im.hash_known = true;
         im.epoch = m_epoch;
         if (im.gpu_dirty) { im.gpu_dirty = false; --m_dirtyCount; }
         ++m_stats.downloads;
@@ -899,7 +909,9 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
         tex.uploaded[i] = levels[i];
     }
     out.view = tex.view;
-    out.sampler = GetSampler(smp, info.lod_bias, smp.mip_filter <= 1);
+    // NEXO2_VK_NOMIPS=1: solo el nivel 0, como el dibujo por software (para comparar)
+    static const bool no_mips = std::getenv("NEXO2_VK_NOMIPS") != nullptr;
+    out.sampler = GetSampler(smp, info.lod_bias, no_mips || smp.mip_filter <= 1);
     const bool norm = info.normalized && !smp.force_unnormalized;
     out.scale[0] = norm ? 1.0f : 1.0f / float(base.width);
     out.scale[1] = norm ? 1.0f : 1.0f / float(base.height);
@@ -977,14 +989,15 @@ VkPipeline VulkanRasterizer::GetPipeline(const std::vector<u32>& key, const Frag
     stages[1].module = fs.module;
     stages[1].pName = "main";
 
-    // Vertices: posicion + un vec4 por varying, todo seguido
-    const u32 stride = 16 * (1 + u32(d.varyings.size()));
+    // Vertices: posicion, planos de recorte (vec2 en un hueco de vec4) y un vec4 por varying
+    const u32 stride = 16 * (2 + u32(d.varyings.size()));
     VkVertexInputBindingDescription vb{0, stride, VK_VERTEX_INPUT_RATE_VERTEX};
     std::vector<VkVertexInputAttributeDescription> attrs;
     attrs.push_back({0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0});
+    attrs.push_back({1, 0, VK_FORMAT_R32G32_SFLOAT, 16});
     for (u32 i = 0; i < d.varyings.size(); ++i)
-        attrs.push_back({i + 1, 0, d.varyings[i].kind == SpirvVarying::Flat ? VK_FORMAT_R32G32B32A32_UINT
-                                                                            : VK_FORMAT_R32G32B32A32_SFLOAT, 16 * (i + 1)});
+        attrs.push_back({i + 2, 0, d.varyings[i].kind == SpirvVarying::Flat ? VK_FORMAT_R32G32B32A32_UINT
+                                                                            : VK_FORMAT_R32G32B32A32_SFLOAT, 16 * (i + 2)});
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 1;
     vi.pVertexBindingDescriptions = &vb;
@@ -997,6 +1010,9 @@ VkPipeline VulkanRasterizer::GetPipeline(const std::vector<u32>& key, const Frag
     vp.scissorCount = 1;
     VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
     rs.polygonMode = VK_POLYGON_MODE_FILL;
+    // Sin el recorte en z de Vulkan: los planos cercano y lejano son los de Maxwell (en
+    // gl_ClipDistance) y la profundidad se limita a 0..1, como en el dibujo por software
+    rs.depthClampEnable = m_dev.Features().depthClamp;
     rs.cullMode = d.cull;
     rs.frontFace = d.front;
     rs.lineWidth = 1.0f;
@@ -1137,7 +1153,8 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
             return Fallback("mezcla en un formato que la GPU no mezcla");
         targets.push_back(t);
     }
-    const bool depth_test = regs[DEPTH_TEST] & 1, depth_write = regs[DEPTH_WRITE] & 1;
+    // Sin prueba de profundidad tampoco se escribe (como OpenGL y Vulkan)
+    const bool depth_test = regs[DEPTH_TEST] & 1, depth_write = depth_test && (regs[DEPTH_WRITE] & 1);
     Surface zsurf;
     u32 zformat = 0;
     const bool depth_enabled = (regs[ZT_SELECT] & 1) && (depth_test || depth_write) && ReadDepthTarget(regs, zsurf, zformat);
@@ -1173,7 +1190,8 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     if (!fs->result.ok) return Fallback("shader de pixeles: " + fs->result.error);
     const auto& varyings = fs->result.varyings;
     const auto& lim = m_dev.Limits();
-    if (varyings.size() + 1 > lim.maxVertexInputAttributes || varyings.size() * 4 > lim.maxFragmentInputComponents ||
+    if (!m_dev.Features().shaderClipDistance) return Fallback("la GPU no tiene gl_ClipDistance");
+    if (varyings.size() + 2 > lim.maxVertexInputAttributes || varyings.size() * 4 > lim.maxFragmentInputComponents ||
         varyings.size() * 4 > lim.maxVertexOutputComponents)
         return Fallback("demasiadas entradas en el shader de pixeles");
     if (fs->result.textures.size() > MAX_TEXTURES) return Fallback("demasiadas texturas");
@@ -1238,8 +1256,23 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     const float sx = xform ? F(regs[VIEWPORT_XFORM]) : 1.0f, sy = xform ? F(regs[VIEWPORT_XFORM + 1]) : 1.0f;
     const float sz = xform ? F(regs[VIEWPORT_XFORM + 2]) : 1.0f, ox = xform ? F(regs[VIEWPORT_XFORM + 3]) : 0.0f;
     const float oy = xform ? F(regs[VIEWPORT_XFORM + 4]) : 0.0f, oz = xform ? F(regs[VIEWPORT_XFORM + 5]) : 0.0f;
-    const u32 words = 4 * (1 + u32(varyings.size()));
+    const u32 words = 4 * (2 + u32(varyings.size()));
+    const bool zero_to_one = regs[DEPTH_MODE] & 1;
     const u32 nverts = u32(vstage.tris.size()) * 3;
+    if (static const bool dbg = std::getenv("NEXO2_VK_DRAW_DEBUG") != nullptr; dbg) {
+        float zmin = 1e30f, zmax = -1e30f, wmin = 1e30f, wmax = -1e30f;
+        u32 near_out = 0, far_out = 0;
+        for (const auto& v : vstage.verts) {
+            const float z = v.Pos(2), w = v.Pos(3);
+            zmin = std::min(zmin, z); zmax = std::max(zmax, z); wmin = std::min(wmin, w); wmax = std::max(wmax, w);
+            if ((regs[DEPTH_MODE] & 1 ? z : z + w) < 0) ++near_out;
+            if (w - z < 0) ++far_out;
+        }
+        std::fprintf(stderr, "vkdraw %llu tris %zu verts %zu z %.3g..%.3g w %.3g..%.3g near_out %u far_out %u | xf %d s %.3g %.3g %.3g o %.3g %.3g %.3g dm %u | depth %d test %d write %d func %X zf %X fs %llx tex %zu var %zu\n",
+            (unsigned long long)m_stats.draws, vstage.tris.size(), vstage.verts.size(), zmin, zmax, wmin, wmax, near_out, far_out,
+            int(xform), sx, sy, sz, ox, oy, oz, regs[DEPTH_MODE], int(depth_enabled), int(depth_test), int(depth_write), regs[DEPTH_FUNC], zformat,
+            (unsigned long long)fs_addr, fs->result.textures.size(), varyings.size());
+    }
     std::vector<u32> vdata(size_t(nverts) * words);
     {
         u32* o = vdata.data();
@@ -1257,7 +1290,11 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
                 o[1] = U(2.0f * (sy * y + oy * w) / float(fh) - w);
                 o[2] = U(sz * z + oz * w);
                 o[3] = U(w);
-                o += 4;
+                // Planos cercano (z >= -w, o z >= 0) y lejano (z <= w), en coordenadas de Maxwell
+                o[4] = U(zero_to_one ? z : z + w);
+                o[5] = U(w - z);
+                o[6] = o[7] = 0;
+                o += 8;
                 for (const auto& vy : varyings) {
                     std::memcpy(o, &vx.attr[vy.slot * 4u], 16);
                     o += 4;
@@ -1345,11 +1382,11 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     }
     if (depth_enabled) {
         d.depth = VK_FORMAT_D32_SFLOAT;
-        d.depth_test = true;   // (sin prueba pero escribiendo: "siempre")
-        d.depth_op = depth_test ? CompareOpVk(regs[DEPTH_FUNC]) : VK_COMPARE_OP_ALWAYS;
+        d.depth_test = depth_test;
+        d.depth_op = CompareOpVk(regs[DEPTH_FUNC]);
         d.depth_write = depth_write;
     }
-    if (regs[CULL_ENABLE] & 1) {
+    if ((regs[CULL_ENABLE] & 1) && !std::getenv("NEXO2_NOCULL")) {
         const u32 cull = regs[CULL_FACE];
         d.cull = cull == 0x404 ? VK_CULL_MODE_FRONT_BIT : cull == 0x405 ? VK_CULL_MODE_BACK_BIT
                : cull == 0x408 ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_NONE;

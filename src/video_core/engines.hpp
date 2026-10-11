@@ -79,7 +79,7 @@ private:
     void RunMacro();
     Surface RenderTarget(u32 index) const;
     void BindConstbuf(u32 stage, u32 arg);
-    void DoDraw(bool indexed, u32 first, u32 count, u32 topology);
+    void DoDraw(bool indexed, u32 first, u32 count, u32 topology, const std::vector<u32>* inline_indices = nullptr);
 
     Gpu& m_gpu;
     std::array<u32, NUM_REGS> m_regs{};
@@ -100,6 +100,7 @@ private:
     ConstbufTable m_constbufs{};   // constbufs enlazados a cada etapa (BindGroup)
     SoftwareRasterizer m_raster;
     u32 m_instance = 0;            // gl_InstanceID del dibujo actual
+    std::vector<u32> m_inlineIndices;   // indices enviados en el pushbuffer entre Begin y End
 };
 
 // ----------------------------------------------------------------------------

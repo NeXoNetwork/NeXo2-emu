@@ -148,7 +148,7 @@ reason goes to the log once).
 5. Constant buffers used by the shader are copied now (the program may change them after) into
    a host-visible upload buffer and bound as storage buffers. Textures (below) are prepared.
 6. Pipeline from the state (cached): blend per target (OpenGL and Direct3D enum values), write
-   masks, depth test/write/function (writing without testing = test "always"), culling and front face
+   masks, depth test/write/function (as in OpenGL and Vulkan, no depth test = no depth write), culling and front face
    (with FlipY the screen is upside down, so the winding flips). Viewport, scissor and blend
    constants are dynamic. Rendering uses `vkCmdBeginRendering` (dynamic rendering: Vulkan 1.3 or
    `VK_KHR_dynamic_rendering`); consecutive draws to the same targets stay in one rendering pass.

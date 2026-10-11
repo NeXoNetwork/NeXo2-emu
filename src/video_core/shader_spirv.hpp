@@ -80,7 +80,8 @@ SpirvResult TranslateToSpirv(ShaderProgram& program, const SpirvOptions& options
 
 // Shader de vertices "de paso" para el dibujo con Vulkan: el shader de vertices de Maxwell se
 // ejecuta en la CPU y la GPU solo recibe sus resultados. Entradas: location 0 = posicion
-// (ya transformada), location 1 + i = varyings[i]. Salidas: gl_Position y location i.
+// (ya transformada), location 1 = distancias a los planos cercano y lejano (gl_ClipDistance),
+// location 2 + i = varyings[i]. Salidas: gl_Position, gl_ClipDistance[2] y location i.
 std::vector<u32> BuildPassthroughVertexShader(const std::vector<SpirvVarying>& varyings);
 
 } // namespace NeXo2::GPU

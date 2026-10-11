@@ -41,6 +41,9 @@ struct DrawCall {
     u32 vertex_id_base = 0;  // no indexado: se suma a gl_VertexID
     u32 instance = 0;        // gl_InstanceID
     u32 base_instance = 0;
+    // Indices "en linea" (VB_ELEMENT_U32 / U16 del pushbuffer, sin buffer de indices en
+    // memoria): si no es nullptr, se usan estos en vez de leer el buffer de indices
+    const std::vector<u32>* inline_indices = nullptr;
 };
 
 class TextureSampler;

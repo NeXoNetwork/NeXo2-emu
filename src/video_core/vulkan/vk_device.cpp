@@ -173,9 +173,13 @@ bool Device::Init(bool validation) {
     features.shaderInt64 = supported.shaderInt64;
     features.independentBlend = supported.independentBlend;
     features.depthClamp = supported.depthClamp;
+    features.shaderClipDistance = supported.shaderClipDistance;
     features.samplerAnisotropy = supported.samplerAnisotropy;
     features.textureCompressionBC = supported.textureCompressionBC;
     features.shaderImageGatherExtended = supported.shaderImageGatherExtended;
+    // Lecturas fuera de un buffer: 0 o un valor del buffer, nunca basura de otra memoria (los
+    // shaders de Maxwell leen constbufs fuera de rango, y en la consola eso da 0)
+    features.robustBufferAccess = supported.robustBufferAccess;
     m_features = features;
 
     // Dibujar sin VkRenderPass ("dynamic rendering"): Vulkan 1.3 o VK_KHR_dynamic_rendering

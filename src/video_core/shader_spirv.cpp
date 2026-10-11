@@ -413,6 +413,7 @@ private:
 
     // c[index][offset] con offset fijo
     u32 ConstStatic(u32 index, u32 offset) {
+        if (Frag()) return ConstDynamic(index, CU(offset));   // fuera del constbuf = 0 (como el interprete)
         const u32 var = Cbuf(index);
         const u32 ptr = Val(OpAccessChain, b.TypePointer(StorageBuffer, tU32), {var, CU(0), CU(offset / 4)});
         return Load(tU32, ptr);
@@ -1532,7 +1533,8 @@ namespace NeXo2::GPU {
 std::vector<u32> BuildPassthroughVertexShader(const std::vector<SpirvVarying>& varyings) {
     using namespace Spv;
     Builder b;
-    b.Capability(1);   // Shader
+    b.Capability(1);    // Shader
+    b.Capability(32);   // ClipDistance
     Builder::Emit(b.memory_model, OpMemoryModel, {0, 1});
     const u32 tVoid = b.TypeVoid(), tF32 = b.TypeFloat(32), tU32 = b.TypeInt(32, false);
     const u32 tV4F = b.TypeVector(tF32, 4), tV4U = b.TypeVector(tU32, 4);
@@ -1546,13 +1548,20 @@ std::vector<u32> BuildPassthroughVertexShader(const std::vector<SpirvVarying>& v
     b.Decorate(pos_in, DecLocation, {0});
     const u32 pos_out = var(tV4F, Output);
     b.Decorate(pos_out, DecBuiltIn, {BuiltInPosition});
+    // Planos de recorte cercano y lejano, calculados en la CPU como en el dibujo por software
+    const u32 tV2F = b.TypeVector(tF32, 2);
+    const u32 clip_in = var(tV2F, Input);
+    b.Decorate(clip_in, DecLocation, {1});
+    const u32 tClip = b.TypeArray(tF32, b.ConstU32(2));
+    const u32 clip_out = var(tClip, Output);
+    b.Decorate(clip_out, DecBuiltIn, {3 /* ClipDistance */});
     std::vector<std::pair<u32, u32>> pairs;   // (entrada, salida)
     std::vector<u32> types;
     for (size_t i = 0; i < varyings.size(); ++i) {
         const bool flat = varyings[i].kind == SpirvVarying::Flat;
         const u32 type = flat ? tV4U : tV4F;
         const u32 in = var(type, Input), out = var(type, Output);
-        b.Decorate(in, DecLocation, {u32(i + 1)});
+        b.Decorate(in, DecLocation, {u32(i + 2)});
         b.Decorate(out, DecLocation, {u32(i)});
         if (flat) b.Decorate(out, DecFlat);
         else if (varyings[i].kind == SpirvVarying::Linear) b.Decorate(out, DecNoPerspective);
@@ -1568,6 +1577,17 @@ std::vector<u32> BuildPassthroughVertexShader(const std::vector<SpirvVarying>& v
         Builder::Emit(b.functions, OpStore, {out, v});
     };
     copy(tV4F, pos_in, pos_out);
+    {
+        const u32 c = b.Id();
+        Builder::Emit(b.functions, OpLoad, {tV2F, c, clip_in});
+        const u32 tPtrOutF = b.TypePointer(Output, tF32);
+        for (u32 k = 0; k < 2; ++k) {
+            const u32 v = b.Id(), ptr = b.Id();
+            Builder::Emit(b.functions, OpCompositeExtract, {tF32, v, c, k});
+            Builder::Emit(b.functions, OpAccessChain, {tPtrOutF, ptr, clip_out, b.ConstU32(k)});
+            Builder::Emit(b.functions, OpStore, {ptr, v});
+        }
+    }
     for (size_t i = 0; i < pairs.size(); ++i) copy(types[i], pairs[i].first, pairs[i].second);
     Builder::Emit(b.functions, OpReturn, {});
     Builder::Emit(b.functions, OpFunctionEnd, {});

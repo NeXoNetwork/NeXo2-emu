@@ -164,3 +164,39 @@ TEST(Vulkan_DrawAndTextureTests) {
     std::printf("    draws con Vulkan: %llu de %llu\n", g_drawsHw, g_drawsTotal);
     CHECK(g_drawsHw > 0);
 }
+
+// Profundidad borrada en la GPU en un envio y usada en el siguiente: la memoria (vieja) no
+// debe contar como "la CPU la cambio" (antes se volvia a subir y los objetos lejanos desaparecian)
+TEST(Vulkan_DepthClearedThenNextSubmit) {
+    {
+        NeXo2::GPU::Vulkan::Device probe;
+        if (!probe.Init() || !probe.HasDynamicRendering()) return;
+    }
+    g_vulkanDraw = true;
+    DrawFixture f;
+    g_vulkanDraw = false;
+    V tri[3];
+    for (int i = 0; i < 3; ++i) { tri[i] = kTri[i]; tri[i].z = 0.75f; tri[i].r = 0; tri[i].g = 1; tri[i].b = 0; }
+    f.Write(VB, tri, sizeof(tri));
+    // La memoria de la profundidad tiene ceros (como al empezar): si se usara, nada pasaria la prueba
+    Push a;
+    f.Setup(a, Tests::k_tri_vert, Tests::k_color_frag);
+    a.Cmd(0x3F8, {Hi(ZT), Lo(ZT), 0x0A, 0, 0});
+    a.Cmd(0x48A, {W, H});
+    a.Cmd(0x54E, {1});
+    a.Cmd(0x4B3, {1});
+    a.Cmd(0x4BA, {1});
+    a.Cmd(0x4C3, {0x201});
+    f.Clear(a, 0, 0, 0, 1);
+    a.Cmd(0x364, {F(1.0f)});
+    a.Cmd(0x674, {1});
+    Push b;
+    f.DrawArrays(b, 4, 0, 3);
+    f.Write(PB, a.w.data(), a.w.size() * 4);
+    f.Write(PB + 0x2000, b.w.data(), b.w.size() * 4);
+    f.ch.SubmitGpfifo({PB | (u64(a.w.size()) << 42)});
+    f.ch.SubmitGpfifo({(PB + 0x2000) | (u64(b.w.size()) << 42)});
+    f.gpu.FlushRenderer();
+    CHECK_EQ(f.gpu.GetStats().draws_hw, 1u);
+    CHECK(f.Pixel(32, 40)[1] == 255);
+}

@@ -407,10 +407,17 @@ bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const Constbu
     const u64 index_addr = Iova(regs[INDEX_ADDR], regs[INDEX_ADDR + 1]);
     std::vector<s64> indices;       // -1 = reinicio de primitiva
     indices.reserve(dc.count);
+    // Indices: del pushbuffer (en linea) o del buffer de indices, leido de una vez
+    std::vector<u8> index_bytes;
+    if (dc.indexed && !dc.inline_indices) {
+        index_bytes.resize(size_t(dc.count) * index_size);
+        mm.ReadBlock(index_addr + u64(dc.first) * index_size, index_bytes.data(), index_bytes.size());
+    }
     for (u32 i = 0; i < dc.count; ++i) {
         if (dc.indexed) {
             u32 idx = 0;
-            mm.ReadBlock(index_addr + u64(dc.first + i) * index_size, &idx, index_size);
+            if (dc.inline_indices) idx = i < dc.inline_indices->size() ? (*dc.inline_indices)[i] : 0;
+            else std::memcpy(&idx, &index_bytes[size_t(i) * index_size], index_size);
             if (restart && idx == restart_index) { indices.push_back(-1); continue; }
             indices.push_back(s64(s32(idx) + dc.vertex_offset) & 0xFFFFFFFF);
         } else {
@@ -717,7 +724,9 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
 
     // --- Profundidad ---
     st.depth_test = regs[DEPTH_TEST] & 1;
-    st.depth_write = regs[DEPTH_WRITE] & 1;
+    // Como en OpenGL y Vulkan: sin prueba de profundidad tampoco se escribe la profundidad
+    // (NZ:P dibuja el cielo asi; si escribiera, taparia todo lo que esta mas lejos que el cielo)
+    st.depth_write = (regs[DEPTH_WRITE] & 1) && st.depth_test;
     st.depth_func = regs[DEPTH_FUNC];
     if ((regs[ZT_SELECT] & 1) && (st.depth_test || st.depth_write)) {
         st.zformat = regs[ZT_FORMAT];

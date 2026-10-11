@@ -97,6 +97,8 @@ private:
         bool gpu_dirty = false;   // la imagen tiene cosas que la memoria aun no
         bool mem_dirty = true;    // la memoria tiene cosas que la imagen aun no
         u64 hash = 0;             // hash de la memoria la ultima vez que coincidian
+        bool hash_known = false;  // false: borrada/copiada entera en la GPU sin pasar por memoria;
+                                  // lo que haya en memoria es viejo y no cuenta como cambio de la CPU
         u64 epoch = 0;            // envio en el que se comprobo el hash
         u64 lo = 0, hi = 0;       // direcciones de la GPU que ocupa
         std::map<u32, VkImageView> sampled;

@@ -200,3 +200,33 @@ TEST(Draw_NroTriangle) {
     CHECK_EQ(sys.GetKernel().GetGpu().GetStats().draws, 1u);
     CHECK_EQ(sys.GetKernel().GetGpu().GetStats().triangles, 1u);
 }
+
+TEST(Draw_InlineIndicesAndDepthWriteNeedsTest) {
+    // Indices dentro del pushbuffer (mesa/nouveau: DrawInlineIndex + DrawInlineIndex2x16), y
+    // escritura de profundidad con la prueba desactivada: no escribe (como OpenGL/Vulkan)
+    DrawFixture f;
+    V tri[3];
+    for (int i = 0; i < 3; ++i) { tri[i] = kTri[i]; tri[i].z = 0.25f; }
+    f.Write(VB, tri, sizeof(tri));
+    Push p;
+    f.Setup(p, Tests::k_tri_vert, Tests::k_color_frag);
+    p.Cmd(0x3F8, {Hi(ZT), Lo(ZT), 0x0A, 0, 0});
+    p.Cmd(0x48A, {W, H});
+    p.Cmd(0x54E, {1});
+    p.Cmd(0x4B3, {0});            // sin prueba de profundidad...
+    p.Cmd(0x4BA, {1});            // ...pero con escritura
+    f.Clear(p, 0, 0, 0, 1);
+    p.Cmd(0x364, {F(1.0f)});
+    p.Cmd(0x674, {1});
+    p.Cmd(0x586, {4});            // triangulos
+    p.Cmd(0x57A, {0});            // indice 0 (32 bits)
+    p.Cmd(0x57C, {1u | (2u << 16)});   // indices 1 y 2
+    p.Cmd(0x585, {0});
+    f.Run(p);
+    CHECK_EQ(f.gpu.GetStats().draws, 1u);
+    const u32 n = f.CountNonBlack();
+    CHECK(n >= 2016 && n <= 2080);
+    float z = 0;
+    f.gpu.MemoryManager().ReadBlock(ZT + GPU::BlockLinearOffset(32 * 4, 40, W * 4, 0), &z, 4);
+    CHECK(std::fabs(z - 1.0f) < 1e-6f);
+}

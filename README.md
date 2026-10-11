@@ -1,81 +1,87 @@
 # NeXo 2 | Emulator for Nintendo Switch 2
 
-NeXo 2 is an open-source research project focused on the study and analysis of the Nintendo Switch 2 (T239) hardware architecture. The project aims to document the system components and experiment with hybrid compatibility layers (a mix of HLE and LLE) using C++20..
+NeXo 2 is an experimental, open-source Nintendo Switch 2 emulator written from scratch in C++20.
+The CPU, the HLE kernel and the GPU are hand-written and documented, and every change is checked by
+an automated test suite. It runs Switch homebrew (`.nro`) today, including 3D games; commercial
+games are not supported yet.
 
-## Project Objectives
+Website: <https://nexonetwork.github.io/www/> · Build guide: [BUILDING.md](BUILDING.md) ·
+Internals: [docs/07-nexo-internals/README.md](docs/07-nexo-internals/README.md)
 
-* **Architecture Documentation:** Comprehensive analysis of the Nvidia T239 (Drake) SoC and its ARMv8/v9 instruction set extensions.
-* **Memory Management:** Research into LPDDR5X memory layouts and virtual address space orchestration.
-* **Binary Translation:** Implementation of high-performance translation layers, exploring both interpretive and Dynamic Recompilation (JIT) methods.
-* **Graphics Subsystem:** Experimental mapping of NVN2 API calls to Vulkan 1.3 primitives.
+## What runs
 
-## Technical Specifications
+| Program | Type | Status |
+| :--- | :--- | :--- |
+| **NZ:P (Nazi Zombies Portable)** | Homebrew 3D game (SDL2 + OpenGL/mesa) | Playable, with sound (slow: software GPU) |
+| **hbmenu** | Homebrew menu | Works: lists the SD card, icons, launches other `.nro` (chain loading) |
+| **Homebrew App Store** | SDL2 app | Works: downloads the real catalogue over https |
+| **deko3d examples** | Official 3D samples | 7 of 9 (tessellation and compute missing) |
+| UMSDPong, NX-FixCheat | libnx homebrew | Work |
+| GTA Chinatown Wars (port) | Homebrew port | Boots, asks for its data files |
+| Commercial games | — | Not yet (needs NSO/NCA, audren, Vulkan) |
 
-| Component | Specification |
-| :--- | :--- |
-| SoC | Nvidia T239 (Custom Ampere) |
-| CPU | 8x ARM Cortex-A78C |
-| GPU | GA10B (1536 CUDA Cores) |
-| Graphics API | Vulkan 1.3 / NVN2 |
-| Architecture | ARMv8.2-A / ARMv9-A |
+## Features
 
-## Project Structure
+* **CPU (ARM64):** our own interpreter for all of ARMv8.2-A at EL0 (integer, FP with exact ARM rules,
+  NEON, AES/SHA, CRC32, LSE atomics), 100 % identical to a reference ARM in differential fuzzing.
+  **JIT** with dynarmic (~1 100 M instr/s). See [cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md), [jit.md](docs/07-nexo-internals/jit.md).
+* **Threads:** 6 emulated cores, **each on its own host thread**, with real atomics
+  (LDXR/STXR, CAS, LSE) and a shared exclusive monitor. See [threads.md](docs/07-nexo-internals/threads.md).
+* **HLE kernel and services:** ~40 SVCs, HIPC/CMIF/TIPC with domains, and the services homebrew uses:
+  `sm:`, `set`, `apm`, `appletOE`, `hid`, `time`, `fsp-srv` (SD card = a PC folder), `vi`, `nvdrv`,
+  `pl:u` (system font), `psm`, `ts`, `csrng`, network and audio. See [ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
+* **GPU (Maxwell):** GPFIFO, macros, DMA/2D engines, a shader interpreter and a multithreaded
+  software rasterizer (textures BC1–BC5, mipmaps, MSAA, shared texture cache), running on **its own
+  thread**. Vulkan backend in progress. See [gpu.md](docs/07-nexo-internals/gpu.md), [gpu-rasterizer.md](docs/07-nexo-internals/gpu-rasterizer.md).
+* **Network:** host sockets (`bsd`), DNS (`sfdnsres`), `nifm`, and real **TLS** (`ssl`, mbedTLS) checked
+  against the system's root certificates. See [network.md](docs/07-nexo-internals/network.md).
+* **Audio:** `audout:u` played through SDL3 (48 kHz stereo). See [audio.md](docs/07-nexo-internals/audio.md).
+* **Input:** PC keyboard and gamepads as Switch controllers. See [input.md](docs/07-nexo-internals/input.md).
 
-* `src/common/`: Utilities, thread-safe logging, and global types.
-* `src/core/arm64/`: CPU execution engine and state management.
-* `tests/`: Automated tests (CPU, loader, IPC, services, display, input) and the programs they run.
-* `src/core/memory/`: Virtual Memory Manager (VMM) and memory region map.
-* `src/core/loader/`: Executable loaders (NRO).
-* `src/core/system.hpp`: `System` class tying memory, CPU, kernel and loader together.
-* `src/core/hle/`: High-Level Emulation: kernel SVCs, IPC, system services (`services/`), display and input.
-* `src/video_core/`: Vulkan implementation and hardware renderer.
-* `docs/`: Hardware and OS documentation — start at [docs/README.md](docs/README.md).
-* `externals/`: Third-party dependencies (dynarmic, SDL3, ImGui...).
+## Tests
 
-## Development Roadmap (2026)
+`nexo2_tests` runs 98 tests twice — with the interpreter and with the JIT (196 runs): CPU programs,
+differential CPU/SIMD fuzzing, IPC and services, the NRO loader, threads and multicore, GPU
+engines, shaders (fuzzed against a reference compiler), draws and textures, network and Vulkan.
+They also pass under ASan/UBSan and TSan.
 
-## Current Phase:
-  * **Homebrew running** — libnx homebrew boots, draws on screen and reads the controller.
-    Current focus: **speed** (JIT done; next: threads on several host cores).
+```
+build.bat test
+```
 
-### Phase 1: Core Infrastructure
-- [x] **Logging Framework:** Thread-safe logger to console and `nexo2.log` (`src/common/logger.hpp`).
-- [~] **Memory Management Unit:** Paged guest memory (4 KB pages, allocated on demand) with a Horizon-style region map. 64 KB pages and permission checks pending.
-- [ ] **Virtual File System (VFS):** Initial support for parsing NCA and HFS2 container formats.
-- [x] **NRO Loader:** Loads homebrew `.nro` files (segments, memory map, NACP title). See [docs/07-nexo-internals/nro-loader-and-hle.md](docs/07-nexo-internals/nro-loader-and-hle.md).
-- [ ] **Command Line Interface:** Robust argument parsing for debugging and trace orchestration.
+## Downloads
 
-### Phase 2: CPU Emulation (ARM64)
-- [x] **State Management:** Implementation of the ARM64 register set (X0-X30, SP, PC, and PSTATE).
-- [x] **Instruction Decoder:** All of ARMv8.2-A for EL0: integer, scalar FP (half/single/double with exact ARM NaN, FPCR and FPSR rules), all Advanced SIMD/NEON groups, crypto (AES/SHA1/SHA256), CRC32, LSE atomics. 100 % of ~15 600 random valid instructions match a reference ARM (QEMU). See [cpu-interpreter.md](docs/07-nexo-internals/cpu-interpreter.md) and [cpu-fuzzing.md](docs/07-nexo-internals/cpu-fuzzing.md).
-- [x] **Execution Loop:** Basic Fetch-Decode-Execute cycle for architectural verification.
-- [x] **CPU Tests:** `nexo2_tests` runs hand-written ARM64 programs and clang-compiled C code.
-- [x] **JIT Integration:** dynarmic translates ARM64 to x86-64 (~1 100 M instr/s, x6 the interpreter); every test also runs under the JIT. See [jit.md](docs/07-nexo-internals/jit.md).
+Every commit to `main` is built by GitHub Actions and published as a **prerelease**
+(`v<version>-dev.<n>`, Windows x64). Official releases are published by hand.
+Unzip, put your `.nro` files in `sdmc/switch` and open `NeXo2.exe`.
 
-### Phase 3: Graphics Subsystem (Vulkan)
-- [~] **GPU (Maxwell) phase 1:** nvhost devices, channels, GPFIFO/pushbuffers, macros (MME), clears, DMA copies, 2D blits, syncpoints and semaphores. No shaders yet. See [gpu.md](docs/07-nexo-internals/gpu.md).
-- [ ] **Vulkan Backend:** Initialization of the Vulkan 1.3 instance and physical device selection.
-- [x] **Windowing Integration:** SDL3 window with ImGui; the "Pantalla" window shows what the program presents.
-- [x] **Software framebuffer:** `vi` + `nvdrv` (nvmap, binder buffer queue, block-linear deswizzle). libnx console homebrew is displayed. See [docs/07-nexo-internals/display.md](docs/07-nexo-internals/display.md).
-- [ ] **VMA Integration:** Implementation of the Vulkan Memory Allocator for emulator-to-GPU mapping.
-- [ ] **Shader Pipeline:** Preliminary research into Ampere microcode-to-SPIR-V translation.
+## Project structure
 
-### Phase 4: OS Kernel & Services (HLE)
-- [~] **Supervisor Call Dispatcher:** HLE kernel with ~30 SVCs (memory, events, shared/transfer memory, IPC, single-thread mutex/condvar, GetInfo...). Homebrew ABI loader config. See [docs/07-nexo-internals/nro-loader-and-hle.md](docs/07-nexo-internals/nro-loader-and-hle.md).
-- [~] **Service Infrastructure:** IPC (HIPC/CMIF/TIPC, domains), handle table, events, shared memory. Services: `sm:`, `set:sys`, `apm`, `appletOE`, `hid`, `time`, `fsp-srv` (SD card on a PC folder), `vi`, `nvdrv` (screen), controllers via hid shared memory (PC keyboard and gamepad, see [docs/07-nexo-internals/input.md](docs/07-nexo-internals/input.md)). See [docs/07-nexo-internals/ipc-and-services.md](docs/07-nexo-internals/ipc-and-services.md).
-- [~] **Scheduler:** Real guest threads on 6 emulated cores (time-sliced on one host thread), libnx-compatible mutex and condition variables, deadlock detection. Parallel host threads next. See [docs/07-nexo-internals/threads.md](docs/07-nexo-internals/threads.md).
+* `src/common/` — logging and global types.
+* `src/core/arm64/` — interpreter and JIT (dynarmic).
+* `src/core/memory/` — guest memory (atomic page tables) and region map.
+* `src/core/loader/` — NRO loader.
+* `src/core/hle/` — kernel (SVCs, threads, IPC) and system services (`services/`, `net/`).
+* `src/video_core/` — GPU: command processor, engines, shaders, software rasterizer, textures, Vulkan.
+* `src/main.cpp` — SDL3 + ImGui application.
+* `tests/` — automated tests and the programs they run.
+* `docs/` — hardware, OS and NeXo internals documentation ([docs/README.md](docs/README.md)).
+* `externals/` — submodules: dynarmic, SDL3, ImGui, Vulkan-Headers, volk, mbedTLS.
 
-## Development Status
+## Roadmap
 
-NeXo 2 runs Switch homebrew built with libnx (`.nro`): text console and software framebuffer
-in the "Pantalla" window, PC keyboard/gamepad as controller, a PC folder as SD card. It is slow
-(pure interpreter) and cannot run commercial software. Tested: NX-FixCheat, UMSDPong.
-How to build and run: [BUILDING.md](BUILDING.md). This repository is maintained strictly for educational and research purposes.
+1. [x] Foundations — memory, NRO loader, HLE kernel, IPC
+2. [x] Display and controllers
+3. [x] Complete CPU — ARMv8.2 at 100 %, decode cache, JIT
+4. [x] Threads — 6 cores on host threads, GPU on its own thread
+5. [x] Software GPU — shaders, textures, 3D
+6. [x] Network and https
+7. [~] Audio — `audout:u` done; `audren:u` next
+8. [~] Vulkan — device init done; Maxwell → SPIR-V translator next
+9. [ ] Game formats — NSO, NCA, RomFS
 
-## Contribution
+## Legal
 
-Technical contributions regarding C++20, ARM64 assembly, and Vulkan API implementation are welcome via Pull Requests.
-
-## License
-
-This project is distributed for educational purposes and hardware preservation research.
+NeXo 2 is an independent research and learning project, not affiliated with or endorsed by Nintendo.
+It does not include firmware, keys or games and does not help to obtain them. Use it with homebrew
+or software you legally own. Licensed under the GPLv3 (see [LICENSE](LICENSE)).

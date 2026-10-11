@@ -691,7 +691,13 @@ void OpenFolderInExplorer(const std::filesystem::path& dir) {
 } // namespace
 
 int main(int argc, char** argv) {
-    NeXo2::Common::Logger::EnableFile("nexo2.log");
+    // Registro en nexo2.log, junto al ejecutable (se rehace en cada arranque)
+    {
+        std::string logPath = "nexo2.log";
+        if (const char* base = SDL_GetBasePath()) logPath = std::string(base) + "nexo2.log";
+        static std::string keep = logPath;   // EnableFile guarda el puntero solo durante la llamada
+        NeXo2::Common::Logger::EnableFile(keep.c_str());
+    }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD)) {
         SDL_Log("Error inicializando SDL: %s", SDL_GetError());
         return -1;
@@ -736,6 +742,10 @@ int main(int argc, char** argv) {
         sys.GetCpu().SetDecodeCacheEnabled(settings.decode_cache);
         sys.GetKernel().SetMulticore(settings.multicore && !envOff("NEXO2_MULTICORE"));
         sys.GetKernel().GetGpu().SetAsync(settings.gpu_async && !envOff("NEXO2_GPU_ASYNC"));
+        // Modo dock o portatil. NEXO2_DOCKED=1/0 manda sobre el ajuste.
+        bool docked = settings.docked == 1;
+        if (const char* d = std::getenv("NEXO2_DOCKED")) docked = std::string(d) == "1";
+        sys.GetKernel().SetDocked(docked);
         // Dibujo: Vulkan o software. NEXO2_RENDERER=software|vulkan manda sobre el ajuste.
         bool want_vk = settings.renderer == 1;
         if (const char* r = std::getenv("NEXO2_RENDERER")) want_vk = std::string(r) == "vulkan";
@@ -967,13 +977,62 @@ int main(int argc, char** argv) {
             const auto& frame = kernel.GetDisplay().Frame();
             frameCount = frame.count;
             if (frame.count == 0) shownFrame = ~0ull;
+            // La textura tiene el tamano de la imagen del juego (1280x720 portatil, 1920x1080 dock)
+            if (frame.count != shownFrame && frame.count > 0 && frame.width && frame.height &&
+                (!screenTexture || screenTexture->w != int(frame.width) || screenTexture->h != int(frame.height))) {
+                if (screenTexture) SDL_DestroyTexture(screenTexture);
+                screenTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
+                                                  int(frame.width), int(frame.height));
+                if (screenTexture) {
+                    SDL_SetTextureBlendMode(screenTexture, SDL_BLENDMODE_NONE);
+                    SDL_SetTextureScaleMode(screenTexture, settings.linear_filter ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+                }
+            }
             if (frame.count != shownFrame && frame.count > 0 && screenTexture &&
-                frame.width == NeXo2::HLE::Display::WIDTH && frame.height == NeXo2::HLE::Display::HEIGHT) {
+                frame.rgba.size() >= size_t(frame.width) * frame.height) {
                 SDL_UpdateTexture(screenTexture, nullptr, frame.rgba.data(), int(frame.width * 4));
                 shownFrame = frame.count;
             }
         }
         g_speed.Update(TotalInstructions(sys), frameCount, g_emuRunning);
+        // Una linea de rendimiento por segundo en nexo2.log mientras se juega: que parte frena
+        {
+            static auto last = std::chrono::steady_clock::now();
+            static NeXo2::GPU::Gpu::Stats gprev{};
+#ifdef NEXO2_HAS_VULKAN
+            static NeXo2::GPU::VulkanRasterizer::Stats vprev{};
+#endif
+            const auto now = std::chrono::steady_clock::now();
+            const double secs = std::chrono::duration<double>(now - last).count();
+            if (secs >= 1.0) {
+                last = now;
+                auto& gpu = kernel.GetGpu();
+                const auto g = gpu.GetStats();
+                auto ms = [&](u64 a, u64 b) { return double(a >= b ? a - b : 0) / 1e6 / secs; };
+                if (g_emuRunning) {
+                    char line[512];
+                    int n = std::snprintf(line, sizeof(line),
+                        "[Rendimiento] %.1f FPS | CPU %.0f M instr/s | hilo GPU ocupado %.0f ms/s | dibujos %.0f/s | "
+                        "la CPU espera a la GPU %.0f ms/s | presentar %.0f ms/s",
+                        g_speed.fps, g_speed.mips, ms(g.busy_ns, gprev.busy_ns), double(g.draws - gprev.draws) / secs,
+                        ms(g.cpu_wait_ns, gprev.cpu_wait_ns), ms(g.present_ns, gprev.present_ns));
+#ifdef NEXO2_HAS_VULKAN
+                    if (auto* hw = gpu.Hw()) {
+                        const auto v = hw->GetStats();
+                        std::snprintf(line + n, sizeof(line) - size_t(n),
+                            " | Vulkan (ms/s): draws %.0f, vertices %.0f, texturas %.0f, imagenes %.0f, esperando GPU %.0f, "
+                            "a memoria %.0f, por software %llu",
+                            ms(v.ns_draw, vprev.ns_draw), ms(v.ns_vertex, vprev.ns_vertex), ms(v.ns_texture, vprev.ns_texture),
+                            ms(v.ns_images, vprev.ns_images), ms(v.ns_wait, vprev.ns_wait), ms(v.ns_download, vprev.ns_download),
+                            (unsigned long long)(v.fallbacks - vprev.fallbacks));
+                        vprev = v;
+                    }
+#endif
+                    LogUi(line);
+                }
+                gprev = g;
+            }
+        }
         const bool showGame = inGame || g_emuRunning;
 
         // =====================================================================
@@ -1404,6 +1463,13 @@ int main(int argc, char** argv) {
                     if (ImGui::Button("Añadir carpeta...")) showAddFolder();
                     ImGui::SameLine();
                     ImGui::TextDisabled("(se guarda al momento)");
+                    ImGui::SeparatorText("Consola");
+                    ImGui::TextUnformatted("Modo de la consola");
+                    ImGui::RadioButton("Portátil (1280x720)", &pending.docked, 0);
+                    ImGui::SameLine();
+                    ImGui::RadioButton("Dock / TV (1920x1080)", &pending.docked, 1);
+                    note("Lo que le dice NeXo al juego. En modo dock muchos juegos dibujan a más resolución "
+                         "(más bonito, pero cuesta más). Se aplica al abrir el siguiente juego.");
                     ImGui::SeparatorText("Interfaz");
                     ImGui::Checkbox("Modo desarrollador", &pending.dev_mode);
                     note("Muestra las ventanas de depuración: CPU, JIT, GPU, hilos, salida del programa y mapa de memoria.");
@@ -1488,7 +1554,8 @@ int main(int argc, char** argv) {
                 settings.Save(iniPath);
                 s_audioOn = settings.audio;
                 s_volume = settings.volume;
-                SDL_SetTextureScaleMode(screenTexture, settings.linear_filter ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+                if (screenTexture)
+                    SDL_SetTextureScaleMode(screenTexture, settings.linear_filter ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
                 if (!showGame && cpuChanged) {
                     StopCoresFromUi(sys);
                     sys.GetCpu().SetJitEnabled(settings.jit);

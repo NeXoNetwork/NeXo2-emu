@@ -12,7 +12,7 @@ ApmManager::ApmManager() : ServiceObject("apm") {
         ctx.SetResult(Result::Success);
     });
     RegisterCommand(1, "GetPerformanceMode", [](IpcContext& ctx) {
-        ctx.Push<u32>(0); // 0 = Normal (portatil)
+        ctx.Push<u32>(ctx.GetKernel().IsDocked() ? 1 : 0); // 0 = normal (portatil), 1 = boost (dock)
         ctx.SetResult(Result::Success);
     });
 }

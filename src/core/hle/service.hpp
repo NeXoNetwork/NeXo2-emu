@@ -48,7 +48,7 @@ protected:
     void RegisterStub(u32 id, const char* name);
 
 private:
-    struct Command { std::string name; Handler handler; };
+    struct Command { std::string name; Handler handler; bool logged = false; };
     std::string m_name;
     std::map<u32, Command> m_commands;
 };

@@ -83,6 +83,9 @@ public:
     u64  Unmap(u64 va);
     // Direccion de la memoria del programa para una direccion de la GPU
     std::optional<u64> Translate(u64 va) const;
+    // Al reves: la direccion de la GPU de una direccion de la memoria del programa (la primera
+    // proyeccion que la contiene)
+    std::optional<u64> ReverseTranslate(u64 cpu) const;
 
     void ReadBlock(u64 va, void* dst, size_t size) const;
     void WriteBlock(u64 va, const void* src, size_t size);
@@ -232,6 +235,10 @@ public:
     std::string RendererName() const;
     // El dibujo con Vulkan (nullptr si es por software)
     VulkanRasterizer* Hw() { return m_hw.get(); }
+    // Presentar: si la imagen [cpu, ...) es un render target que esta en la GPU real (Vulkan),
+    // la deja en 'rgba' leyendola directamente de alli (sin escribirla en memoria y volver a
+    // leerla). 'format' = formato de Android del buffer (1 = RGBA8888). false = no estaba.
+    bool ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba);
     // Escribe en memoria lo que la GPU real tenga pendiente. 'depth' = tambien la
     // profundidad (al final de cada envio solo hace falta el color, que es lo que se presenta;
     // la profundidad se escribe cuando alguien va a leer su memoria).
@@ -280,7 +287,9 @@ public:
         u64 shader_errors = 0;    // shaders con instrucciones que aun no sabemos ejecutar
         u64 unknown_methods = 0;
         u64 busy_ns = 0;
-        u64 fs_instructions = 0;  // instrucciones de shaders de pixeles ejecutadas          // tiempo trabajando (modo con hilo propio)
+        u64 fs_instructions = 0;  // instrucciones de shaders de pixeles ejecutadas
+        u64 present_ns = 0;       // tiempo presentando imagenes (hilo de la GPU)
+        u64 cpu_wait_ns = 0;      // tiempo que la CPU emulada espera a la GPU (DequeueBuffer...)
     };
     Stats& GetStats() { return m_stats; }
 

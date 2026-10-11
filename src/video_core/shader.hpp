@@ -162,8 +162,10 @@ public:
         if (!(offset & 7) && index < m_decoded.size() && m_decoded[index]) return m_code[index];
         return AtSlow(offset);
     }
-    // Numero de registros que usa como mucho (para no limpiar los 256 cada vez)
     static constexpr u32 MAX_CODE = 0x40000;   // 256 KB: un shader nunca es tan grande
+    // Para reutilizar el programa ya decodificado en otro draw: true si la memoria sigue
+    // teniendo los mismos bytes (cabecera y todo lo decodificado), leidos de una vez
+    bool StillValid();
 
 private:
     u64 m_address;
@@ -171,6 +173,8 @@ private:
     ShaderHeader m_header;
     std::vector<ShaderInstr> m_code;     // indexado por offset / 8
     std::vector<u8> m_decoded;
+    std::vector<u64> m_raw;              // las palabras tal cual (para StillValid)
+    u32 m_extent = 0;                    // grupos decodificados: [0, m_extent) en palabras
     const ShaderInstr& AtSlow(u32 offset);
 };
 

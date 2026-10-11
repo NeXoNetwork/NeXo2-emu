@@ -85,6 +85,14 @@ public:
     // Igual, con la direccion del bloque nvmap ya resuelta (para la cola de la GPU:
     // la tabla nvmap es del hilo de la emulacion)
     bool PresentAt(Core::Memory& memory, const GraphicBufferInfo& buf, u64 nvmap_address);
+    // Imagen ya en RGBA (la entrega el dibujo con Vulkan sin pasar por la memoria del programa)
+    void PresentRgba(u32 width, u32 height, std::vector<u32>&& rgba) {
+        std::lock_guard lock(m_frameMutex);
+        m_frame.width = width;
+        m_frame.height = height;
+        m_frame.rgba = std::move(rgba);
+        ++m_frame.count;
+    }
 
     void Reset() { m_nvmap.Clear(); std::lock_guard lock(m_frameMutex); m_frame = DisplayFrame{}; }
 

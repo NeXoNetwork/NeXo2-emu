@@ -19,6 +19,7 @@
 // Ver docs/07-nexo-internals/gpu-vulkan.md.
 #include <array>
 #include <map>
+#include <unordered_set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -53,6 +54,8 @@ public:
     // Antes de un draw por software: escribe en memoria sus render targets si estan en la GPU
     void PrepareSoftwareDraw(const u32* regs);
 
+    // Imagen para presentar leida directamente del render target (ver Gpu::ReadForPresent)
+    bool ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba);
     // Termina el trabajo pendiente y escribe en memoria las imagenes cambiadas (las de
     // profundidad solo si 'depth')
     void Flush(bool depth = true);
@@ -72,7 +75,10 @@ public:
         u64 draws = 0, clears = 0, fallbacks = 0, uploads = 0, downloads = 0, submits = 0;
         u64 pipelines = 0, shaders = 0, textures = 0;
         u64 rt_textures = 0;
-        u64 blits = 0;         // copias del motor 2D hechas en la GPU   // texturas leidas directamente de un render target
+        u64 blits = 0;         // copias del motor 2D hechas en la GPU
+        u64 presents = 0;
+        u64 tex_uploads = 0;   // niveles de textura subidos      // imagenes presentadas directamente desde la GPU
+        u64 ns_present = 0;   // texturas leidas directamente de un render target
         // Tiempo (ns) de cada parte, en el hilo de la GPU: para ver donde se va
         u64 ns_draw = 0;       // Draw entero
         u64 ns_vertex = 0;     // shader de vertices en la CPU
@@ -121,8 +127,19 @@ private:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         u32 width = 0, height = 0, depth = 0, levels = 0;
-        std::vector<std::shared_ptr<const DecodedLevel>> uploaded;
+        bool native = false;      // en su formato original (si no, decodificada a 4 floats)
+        std::vector<std::shared_ptr<const DecodedLevel>> uploaded;   // (decodificada)
+        struct LevelState {       // (nativa) lo que se subio de cada nivel
+            bool valid = false, dirty = false;
+            u64 hash = 0, quick = 0, epoch = 0, full_epoch = 0;
+        };
+        std::vector<LevelState> lv;
+        u64 lo = ~0ull, hi = 0;   // memoria que ocupa (para los avisos de escritura)
     };
+    // Formato de Vulkan para subir la textura tal cual; false = decodificarla en la CPU
+    bool NativeTextureFormat(const TextureInfo& info, VkFormat& fmt, bool& alpha_one);
+    std::map<VkFormat, bool> m_formatOk;
+    std::unordered_set<u64> m_texPages;   // paginas de 64 KB con texturas nativas
     struct BoundTexture { VkImageView view; VkSampler sampler; float scale[2]; };
     bool PrepareTexture(u32 handle, const SpirvTexture& want, u64 tic_pool, u32 tic_max, u64 tsc_pool, u32 tsc_max,
                         BoundTexture& out);
@@ -181,6 +198,8 @@ private:
     std::map<std::vector<u32>, VkSampler> m_samplers;
     std::map<u64, std::vector<std::unique_ptr<FragShader>>> m_fragShaders;
     std::map<std::vector<u32>, VkShaderModule> m_vertShaders;
+    // Shaders de vertices ya decodificados (se ejecutan en la CPU), por direccion
+    std::map<u64, std::unique_ptr<ShaderProgram>> m_vsPrograms;
     std::map<std::vector<u32>, VkPipeline> m_pipelines;
     u64 m_nextShaderId = 1;
     u64 m_epoch = 1;

@@ -423,3 +423,34 @@ TEST(Texture_CacheReusesAndSeesChanges) {
     CHECK(red() > 0.99f);
     CHECK_EQ(cache.Decodes(), d1);
 }
+
+TEST(Texture_ChangesSeenByNextDraw) {
+    // Una textura cambia entre dos draws: escrita por la GPU (se ve en el siguiente draw) y por
+    // la CPU (se ve en el siguiente envio). Con Vulkan se sube tal cual (formato nativo).
+    TexFixture f;
+    auto fill = [&](u32 c) { f.WriteBlockLinear(TEXMEM, 8, 8, 0, std::vector<u32>(64, c)); };
+    TicDesc tic;
+    tic.width = tic.height = 8;
+    auto draw = [&]() {
+        Push p;
+        f.Setup(p, Tests::k_tri_vert, Tests::k_tex_frag);
+        f.BindTexture(p, tic, TscDesc{}, 0x690);
+        f.Quad(p, 1.0f, 0);
+        f.Write(PB, p.w.data(), p.w.size() * 4);
+        f.ch.SubmitGpfifo({PB | (u64(p.w.size()) << 42)});   // cada envio es una "epoca" nueva
+        f.gpu.FlushRenderer();
+    };
+    fill(Rgba(255, 0, 0));
+    draw();
+    CHECK(Is(f.Pixel(20, 20), 255, 0, 0, 255));
+    fill(Rgba(0, 255, 0));                       // la GPU escribe (WriteBlock avisa)
+    draw();
+    CHECK(Is(f.Pixel(20, 20), 0, 255, 0, 255));
+    // La CPU escribe directamente en la memoria (sin avisar a nadie)
+    const std::vector<u32> blue(64, Rgba(0, 0, 255));
+    for (u32 y = 0; y < 8; ++y)
+        for (u32 x = 0; x < 8; ++x)
+            f.mem.WriteBytes(*f.gpu.MemoryManager().Translate(TEXMEM + GPU::BlockLinearOffset(x * 4, y, 32, 0)), &blue[0], 4);
+    draw();
+    CHECK(Is(f.Pixel(20, 20), 0, 0, 255, 255));
+}

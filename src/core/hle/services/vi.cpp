@@ -1,6 +1,7 @@
 #include "vi.hpp"
 #include "hle/kernel.hpp"
 #include "common/logger.hpp"
+#include <chrono>
 #include <cstring>
 
 namespace NeXo2::HLE {
@@ -155,8 +156,8 @@ ApplicationDisplayService::ApplicationDisplayService(std::shared_ptr<ViState> st
     RegisterStub(1020, "CloseDisplay");
     RegisterStub(1101, "SetDisplayEnabled");
     RegisterCommand(1102, "GetDisplayResolution", [](IpcContext& ctx) {
-        ctx.Push<s64>(Display::WIDTH);
-        ctx.Push<s64>(Display::HEIGHT);
+        ctx.Push<s64>(ctx.GetKernel().DisplayWidth());
+        ctx.Push<s64>(ctx.GetKernel().DisplayHeight());
         ctx.SetResult(Result::Success);
     });
     RegisterCommand(2020, "OpenLayer", [this](IpcContext& ctx) { OpenLayer(ctx); });
@@ -216,8 +217,8 @@ SystemDisplayService::SystemDisplayService() : ServiceObject("ISystemDisplayServ
     RegisterStub(2205, "SetLayerZ");
     RegisterStub(2207, "SetLayerVisibility");
     RegisterCommand(1203, "GetDisplayLogicalResolution", [](IpcContext& ctx) {
-        ctx.Push<s32>(Display::WIDTH);
-        ctx.Push<s32>(Display::HEIGHT);
+        ctx.Push<s32>(s32(ctx.GetKernel().DisplayWidth()));
+        ctx.Push<s32>(s32(ctx.GetKernel().DisplayHeight()));
         ctx.SetResult(Result::Success);
     });
 }
@@ -271,7 +272,7 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
     ParcelReader r(in);
     ParcelWriter w;
     r.ReadInterfaceToken();
-    const BufferOutput output{Display::WIDTH, Display::HEIGHT, 0, 0};
+    const BufferOutput output{ctx.GetKernel().DisplayWidth(), ctx.GetKernel().DisplayHeight(), 0, 0};
 
     switch (code) {
         case Code::Connect:
@@ -339,9 +340,23 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
                 const GraphicBufferInfo info = q.slots[slot].info;
                 const NvMapObject* obj = display.NvMap().FindById(info.nvmap_id);
                 const u64 address = obj ? obj->address : 0;
-                q.slots[slot].present_ticket = ctx.GetKernel().GetGpu().Enqueue([&display, &memory, info, address] {
+                auto& gpu = ctx.GetKernel().GetGpu();
+                q.slots[slot].present_ticket = gpu.Enqueue([&display, &memory, &gpu, info, address] {
                     const bool first = display.Frame().count == 0;
-                    if (display.PresentAt(memory, info, address) && first)
+                    const auto t0 = std::chrono::steady_clock::now();
+                    // Dibujado con Vulkan: directamente de la imagen de la GPU (sin pasar por memoria)
+                    bool ok = false;
+                    if (address && info.offset == 0 && info.layout == 3) {
+                        std::vector<u32> rgba;
+                        if (gpu.ReadForPresent(address, info.width, info.height, info.format, rgba)) {
+                            display.PresentRgba(info.width, info.height, std::move(rgba));
+                            ok = true;
+                        }
+                    }
+                    if (!ok) ok = display.PresentAt(memory, info, address);
+                    gpu.GetStats().present_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0).count());
+                    if (ok && first)
                         Logger::Log(Logger::Level::Info, "[vi] Primera imagen en pantalla (" +
                             std::to_string(info.width) + "x" + std::to_string(info.height) + ")");
                 });
@@ -367,8 +382,8 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
             const s32 what = r.ReadI32();
             s32 value = 0;
             switch (what) {
-                case 0: value = Display::WIDTH;  break; // NATIVE_WINDOW_WIDTH
-                case 1: value = Display::HEIGHT; break; // NATIVE_WINDOW_HEIGHT
+                case 0: value = ctx.GetKernel().DisplayWidth();  break; // NATIVE_WINDOW_WIDTH
+                case 1: value = ctx.GetKernel().DisplayHeight(); break; // NATIVE_WINDOW_HEIGHT
                 case 2: value = 1;               break; // NATIVE_WINDOW_FORMAT (RGBA_8888)
                 case 3: value = 1;               break; // MIN_UNDEQUEUED_BUFFERS
                 default: break;

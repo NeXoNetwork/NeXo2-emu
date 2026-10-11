@@ -166,7 +166,14 @@ converted). An image is:
   `ReadBlock`/`WriteBlock`, so DMA, 2D blits, texture decoding and inline uploads always see the
   latest pixels. Before a software draw its targets are written back too (it uses direct pointers).
 
-**Textures** are decoded on the CPU by the shared `TextureCache` (as 4 × 32-bit values per texel),
+**Textures in their own format.** Common formats (RGBA8, RGB10A2, R/RG 8/16/32, RGBA16F/32F,
+R11G11B10F and BC1–BC5 when the GPU supports BC) are uploaded as they are in memory, only
+de-swizzled from block linear (`ReadTextureLevelRaw` in texture.cpp): no per-texel conversion and
+4× less data than floats. A level is read again when the GPU wrote its memory (`OnGpuWrite`, with a
+64 KB page filter), when a quick hash (32 bytes of every 4 KB) changes at a new submit, or every 30
+submits (full hash). `NEXO2_VK_DECODE_TEXTURES=1` forces the old path below.
+
+**Other textures** are decoded on the CPU by the shared `TextureCache` (as 4 × 32-bit values per texel),
 uploaded as `R32G32B32A32_SFLOAT` images with all their mip levels (or RGBA16F if the GPU can't
 filter 32-bit floats), with the TIC swizzle as the view's component mapping. A level is uploaded
 again only when the cache returns a new decode (its memory changed). Samplers come from the TSC
@@ -182,9 +189,18 @@ every frame this way; doing it on the GPU took it from ~6 to ~20 fps on lavapipe
 only blit destinations are not written back at the end of each submit (only when someone reads
 their memory).
 
+**Presenting.** A frame drawn with Vulkan is not written back to guest memory at the end of the
+submit any more: `vi` QueueBuffer asks `Gpu::ReadForPresent`, which copies the render target image
+straight into the display frame (RGBA8). Guest memory is only updated when something else reads
+it (`BeforeAccess`). `NEXO2_VK_SYNC=1` restores the old write-back after every submit.
+
 **Timing.** `VulkanRasterizer::GetStats()` has the time per part (draw, CPU vertex shader, textures,
 render target checks, waiting for the GPU, writing back); Diagnostics shows it in ms per second.
 `NEXO2_TEX_DEBUG=1` prints every texture decode (to see what gets decoded again and again).
+The app also writes one `[Rendimiento]` line per second to `nexo2.log` (next to the executable)
+while a game runs: FPS, CPU MIPS, GPU thread busy time, how long the emulated CPU waits for the GPU,
+presenting, and the Vulkan breakdown. IPC calls are logged only the first time each command is
+used (`NEXO2_LOG_IPC=1` logs all of them; writing thousands of lines per second slowed games down).
 
 **Clears** (`ClearSurface`) of a target that is already on the GPU, or of a whole surface, are
 `vkCmdClearAttachments`; partial channel masks and stencil-only clears go to software.

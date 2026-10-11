@@ -73,8 +73,9 @@ public:
         std::string error;
     };
     // 'tex' y 'tex_cb': texturas para el shader de vertices. false = no hay nada que dibujar.
+    // 'program' (opcional): el shader de vertices ya decodificado (si no, se decodifica aqui)
     static bool RunVertexStage(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, const DrawCall& dc,
-                               TextureSampler* tex, u32 tex_cb, VertexStage& out);
+                               TextureSampler* tex, u32 tex_cb, VertexStage& out, ShaderProgram* program = nullptr);
 
 private:
     struct ScreenVertex {

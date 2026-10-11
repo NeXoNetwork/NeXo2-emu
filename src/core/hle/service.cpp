@@ -1,4 +1,5 @@
 #include "service.hpp"
+#include <cstdlib>
 #include "common/logger.hpp"
 
 namespace NeXo2::HLE {
@@ -24,8 +25,14 @@ void ServiceObject::Dispatch(IpcContext& ctx) {
         ctx.Unimplemented(m_name);
         return;
     }
-    Logger::Log(Logger::Level::Info, "[IPC] " + m_name + " -> " + it->second.name +
-                                     " (" + std::to_string(ctx.CommandId()) + ")");
+    // Cada comando se apunta en el registro la primera vez (si no, NZ:P escribe miles de
+    // lineas por segundo y eso frena la emulacion). NEXO2_LOG_IPC=1: todas las llamadas.
+    static const bool all = std::getenv("NEXO2_LOG_IPC") != nullptr;
+    if (all || !it->second.logged) {
+        it->second.logged = true;
+        Logger::Log(Logger::Level::Info, "[IPC] " + m_name + " -> " + it->second.name +
+                                         " (" + std::to_string(ctx.CommandId()) + ")");
+    }
     it->second.handler(ctx);
 }
 

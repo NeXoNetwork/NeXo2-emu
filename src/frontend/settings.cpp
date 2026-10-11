@@ -31,6 +31,7 @@ void Settings::Load(const std::string& path) {
         else if (k == "decode_cache") decode_cache = ToBool(v);
         else if (k == "gpu_async") gpu_async = ToBool(v);
         else if (k == "renderer") renderer = v == "software" ? 0 : 1;
+        else if (k == "console_mode") docked = v == "docked" ? 1 : 0;
         else if (k == "gpu_threads") gpu_threads = std::clamp(ToInt(v, 0), 0, 64);
         else if (k == "linear_filter") linear_filter = ToBool(v);
         else if (k == "audio") audio = ToBool(v);
@@ -50,6 +51,7 @@ bool Settings::Save(const std::string& path) const {
       << "multicore=" << multicore << "\n"
       << "decode_cache=" << decode_cache << "\n"
       << "renderer=" << (renderer == 0 ? "software" : "vulkan") << "\n"
+      << "console_mode=" << (docked ? "docked" : "handheld") << "\n"
       << "gpu_async=" << gpu_async << "\n"
       << "gpu_threads=" << gpu_threads << "\n"
       << "linear_filter=" << linear_filter << "\n"

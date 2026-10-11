@@ -1,6 +1,8 @@
 // Decodificacion de instrucciones Maxwell: de 64 bits a ShaderInstr.
 // Ver shader.hpp y docs/07-nexo-internals/gpu-shaders.md.
 #include "shader.hpp"
+#include <algorithm>
+#include <cstring>
 
 namespace NeXo2::GPU {
 
@@ -211,6 +213,7 @@ const ShaderInstr& ShaderProgram::AtSlow(u32 offset) {
         const size_t want = (size_t(index) / 512 + 1) * 512;
         m_code.resize(want);
         m_decoded.resize(want, 0);
+        m_raw.resize(want, 0);
     }
     if (!m_decoded[index]) {
         // Leer el grupo de 32 bytes entero (planificacion + 3 instrucciones)
@@ -221,11 +224,25 @@ const ShaderInstr& ShaderProgram::AtSlow(u32 offset) {
             m_code[group + i] = DecodeShaderInstr(words[i]);
             m_decoded[group + i] = 1;
         }
+        for (u32 i = 0; i < 4; ++i) m_raw[group + i] = words[i];
+        m_extent = std::max(m_extent, group + 4);
         m_code[group] = ShaderInstr{};    // la palabra de planificacion no se ejecuta
         m_code[group].op = ShOp::Nop;
         m_decoded[group] = 1;
     }
     return m_code[index];
+}
+
+bool ShaderProgram::StillValid() {
+    ShaderHeader h;
+    m_read(m_address, h.words, sizeof(h.words));
+    if (std::memcmp(h.words, m_header.words, sizeof(h.words)) != 0) return false;
+    if (m_extent == 0) return true;
+    std::vector<u64> now(m_extent);
+    m_read(m_address + 0x50, now.data(), now.size() * 8);
+    for (u32 i = 0; i < m_extent; ++i)
+        if (m_decoded[i] && now[i] != m_raw[i]) return false;
+    return true;
 }
 
 } // namespace NeXo2::GPU

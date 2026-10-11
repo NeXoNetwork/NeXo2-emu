@@ -144,6 +144,12 @@ public:
     //   StartCores()        arrancar los hilos; StopCores() pararlos y esperarlos
     //   CoresHalted()       algun nucleo paro la CPU (fin, error): hay que llamar a StopCores()
     // El reloj (CNTPCT) pasa a ser la hora real. Toda SVC coge el candado del kernel (Lock()).
+    // Modo de la consola: conectada al dock (TV, 1920x1080, rendimiento "boost") o portatil
+    // (1280x720). Lo leen am (GetOperationMode...), apm y vi. Se aplica al abrir un programa.
+    void SetDocked(bool on) { m_docked = on; }
+    bool IsDocked() const { return m_docked; }
+    u32 DisplayWidth() const { return m_docked ? 1920 : 1280; }
+    u32 DisplayHeight() const { return m_docked ? 1080 : 720; }
     void SetMulticore(bool on);
     bool IsMulticore() const { return m_multicore; }
     void StartCores();
@@ -337,6 +343,7 @@ private:
     std::recursive_mutex m_lock;
     std::condition_variable_any m_coreCv;  // un hilo pasa a listo / hay que parar
     bool m_multicore = false;
+    std::atomic<bool> m_docked{false};
     std::array<std::unique_ptr<Core::Interpreter>, NUM_CORES> m_extraCpus{};   // nucleos 1..5
     std::array<std::shared_ptr<KThread>, NUM_CORES> m_coreThread{};            // hilo cargado en cada nucleo
     std::vector<std::thread> m_coreThreads;

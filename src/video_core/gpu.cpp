@@ -105,6 +105,12 @@ std::optional<u64> GpuMemoryManager::Translate(u64 va) const {
     return m->second.cpu + (va - m->first);
 }
 
+std::optional<u64> GpuMemoryManager::ReverseTranslate(u64 cpu) const {
+    for (const auto& [va, m] : m_maps)
+        if (cpu >= m.cpu && cpu < m.cpu + m.size) return va + (cpu - m.cpu);
+    return std::nullopt;
+}
+
 void GpuMemoryManager::ReadBlock(u64 va, void* dst, size_t size) const {
     if (m_hook) m_hook->BeforeAccess(va, size, false);
     auto* out = static_cast<u8*>(dst);
@@ -296,7 +302,11 @@ void Channel::SubmitGpfifo(const std::vector<u64>& entries) {
         const u32 words = u32((entry >> 42) & 0x1FFFFF);
         if (words) ProcessPushbuffer(va, words);
     }
-    m_gpu.FlushRenderer(false);   // lo dibujado con Vulkan, a memoria (se va a presentar o leer)
+    // Lo dibujado con Vulkan se queda en la GPU: la imagen se presenta directamente desde alli
+    // (Gpu::ReadForPresent) y, si otra parte lee esa memoria, se escribe antes (BeforeAccess).
+    // NEXO2_VK_SYNC=1: escribirlo todo en memoria al final de cada envio (mas lento, para comparar).
+    static const bool sync = std::getenv("NEXO2_VK_SYNC") != nullptr;
+    if (sync) m_gpu.FlushRenderer(false);
 }
 
 void Channel::ProcessPushbuffer(u64 va, u32 words) {
@@ -451,6 +461,17 @@ std::string Gpu::RendererName() const {
     return "Software";
 }
 
+bool Gpu::ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba) {
+#ifdef NEXO2_HAS_VULKAN
+    if (!m_hw) return false;
+    const auto va = m_mm.ReverseTranslate(cpu_address);
+    return va && m_hw->ReadForPresent(*va, width, height, format, rgba);
+#else
+    (void)cpu_address; (void)width; (void)height; (void)format; (void)rgba;
+    return false;
+#endif
+}
+
 void Gpu::FlushRenderer(bool depth) {
 #ifdef NEXO2_HAS_VULKAN
     if (m_hw) m_hw->Flush(depth);
@@ -525,8 +546,10 @@ void Gpu::WorkerLoop() {
 
 void Gpu::WaitTicket(u64 ticket) {
     if (IsDone(ticket)) return;
+    const auto t0 = std::chrono::steady_clock::now();
     std::unique_lock lock(m_queueMutex);
     m_doneCv.wait(lock, [&] { return IsDone(ticket); });
+    m_stats.cpu_wait_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
 }
 
 void Gpu::WaitIdle() {

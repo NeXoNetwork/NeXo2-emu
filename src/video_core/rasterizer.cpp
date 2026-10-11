@@ -11,7 +11,9 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <unordered_map>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -281,12 +283,20 @@ struct SoftwareRasterizer::DrawState {
 // ============================================================================
 
 namespace {
+// Los vertices del draw de cada stream, leidos de una vez (y no atributo a atributo)
+struct StreamWindows {
+    u32 min_index = 0, max_index = 0;
+    bool loaded[16] = {};
+    u64 base[16] = {};
+    std::vector<u8> data[16];
+};
+
 class VertexEnv final : public ShaderEnv {
 public:
     VertexEnv(const u32* regs, GpuMemoryManager& mm, const DrawCall& dc, u32 index, u32 vertex_id,
-              std::function<u32(u32, u32)> read_const, SoftwareRasterizer::Vertex& out)
+              const std::function<u32(u32, u32)>& read_const, SoftwareRasterizer::Vertex& out, StreamWindows* win)
         : m_regs(regs), m_mm(mm), m_dc(dc), m_index(index), m_vertex_id(vertex_id),
-          m_readConst(std::move(read_const)), m_out(out) {}
+          m_readConst(read_const), m_out(out), m_win(win) {}
 
     u32 ReadConst(u32 index, u32 offset) override { return m_readConst(index, offset); }
     u32 ReadAttribute(u32 addr) override {
@@ -326,13 +336,34 @@ private:
         const u32 stride = cfg & 0xFFF;
         u64 addr = Iova(m_regs[VERTEX_STREAM + 4 * stream + 1], m_regs[VERTEX_STREAM + 4 * stream + 2]);
         u32 element = m_index;
-        if (m_regs[STREAM_PER_INSTANCE + stream] & 1) {
+        const bool per_instance = m_regs[STREAM_PER_INSTANCE + stream] & 1;
+        if (per_instance) {
             const u32 div = m_regs[VERTEX_STREAM + 4 * stream + 3];
             element = m_dc.base_instance + (div ? m_dc.instance / div : m_dc.instance);
         }
+        const u64 stream_addr = addr;
         addr += u64(element) * stride + offset;
         u8 raw[16] = {};
-        m_mm.ReadBlock(addr, raw, l.bytes);
+        if (m_win && !per_instance && stride) {
+            // Todos los vertices de este stream que usa el draw, de una vez
+            if (!m_win->loaded[stream]) {
+                m_win->loaded[stream] = true;
+                const u64 bytes = u64(m_win->max_index - m_win->min_index + 1) * stride + 64;
+                if (bytes <= (32ull << 20)) {
+                    m_win->base[stream] = stream_addr + u64(m_win->min_index) * stride;
+                    m_win->data[stream].resize(size_t(bytes));
+                    m_mm.ReadBlock(m_win->base[stream], m_win->data[stream].data(), size_t(bytes));
+                }
+            }
+            const auto& d = m_win->data[stream];
+            if (addr >= m_win->base[stream] && addr + l.bytes <= m_win->base[stream] + d.size()) {
+                std::memcpy(raw, d.data() + (addr - m_win->base[stream]), l.bytes);
+            } else {
+                m_mm.ReadBlock(addr, raw, l.bytes);
+            }
+        } else {
+            m_mm.ReadBlock(addr, raw, l.bytes);
+        }
         u32 comps[4] = {};
         if (l.packed) {
             u32 v; std::memcpy(&v, raw, 4);
@@ -369,24 +400,27 @@ private:
     GpuMemoryManager& m_mm;
     const DrawCall& m_dc;
     u32 m_index, m_vertex_id;
-    std::function<u32(u32, u32)> m_readConst;
+    const std::function<u32(u32, u32)>& m_readConst;
     SoftwareRasterizer::Vertex& m_out;
+    StreamWindows* m_win;
     u32 m_fetched = 0;
     u32 m_attr[32][4] = {};
 };
 } // namespace
 
 bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, const DrawCall& dc,
-                                        TextureSampler* tex, u32 tex_cb, VertexStage& out) {
+                                        TextureSampler* tex, u32 tex_cb, VertexStage& out, ShaderProgram* program) {
     GpuMemoryManager& mm = gpu.MemoryManager();
     auto read = [&mm](u64 a, void* d, size_t n) { mm.ReadBlock(a, d, n); };
     const u64 region = Iova(regs[PROGRAM_REGION], regs[PROGRAM_REGION + 1]);
-    ShaderProgram vs(region + regs[PIPELINE + 0x10 * 1 + 1], read);
+    std::optional<ShaderProgram> own;
+    if (!program) own.emplace(region + regs[PIPELINE + 0x10 * 1 + 1], read);
+    ShaderProgram& vs = program ? *program : *own;
     const u32 group = std::min<u32>(regs[PIPELINE + 0x10 * 1 + 4] & 7, 4);
     // Constbufs del grupo de vertices, copiados la primera vez que se leen
     std::array<std::vector<u32>, 18> cb_cache;
     std::array<bool, 18> cb_loaded{};
-    auto read_const = [&](u32 index, u32 offset) -> u32 {
+    const std::function<u32(u32, u32)> read_const = [&](u32 index, u32 offset) -> u32 {
         if (index >= 18) return 0;
         if (!cb_loaded[index]) {
             cb_loaded[index] = true;
@@ -424,8 +458,20 @@ bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const Constbu
             indices.push_back(s64(dc.first) + i);
         }
     }
-    std::map<u32, size_t> cache;
+    StreamWindows win;
+    {
+        bool first = true;
+        for (s64 idx : indices) {
+            if (idx < 0) continue;
+            if (first) { win.min_index = win.max_index = u32(idx); first = false; }
+            win.min_index = std::min(win.min_index, u32(idx));
+            win.max_index = std::max(win.max_index, u32(idx));
+        }
+    }
+    std::unordered_map<u32, size_t> cache;
+    cache.reserve(indices.size());
     auto& verts = out.verts;
+
     std::vector<s64> slots;         // posicion en 'verts' de cada indice (-1 = reinicio)
     slots.reserve(indices.size());
     for (s64 idx : indices) {
@@ -435,7 +481,7 @@ bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const Constbu
         Vertex& v = verts.emplace_back();
         v.attr[0x7C / 4] = U(1.0f);
         const u32 vid = dc.indexed ? u32(idx) : u32(idx - dc.first) + dc.vertex_id_base;
-        VertexEnv env(regs, mm, dc, u32(idx), vid, read_const, v);
+        VertexEnv env(regs, mm, dc, u32(idx), vid, read_const, v, &win);
         env.tex = tex;
         env.tex_cb = tex_cb;
         const auto res = interp.Run(vs, env);

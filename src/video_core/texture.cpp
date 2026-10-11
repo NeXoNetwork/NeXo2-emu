@@ -442,6 +442,20 @@ std::vector<std::vector<u8>> ReadZones(GpuMemoryManager& mm, const LevelRegions&
     return raws;
 }
 
+// Hash rapido: 32 bytes de cada 4 KB de la textura (para ver si la CPU la ha cambiado)
+u64 QuickHash(GpuMemoryManager& mm, const LevelRegions& r) {
+    u64 h = 0x9E3779B97F4A7C15ull;
+    u8 buf[32];
+    for (const auto& z : r.zones) {
+        for (u64 off = 0; off < z.second; off += 4096) {
+            const size_t n = size_t(std::min<u64>(32, z.second - off));
+            mm.ReadBlock(z.first + off, buf, n);
+            for (size_t k = 0; k < n; ++k) h = (h ^ buf[k]) * 0x100000001B3ull;
+        }
+    }
+    return h;
+}
+
 u32 LevelDepth(const TextureInfo& t, u32 level) {
     return t.type == 2 ? std::max(t.depth >> level, 1u) : t.depth;   // capas en los arrays
 }
@@ -540,14 +554,25 @@ std::shared_ptr<const DecodedLevel> TextureCache::Get(const std::array<u32, 8>& 
     auto it = m_entries.find(key);
     if (it != m_entries.end() && !it->second.dirty && it->second.epoch == epoch && it->second.mm_generation == gen)
         return it->second.level;
-    // Leer la memoria: si los bytes son los mismos que la ultima vez, sirve lo decodificado
     const LevelRegions r = GetLevelRegions(info, level, LevelDepth(info, level));
+    // Nuevo envio: la CPU puede haber escrito la textura. Leer y resumir todas las texturas en
+    // cada frame era lo que mas costaba al dibujar, asi que primero se mira un hash rapido (32
+    // bytes de cada 4 KB); el completo se hace si cambia o cada 30 envios.
+    const u64 quick = QuickHash(m_gpu.MemoryManager(), r);
+    if (it != m_entries.end() && !it->second.dirty && it->second.mm_generation == gen &&
+        epoch - it->second.full_epoch < 30 && quick == it->second.quick) {
+        it->second.epoch = epoch;
+        return it->second.level;
+    }
+    // Leer la memoria: si los bytes son los mismos que la ultima vez, sirve lo decodificado
     const auto raws = ReadZones(m_gpu.MemoryManager(), r);
     u64 h = 0xCBF29CE484222325ull;
     for (const auto& raw : raws) h = HashBytes(raw, h);
     if (it != m_entries.end() && it->second.hash == h) {
         it->second.dirty = false;
         it->second.epoch = epoch;
+        it->second.full_epoch = epoch;
+        it->second.quick = quick;
         it->second.mm_generation = gen;
         return it->second.level;
     }
@@ -559,7 +584,7 @@ std::shared_ptr<const DecodedLevel> TextureCache::Get(const std::array<u32, 8>& 
     const size_t bytes = lv->texels.size() * sizeof(lv->texels[0]);
     if (it == m_entries.end()) {
         // Limite de memoria: si se pasa, se empieza de cero (los draws en curso conservan lo suyo)
-        if (m_bytes + bytes > (512ull << 20)) { m_entries.clear(); m_bytes = 0; }
+        if (m_bytes + bytes > (512ull << 20)) { m_entries.clear(); m_pages.clear(); m_bytes = 0; }
         it = m_entries.emplace(key, Entry{}).first;
     } else {
         m_bytes -= it->second.level ? it->second.level->texels.size() * sizeof(it->second.level->texels[0]) : 0;
@@ -568,18 +593,25 @@ std::shared_ptr<const DecodedLevel> TextureCache::Get(const std::array<u32, 8>& 
     e.level = lv;
     e.hash = h;
     e.epoch = epoch;
+    e.full_epoch = epoch;
+    e.quick = quick;
     e.mm_generation = gen;
     e.dirty = false;
     e.lo = ~0ull; e.hi = 0;
     for (const auto& z : r.zones) { e.lo = std::min(e.lo, z.first); e.hi = std::max(e.hi, z.first + z.second); }
+    if (e.hi > e.lo)
+        for (u64 p = e.lo >> 16; p <= (e.hi - 1) >> 16; ++p) m_pages.insert(p);
     m_bytes += bytes;
     m_count.store(m_entries.size(), std::memory_order_relaxed);
     return lv;
 }
 
 void TextureCache::OnGpuWrite(u64 va, u64 size) {
-    if (m_count.load(std::memory_order_relaxed) == 0) return;
+    if (m_count.load(std::memory_order_relaxed) == 0 || size == 0) return;
     std::lock_guard lock(m_mutex);
+    bool any = false;
+    for (u64 p = va >> 16; p <= (va + size - 1) >> 16 && !any; ++p) any = m_pages.count(p) != 0;
+    if (!any) return;
     for (auto& [k, e] : m_entries)
         if (va < e.hi && va + size > e.lo) e.dirty = true;
 }
@@ -587,6 +619,7 @@ void TextureCache::OnGpuWrite(u64 va, u64 size) {
 void TextureCache::Clear() {
     std::lock_guard lock(m_mutex);
     m_entries.clear();
+    m_pages.clear();
     m_bytes = 0;
     m_count.store(0, std::memory_order_relaxed);
 }
@@ -733,6 +766,55 @@ void TextureSampler::Query(u32 handle, u32 lod, u32 out[4]) {
     out[1] = std::max(t.height >> level, 1u);
     out[2] = t.type == 2 ? std::max(t.depth >> level, 1u) : t.depth;
     out[3] = t.max_level - t.min_level + 1;
+}
+
+bool ReadTextureLevelRaw(Gpu& gpu, const TextureInfo& t, u32 level, RawTextureLevel& out) {
+    const u32 bpb = TextureFormatBytes(t.format);
+    if (!bpb) return false;
+    const bool is3d = t.type == 2;
+    const bool comp = TextureFormatCompressed(t.format);
+    const u32 bw = comp ? 4 : 1;
+    out.width = std::max(t.width >> level, 1u);
+    out.height = std::max(t.height >> level, 1u);
+    out.depth = LevelDepth(t, level);
+    const u32 wblocks = (out.width + bw - 1) / bw, hblocks = (out.height + bw - 1) / bw;
+    const u64 total = u64(wblocks) * hblocks * out.depth * bpb;
+    if (total > (256ull << 20)) return false;
+    const LevelRegions r = GetLevelRegions(t, level, out.depth);
+    const auto raws = ReadZones(gpu.MemoryManager(), r);
+    u64 h = 0xCBF29CE484222325ull;
+    for (const auto& raw : raws) h = HashBytes(raw, h);
+    out.hash = h;
+    out.lo = ~0ull; out.hi = 0;
+    for (const auto& z : r.zones) { out.lo = std::min(out.lo, z.first); out.hi = std::max(out.hi, z.first + z.second); }
+    out.bytes.assign(size_t(total), 0);
+    const u32 wb = wblocks * bpb;
+    const u32 bh = AdjustShift(t.block_height_log2, 8, hblocks);
+    const u32 bd = is3d ? AdjustShift(t.block_depth_log2, 1, out.depth) : 0;
+    for (u32 z = 0; z < out.depth; ++z) {
+        const auto& raw = raws[r.zone_of_z[z]];
+        const u32 zin = (t.block_linear && is3d) ? z : 0;
+        u8* dst = out.bytes.data() + size_t(z) * hblocks * wb;
+        for (u32 by = 0; by < hblocks; ++by) {
+            u8* row = dst + size_t(by) * wb;
+            if (!t.block_linear) {
+                const u64 at = u64(by) * t.pitch;
+                if (at + wb <= raw.size()) std::memcpy(row, raw.data() + at, wb);
+                continue;
+            }
+            // Block linear: cada GOB guarda la fila en trozos de 16 bytes seguidos
+            for (u32 xb = 0; xb < wb; xb += 16) {
+                const u64 at = BlockLinear3D(xb, by, zin, wb, hblocks, bh, bd);
+                const u32 n = std::min(16u, wb - xb);
+                if (at + n <= raw.size()) std::memcpy(row + xb, raw.data() + at, n);
+            }
+        }
+    }
+    return true;
+}
+
+u64 TextureLevelQuickHash(Gpu& gpu, const TextureInfo& t, u32 level) {
+    return QuickHash(gpu.MemoryManager(), GetLevelRegions(t, level, LevelDepth(t, level)));
 }
 
 } // namespace NeXo2::GPU

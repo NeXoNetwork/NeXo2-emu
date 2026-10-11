@@ -18,9 +18,13 @@
   - When the program stops (it exits or fails), a box offers "Volver a la biblioteca" or "Reiniciar".
 - **Status bar:** state (playing / paused / stopped / ready), FPS, MIPS, CPU mode, GPU, controller and version.
 - **Settings:** a modal with tabs.
-  - General: game folders and developer mode.
+  - General: game folders, console mode and developer mode.
+    - Console mode: handheld (1280x720) or docked/TV (1920x1080). `Kernel::SetDocked` changes
+      what am (`GetOperationMode`, `GetPerformanceMode`, `GetDefaultDisplayResolution`), apm and vi
+      (display resolution, native window size) report. Applied when a game starts;
+      `NEXO2_DOCKED=1|0` overrides it. The game window follows the size of the frames the game sends.
   - CPU: JIT, multicore, decode cache.
-  - Gráficos: GPU thread, draw threads, filtering.
+  - Gráficos: renderer (Vulkan or software), GPU thread, draw threads, filtering.
   - Audio: on/off and volume.
   - Controles: the key map.
   - Saved in `nexo2.ini` next to the executable (`frontend/settings.*`).

@@ -32,7 +32,8 @@ ServiceObject::Handler NewEvent(const char* name) {
 
 constexpr u32 RESULT_NO_MESSAGES = 0x680;   // AM: no hay mensajes pendientes (modulo 128, desc 3)
 constexpr u8  FOCUS_STATE_IN_FOCUS = 1;     // el programa esta en primer plano
-constexpr u8  OPERATION_MODE_HANDHELD = 0;  // 0 = portatil, 1 = conectada al dock (TV)
+constexpr u8  OPERATION_MODE_HANDHELD = 0;  // portatil
+constexpr u8  OPERATION_MODE_DOCKED = 1;    // conectada al dock (TV)
 } // namespace
 
 AppletOE::AppletOE() : ServiceObject("appletOE") {
@@ -54,9 +55,22 @@ ApplicationProxy::ApplicationProxy() : ServiceObject("IApplicationProxy") {
 CommonStateGetter::CommonStateGetter() : ServiceObject("ICommonStateGetter") {
     RegisterCommand(0, "GetEventHandle", NewEvent("mensajes del applet"));
     RegisterCommand(1, "ReceiveMessage", [](IpcContext& ctx) { ctx.SetResult(RESULT_NO_MESSAGES); });
-    RegisterCommand(5, "GetOperationMode",    Reply<u8>(OPERATION_MODE_HANDHELD));
-    RegisterCommand(6, "GetPerformanceMode",  Reply<u32>(0));
+    // 0 = portatil, 1 = dock (Ajustes -> General -> Modo de la consola)
+    RegisterCommand(5, "GetOperationMode", [](IpcContext& ctx) {
+        ctx.Push<u8>(ctx.GetKernel().IsDocked() ? OPERATION_MODE_DOCKED : OPERATION_MODE_HANDHELD);
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(6, "GetPerformanceMode", [](IpcContext& ctx) {   // 0 normal, 1 boost (dock)
+        ctx.Push<u32>(ctx.GetKernel().IsDocked() ? 1 : 0);
+        ctx.SetResult(Result::Success);
+    });
     RegisterCommand(9, "GetCurrentFocusState", Reply<u8>(FOCUS_STATE_IN_FOCUS));
+    RegisterCommand(60, "GetDefaultDisplayResolution", [](IpcContext& ctx) {
+        ctx.Push<s32>(s32(ctx.GetKernel().DisplayWidth()));
+        ctx.Push<s32>(s32(ctx.GetKernel().DisplayHeight()));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(61, "GetDefaultDisplayResolutionChangeEvent", NewEvent("cambio de resolucion"));
     RegisterStub(66, "SetCpuBoostMode");   // modo turbo de la CPU (cargas): nada que cambiar aqui
 }
 

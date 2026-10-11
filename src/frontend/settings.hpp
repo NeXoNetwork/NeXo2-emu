@@ -12,6 +12,7 @@ struct Settings {
     bool dev_mode = false;                // ventanas de depuracion (CPU, hilos, memoria...)
     bool grid_view = false;               // biblioteca en cuadricula (si no, lista)
     int  icon_size = 1;                   // 0 pequeno, 1 normal, 2 grande
+    int  docked = 0;                      // modo de la consola: 0 portatil, 1 dock (TV)
     // CPU
     bool jit = true;
     bool multicore = true;

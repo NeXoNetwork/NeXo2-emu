@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <map>
+#include <unordered_set>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -96,12 +97,17 @@ private:
         std::shared_ptr<const DecodedLevel> level;
         u64 hash = 0;
         u64 epoch = 0, mm_generation = 0;
+        u64 full_epoch = 0;       // envio del ultimo hash completo
+        u64 quick = 0;            // hash rapido (unos bytes de cada 4 KB)
         bool dirty = false;
         u64 lo = 0, hi = 0;       // direcciones de la GPU que ocupa
     };
     Gpu& m_gpu;
     std::mutex m_mutex;
     std::map<Key, Entry> m_entries;
+    // Paginas de 64 KB donde hay alguna textura: una escritura que no toca ninguna se descarta
+    // sin recorrer las entradas (los constbufs se escriben miles de veces por frame)
+    std::unordered_set<u64> m_pages;
     std::atomic<u64> m_epoch{1};
     std::atomic<size_t> m_count{0};
     std::atomic<u64> m_decodes{0};
@@ -146,6 +152,19 @@ private:
     std::map<u32, SamplerInfo> m_samplers;
     TextureCache* m_cache = nullptr;
 };
+
+// Un nivel tal cual esta en memoria (sin convertir los texeles): bloques (texeles, o bloques
+// de 4x4 en los formatos comprimidos) en filas seguidas, capa a capa. Lo usa el dibujo con
+// Vulkan para subir texturas en su formato original (4 veces menos que decodificadas a floats).
+struct RawTextureLevel {
+    u32 width = 0, height = 0, depth = 0;   // en texeles; depth = capas o profundidad
+    std::vector<u8> bytes;
+    u64 hash = 0;                           // de los bytes leidos de memoria
+    u64 lo = 0, hi = 0;                     // direcciones de la GPU que ocupa
+};
+bool ReadTextureLevelRaw(Gpu& gpu, const TextureInfo& t, u32 level, RawTextureLevel& out);
+// Hash rapido de un nivel (32 bytes de cada 4 KB): para ver si la CPU lo ha cambiado
+u64 TextureLevelQuickHash(Gpu& gpu, const TextureInfo& t, u32 level);
 
 // Decodifica un nivel de una textura leyendo la memoria de la GPU (sin cache)
 std::shared_ptr<DecodedLevel> DecodeTextureLevel(Gpu& gpu, const TextureInfo& t, u32 level);

@@ -669,6 +669,33 @@ void VulkanRasterizer::Flush(bool depth) {
     Submit();
 }
 
+bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba) {
+    if (format != 1) return false;   // RGBA8888 (lo normal); el resto, por memoria
+    Image* img = nullptr;
+    for (auto& im : m_images)
+        if (!im->depth && im->surf.address == va && im->surf.width == width && im->surf.height == height &&
+            im->format == VK_FORMAT_R8G8B8A8_UNORM)
+            img = im.get();
+    if (!img || img->mem_dirty) return false;   // la memoria es mas nueva: presentar desde ella
+    Timer t(m_stats.ns_present);
+    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
+    if (!m_readback.buffer || m_readback.size < bytes) {
+        Submit();
+        EnsureBuffer(m_readback, AlignUp(bytes, 1 << 20), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    }
+    TransferBarrier();
+    VkBufferImageCopy r{};
+    r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.imageExtent = {width, height, 1};
+    vkCmdCopyImageToBuffer(Cmd(), img->image, VK_IMAGE_LAYOUT_GENERAL, m_readback.buffer, 1, &r);
+    FullBarrier(Cmd());
+    Submit();
+    rgba.resize(size_t(width) * height);
+    std::memcpy(rgba.data(), m_readback.mapped, size_t(bytes));
+    ++m_stats.presents;
+    return true;
+}
+
 void VulkanRasterizer::FlushRegion(u64 va, u64 size) {
     if (m_dirtyCount == 0) return;
     std::vector<Image*> hit;
@@ -683,6 +710,15 @@ void VulkanRasterizer::BeforeAccess(u64 va, u64 size, bool) {
 }
 
 void VulkanRasterizer::OnGpuWrite(u64 va, u64 size) {
+    // Texturas subidas tal cual: las que tocan esa memoria se vuelven a leer
+    if (size && !m_texPages.empty()) {
+        bool any = false;
+        for (u64 p = va >> 16; p <= (va + size - 1) >> 16 && !any; ++p) any = m_texPages.count(p) != 0;
+        if (any)
+            for (auto& [k, t] : m_textures)
+                if (t && t->native && va < t->hi && va + size > t->lo)
+                    for (auto& l : t->lv) l.dirty = true;
+    }
     if (m_busy) return;   // lo estamos escribiendo nosotros
     for (auto& im : m_images)
         if (va < im->hi && va + size > im->lo) {
@@ -703,6 +739,8 @@ void VulkanRasterizer::Reset() {
         if (t->memory) vkFreeMemory(m_vk, t->memory, nullptr);
     }
     m_textures.clear();
+    m_texPages.clear();
+    m_vsPrograms.clear();
 }
 
 // ============================================================================
@@ -804,21 +842,33 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
         return true;
     }
 
-    // Niveles decodificados (cache de la CPU: solo decodifica si la memoria ha cambiado)
+    // Formato nativo (RGBA8, BC1-5...): se sube tal cual esta en memoria (solo se quita el block
+    // linear). Si no, la cache de la CPU decodifica a 4 floats por texel.
     const u32 nlevels = std::min<u32>(info.max_level - info.min_level + 1, 16);
+    VkFormat nfmt = VK_FORMAT_UNDEFINED;
+    bool alpha_one = false;
+    const bool native = NativeTextureFormat(info, nfmt, alpha_one);
     std::vector<std::shared_ptr<const DecodedLevel>> levels;
-    for (u32 i = 0; i < nlevels; ++i) levels.push_back(m_gpu.Textures().Get(tic, info, info.min_level + i));
-    const DecodedLevel& base = *levels[0];
+    u32 bw, bh, bd;
+    if (native) {
+        bw = std::max(info.width >> info.min_level, 1u);
+        bh = std::max(info.height >> info.min_level, 1u);
+        bd = info.type == 2 ? std::max(info.depth >> info.min_level, 1u) : info.depth;
+    } else {
+        for (u32 i = 0; i < nlevels; ++i) levels.push_back(m_gpu.Textures().Get(tic, info, info.min_level + i));
+        bw = levels[0]->width; bh = levels[0]->height; bd = levels[0]->depth;
+    }
+    const VkFormat fmt = native ? nfmt : m_texFormat;
     const bool is3d = want.dim == 2;
-    const u32 layers = is3d ? 1 : base.depth;
+    const u32 layers = is3d ? 1 : bd;
     if (want.dim == 3 && layers % 6 != 0) return Fallback("cubo sin 6 caras");
 
     std::vector<u32> key(tic.begin(), tic.end());
     key.push_back(want.dim);
     key.push_back(want.array);
+    key.push_back(native);
     auto& slot = m_textures[key];
-    if (slot && (slot->width != base.width || slot->height != base.height || slot->depth != base.depth ||
-                 slot->levels != nlevels)) {
+    if (slot && (slot->width != bw || slot->height != bh || slot->depth != bd || slot->levels != nlevels)) {
         Submit();   // puede estar en uso
         vkDestroyImageView(m_vk, slot->view, nullptr);
         vkDestroyImage(m_vk, slot->image, nullptr);
@@ -830,14 +880,15 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
         tex->tic = tic;
         tex->dim = want.dim;
         tex->array = want.array;
-        tex->width = base.width;
-        tex->height = base.height;
-        tex->depth = base.depth;
+        tex->width = bw;
+        tex->height = bh;
+        tex->depth = bd;
         tex->levels = nlevels;
+        tex->native = native;
         VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ici.imageType = want.dim == 0 ? VK_IMAGE_TYPE_1D : is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-        ici.format = m_texFormat;
-        ici.extent = {base.width, want.dim == 0 ? 1 : base.height, is3d ? base.depth : 1};
+        ici.format = fmt;
+        ici.extent = {bw, want.dim == 0 ? 1 : bh, is3d ? bd : 1};
         ici.mipLevels = nlevels;
         ici.arrayLayers = layers;
         ici.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -865,9 +916,13 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
             case 3: vci.viewType = VK_IMAGE_VIEW_TYPE_CUBE; break;
             default: vci.viewType = want.array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D; break;
         }
-        vci.format = m_texFormat;
-        vci.components = {SwizzleVk(info.swizzle[0]), SwizzleVk(info.swizzle[1]), SwizzleVk(info.swizzle[2]),
-                          SwizzleVk(info.swizzle[3])};
+        vci.format = fmt;
+        VkComponentSwizzle comp[4];
+        for (int c = 0; c < 4; ++c) {
+            comp[c] = SwizzleVk(info.swizzle[c]);
+            if (alpha_one && comp[c] == VK_COMPONENT_SWIZZLE_A) comp[c] = VK_COMPONENT_SWIZZLE_ONE;   // sin alfa en memoria
+        }
+        vci.components = {comp[0], comp[1], comp[2], comp[3]};
         const u32 view_layers = want.dim == 3 ? 6 : want.array ? layers : 1;
         vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, nlevels, 0, view_layers};
         vkCreateImageView(m_vk, &vci, nullptr, &tex->view);
@@ -882,30 +937,65 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
         vkCmdPipelineBarrier(Cmd(), VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
                              0, nullptr, 1, &ib);
         tex->uploaded.assign(nlevels, nullptr);
+        tex->lv.assign(nlevels, {});
         slot = std::move(tex);
         ++m_stats.textures;
     }
     // Subir los niveles que han cambiado
     Texture& tex = *slot;
-    for (u32 i = 0; i < nlevels; ++i) {
-        if (tex.uploaded[i] == levels[i]) continue;
-        const DecodedLevel& lv = *levels[i];
-        const size_t texels = lv.texels.size();
-        const bool half = m_texFormat == VK_FORMAT_R16G16B16A16_SFLOAT;
-        const Alloc a = Allocate(texels * (half ? 8 : 16), 16);
-        if (half) {
-            u16* o = reinterpret_cast<u16*>(a.ptr);
-            for (size_t k = 0; k < texels; ++k)
-                for (u32 c = 0; c < 4; ++c) o[k * 4 + c] = ToHalf(F(lv.texels[k][c]));
-        } else {
-            std::memcpy(a.ptr, lv.texels.data(), texels * 16);
-        }
+    auto upload = [&](u32 i, const void* data, size_t size, u32 w, u32 h, u32 d) {
+        const Alloc a = Allocate(size, 16);
+        std::memcpy(a.ptr, data, size);
         TransferBarrier();
         VkBufferImageCopy r{};
         r.bufferOffset = a.offset;
         r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, layers};
-        r.imageExtent = {lv.width, want.dim == 0 ? 1 : lv.height, is3d ? lv.depth : 1};
+        r.imageExtent = {w, want.dim == 0 ? 1 : h, is3d ? d : 1};
         vkCmdCopyBufferToImage(Cmd(), m_upload.buffer, tex.image, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    };
+    for (u32 i = 0; i < nlevels; ++i) {
+        if (native) {
+            // Se reutiliza si nadie lo ha escrito: la GPU avisa (OnGpuWrite); la CPU se mira con un
+            // hash rapido en cada envio y uno completo cada 30
+            auto& st = tex.lv[i];
+            const u32 level = info.min_level + i;
+            bool read = !st.valid || st.dirty;
+            if (!read && st.epoch != m_epoch) {
+                if (m_epoch - st.full_epoch >= 30) read = true;
+                else if (TextureLevelQuickHash(m_gpu, info, level) != st.quick) read = true;
+                else st.epoch = m_epoch;
+            }
+            if (!read) continue;
+            RawTextureLevel raw;
+            if (!ReadTextureLevelRaw(m_gpu, info, level, raw)) return Fallback("no se pudo leer la textura");
+            if (!st.valid || raw.hash != st.hash) {
+                upload(i, raw.bytes.data(), raw.bytes.size(), raw.width, raw.height, raw.depth);
+                ++m_stats.tex_uploads;
+            }
+            st.valid = true;
+            st.dirty = false;
+            st.hash = raw.hash;
+            st.quick = TextureLevelQuickHash(m_gpu, info, level);
+            st.epoch = st.full_epoch = m_epoch;
+            if (raw.hi > raw.lo) {
+                tex.lo = std::min(tex.lo, raw.lo);
+                tex.hi = std::max(tex.hi, raw.hi);
+                for (u64 p = raw.lo >> 16; p <= (raw.hi - 1) >> 16; ++p) m_texPages.insert(p);
+            }
+            continue;
+        }
+        if (tex.uploaded[i] == levels[i]) continue;
+        const DecodedLevel& lv = *levels[i];
+        const size_t texels = lv.texels.size();
+        if (m_texFormat == VK_FORMAT_R16G16B16A16_SFLOAT) {
+            std::vector<u16> half(texels * 4);
+            for (size_t k = 0; k < texels; ++k)
+                for (u32 c = 0; c < 4; ++c) half[k * 4 + c] = ToHalf(F(lv.texels[k][c]));
+            upload(i, half.data(), half.size() * 2, lv.width, lv.height, lv.depth);
+        } else {
+            upload(i, lv.texels.data(), texels * 16, lv.width, lv.height, lv.depth);
+        }
+        ++m_stats.tex_uploads;
         tex.uploaded[i] = levels[i];
     }
     out.view = tex.view;
@@ -913,9 +1003,36 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
     static const bool no_mips = std::getenv("NEXO2_VK_NOMIPS") != nullptr;
     out.sampler = GetSampler(smp, info.lod_bias, no_mips || smp.mip_filter <= 1);
     const bool norm = info.normalized && !smp.force_unnormalized;
-    out.scale[0] = norm ? 1.0f : 1.0f / float(base.width);
-    out.scale[1] = norm ? 1.0f : 1.0f / float(base.height);
+    out.scale[0] = norm ? 1.0f : 1.0f / float(bw);
+    out.scale[1] = norm ? 1.0f : 1.0f / float(bh);
     return true;
+}
+
+bool VulkanRasterizer::NativeTextureFormat(const TextureInfo& info, VkFormat& fmt, bool& alpha_one) {
+    if (std::getenv("NEXO2_VK_DECODE_TEXTURES")) return false;   // (para comparar)
+    alpha_one = info.format == 0x07;   // X8B8G8R8: el byte de alfa no cuenta
+    const bool snorm = info.types[0] == 1;
+    switch (info.format) {
+        case 0x24: fmt = info.srgb ? VK_FORMAT_BC1_RGBA_SRGB_BLOCK : VK_FORMAT_BC1_RGBA_UNORM_BLOCK; break;
+        case 0x25: fmt = info.srgb ? VK_FORMAT_BC2_SRGB_BLOCK : VK_FORMAT_BC2_UNORM_BLOCK; break;
+        case 0x26: fmt = info.srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK; break;
+        case 0x27: fmt = snorm ? VK_FORMAT_BC4_SNORM_BLOCK : VK_FORMAT_BC4_UNORM_BLOCK; break;
+        case 0x28: fmt = snorm ? VK_FORMAT_BC5_SNORM_BLOCK : VK_FORMAT_BC5_UNORM_BLOCK; break;
+        default: fmt = TicVkFormat(info); break;
+    }
+    if (fmt == VK_FORMAT_UNDEFINED) return false;
+    if (info.format >= 0x24 && info.format <= 0x28 && !m_dev.Features().textureCompressionBC) return false;
+    for (u32 c = 1; c < 4; ++c)
+        if (info.types[c] != info.types[0]) return false;   // tipos distintos por componente: la CPU
+    auto it = m_formatOk.find(fmt);
+    if (it == m_formatOk.end()) {
+        VkFormatProperties fp;
+        vkGetPhysicalDeviceFormatProperties(m_dev.Physical(), fmt, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        it = m_formatOk.emplace(fmt, (fp.optimalTilingFeatures & need) == need).first;
+    }
+    return it->second;
 }
 
 // ============================================================================
@@ -1203,7 +1320,13 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     {
         Timer t(m_stats.ns_vertex);
         TextureSampler vs_tex(m_gpu, tic_pool, regs[TIC_MAX], tsc_pool, regs[TSC_MAX], &m_gpu.Textures());
-        SoftwareRasterizer::RunVertexStage(m_gpu, regs, cbs, dc, &vs_tex, tex_cb, vstage);
+        const u64 vs_addr = region + regs[PIPELINE + 0x10 * 1 + 1];
+        auto& prog = m_vsPrograms[vs_addr];
+        if (!prog || !prog->StillValid()) {
+            auto& mmr = m_gpu.MemoryManager();
+            prog = std::make_unique<ShaderProgram>(vs_addr, [&mmr](u64 a, void* d, size_t n) { mmr.ReadBlock(a, d, n); });
+        }
+        SoftwareRasterizer::RunVertexStage(m_gpu, regs, cbs, dc, &vs_tex, tex_cb, vstage, prog.get());
     }
     if (vstage.failed) {
         m_gpu.Warn("vs:" + vstage.error, vstage.error);

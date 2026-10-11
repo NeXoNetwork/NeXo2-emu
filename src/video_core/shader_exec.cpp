@@ -1,6 +1,7 @@
 // Interprete de shaders Maxwell: ejecuta un hilo (un vertice o un pixel).
 // Ver shader.hpp y docs/07-nexo-internals/gpu-shaders.md.
 #include "shader.hpp"
+#include "gpu.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -125,21 +126,83 @@ u32 ReverseBits(u32 v) {
 }
 
 
+// Bytes de un acceso a memoria: u8, s8, u16, s16, b32, b64, b128 (y 7 = b128)
+u32 MemBytes(u32 size) { return size <= 1 ? 1 : size <= 3 ? 2 : size == 4 ? 4 : size == 5 ? 8 : 16; }
+
+// Escribe en Rd.. lo leido de memoria (con extension de signo en s8/s16)
+template <typename WFn>
+void WriteLoaded(WFn& W, u32 rd, u32 size, const u32* data) {
+    u32 v = data[0];
+    switch (size) {
+        case 0: W(rd, v & 0xFF); return;
+        case 1: W(rd, u32(s32(s8(u8(v))))); return;
+        case 2: W(rd, v & 0xFFFF); return;
+        case 3: W(rd, u32(s32(s16(u16(v))))); return;
+        default: break;
+    }
+    const u32 n = MemBytes(size) / 4;
+    for (u32 i = 0; i < n; ++i) if (rd + i < 255) W(rd + i, data[i]);
+}
+
+void GlobalRead(ShaderEnv& env, u64 addr, void* dst, u32 bytes) {
+    if (env.global) env.global->ReadBlock(addr, dst, bytes);
+    else std::memset(dst, 0, bytes);
+}
+void GlobalWrite(ShaderEnv& env, u64 addr, const void* src, u32 bytes) {
+    if (!env.global) return;
+    env.global->WriteBlock(addr, src, bytes);
+    env.written_lo = std::min(env.written_lo, addr);
+    env.written_hi = std::max(env.written_hi, addr + bytes);
+}
+
+// Operacion atomica: op 0 add, 1 min, 2 max, 3 inc, 4 dec, 5 and, 6 or, 7 xor, 8 exch,
+// 10 safeadd, 0xFF cas. Tipo 0 u32, 1 s32, 2 u64, 3 f32, 5 s64. Devuelve el valor nuevo.
+u64 AtomicOp(u32 op, u32 type, u64 cur, u64 val, u64 cmp, bool& ok) {
+    const bool b64 = type == 2 || type == 5;
+    const u64 mask = b64 ? ~0ull : 0xFFFFFFFFull;
+    cur &= mask; val &= mask; cmp &= mask;
+    auto less = [&](u64 a, u64 b) {
+        if (type == 1) return s32(u32(a)) < s32(u32(b));
+        if (type == 5) return s64(a) < s64(b);
+        if (type == 3) return F(u32(a)) < F(u32(b));
+        return a < b;
+    };
+    switch (op) {
+        case 0: case 10:
+            if (type == 3) return U(F(u32(cur)) + F(u32(val)));
+            return (cur + val) & mask;
+        case 1: return less(val, cur) ? val : cur;
+        case 2: return less(cur, val) ? val : cur;
+        case 3: return cur >= val ? 0 : cur + 1;                    // inc (con vuelta en val)
+        case 4: return (cur == 0 || cur > val) ? val : cur - 1;     // dec
+        case 5: return cur & val;
+        case 6: return cur | val;
+        case 7: return cur ^ val;
+        case 8: return val;
+        case 0xFF: return cur == cmp ? val : cur;
+        default: ok = false; return cur;
+    }
+}
+
 } // namespace
 
 float ShaderInterpreter::RegF(u32 i) const { return F(Reg(i)); }
 
-ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv& env) {
+ShaderInterpreter::Result ShaderInterpreter::Exec(ShaderProgram& prog, ShaderEnv& env, bool resume) {
     Result res;
-    std::fill_n(m_r.begin(), m_dirty, 0u);   // un pixel usa pocos registros: no limpiar los 256
-    m_dirty = 0;
-    m_p.fill(false);
-    m_p[7] = true;
-    m_ccZero = m_ccSign = m_ccCarry = m_ccOverflow = false;
     auto& stack = m_stack;      // se reutilizan entre ejecuciones (un pixel = una ejecucion)
     auto& local = m_local;      // memoria local (LDL/STL): crece si hace falta
-    stack.clear();
     u32 pc = 8;                 // el offset 0 es la palabra de planificacion del primer grupo
+    if (resume) {
+        pc = m_pc;              // despues de un BAR.SYNC: todo sigue como estaba
+    } else {
+        std::fill_n(m_r.begin(), m_dirty, 0u);   // un pixel usa pocos registros: no limpiar los 256
+        m_dirty = 0;
+        m_p.fill(false);
+        m_p[7] = true;
+        m_ccZero = m_ccSign = m_ccCarry = m_ccOverflow = false;
+        stack.clear();
+    }
     steps = 0;
 
     auto R = [&](u32 i) -> u32 { return i < 255 ? m_r[i] : 0; };
@@ -646,15 +709,27 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
             case ShOp::Ald: {
                 const u32 count = in.Bits(47, 2) + 1;
                 const u32 addr = in.Bits(20, 10) + R(in.ra);
-                for (u32 i = 0; i < count; ++i) W(in.rd + i, env.ReadAttribute(addr + 4 * i));
+                if (in.rc == 0xFF && !in.Bit(31) && !in.Bit(32)) {
+                    for (u32 i = 0; i < count; ++i) W(in.rd + i, env.ReadAttribute(addr + 4 * i));
+                } else {
+                    for (u32 i = 0; i < count; ++i)
+                        W(in.rd + i, env.ReadAttributeEx(addr + 4 * i, R(in.rc), in.Bit(31), in.Bit(32)));
+                }
                 break;
             }
             case ShOp::Ast: {
                 const u32 count = in.Bits(47, 2) + 1;
                 const u32 addr = in.Bits(20, 10) + R(in.ra);
-                for (u32 i = 0; i < count; ++i) env.WriteAttribute(addr + 4 * i, R(in.rd + i));
+                if (in.rc == 0xFF && !in.Bit(31)) {
+                    for (u32 i = 0; i < count; ++i) env.WriteAttribute(addr + 4 * i, R(in.rd + i));
+                } else {
+                    for (u32 i = 0; i < count; ++i) env.WriteAttributeEx(addr + 4 * i, R(in.rd + i), R(in.rc), in.Bit(31));
+                }
                 break;
             }
+            case ShOp::Isberd:   // indice de vertice -> "direccion" en el buffer de atributos: aqui es el mismo
+                W(in.rd, R(in.ra));
+                break;
             case ShOp::Ipa: {
                 const u32 addr = in.Bits(28, 10) + (in.Bit(38) ? R(in.ra) : 0);
                 const u32 mode = in.Bits(54, 2);
@@ -702,6 +777,118 @@ ShaderInterpreter::Result ShaderInterpreter::Run(ShaderProgram& prog, ShaderEnv&
                         W(in.rd + i, v);
                     }
                 }
+                break;
+            }
+
+            // ================= Memoria global y compartida =================
+            case ShOp::Ldg: case ShOp::Stg: case ShOp::Ld: case ShOp::St: {
+                const bool generic = in.op == ShOp::Ld || in.op == ShOp::St;
+                const bool store = in.op == ShOp::Stg || in.op == ShOp::St;
+                const bool wide = generic ? in.Bit(52) : in.Bit(45);          // .E: direccion de 64 bits
+                const u32 size = generic ? in.Bits(53, 3) : in.Bits(48, 3);
+                const s64 off = generic ? s64(s32(in.Bits(20, 32))) : s64(s32(in.Bits(20, 24) << 8) >> 8);
+                u64 addr = R(in.ra);
+                if (wide) addr |= u64(in.ra < 254 ? R(in.ra + 1) : 0) << 32;
+                addr += u64(off);
+                const u32 bytes = MemBytes(size);
+                if (store) {
+                    u32 data[4] = {};
+                    for (u32 i = 0; i < (bytes + 3) / 4; ++i) data[i] = R(in.rd + i);
+                    GlobalWrite(env, addr, data, bytes);
+                } else {
+                    u32 data[4] = {};
+                    GlobalRead(env, addr, data, bytes);
+                    WriteLoaded(W, in.rd, size, data);
+                }
+                break;
+            }
+            case ShOp::Lds: case ShOp::Sts: {
+                const u32 size = in.Bits(48, 3);
+                const u32 addr = u32(s32(in.Bits(20, 24) << 8) >> 8) + R(in.ra);
+                const u32 bytes = MemBytes(size);
+                const bool ok = env.shared && u64(addr) + bytes <= env.shared_size;
+                if (in.op == ShOp::Sts) {
+                    if (!ok) break;
+                    for (u32 i = 0; i < (bytes + 3) / 4; ++i) {
+                        const u32 v = R(in.rd + i);
+                        std::memcpy(env.shared + addr + 4 * i, &v, std::min(bytes, 4u));
+                    }
+                } else {
+                    u32 data[4] = {};
+                    if (ok) std::memcpy(data, env.shared + addr, bytes);
+                    WriteLoaded(W, in.rd, size, data);
+                }
+                break;
+            }
+            case ShOp::Atom: case ShOp::Red: case ShOp::AtomCas: {
+                const bool red = in.op == ShOp::Red;
+                const bool wide = in.Bit(48);
+                u64 addr = R(in.ra);
+                if (wide) addr |= u64(in.ra < 254 ? R(in.ra + 1) : 0) << 32;
+                addr += u64(s64(s32(in.Bits(28, 20) << 12) >> 12));
+                u32 op, type;   // tipo: 0 u32, 1 s32, 2 u64, 3 f32, 5 s64
+                if (in.op == ShOp::AtomCas) { op = 0xFF; type = in.Bit(49) ? 2 : 0; }
+                else if (red) { op = in.Bits(23, 3); type = in.Bits(20, 3); }
+                else { op = in.Bits(52, 4); type = in.Bits(49, 3); }
+                const u32 src = red ? in.rd : in.Bits(20, 8);
+                const bool b64 = type == 2 || type == 5;
+                u64 cur = 0;
+                GlobalRead(env, addr, &cur, b64 ? 8 : 4);
+                u64 val = R(src), cmp = 0;
+                if (b64) val |= u64(R(src + 1)) << 32;
+                if (in.op == ShOp::AtomCas) {
+                    cmp = val;
+                    val = b64 ? (R(src + 2) | (u64(R(src + 3)) << 32)) : R(src + 1);
+                }
+                bool ok = true;
+                const u64 nv = AtomicOp(op, type, cur, val, cmp, ok);
+                if (!ok) { fail("operacion atomica no soportada", in); return res; }
+                GlobalWrite(env, addr, &nv, b64 ? 8 : 4);
+                if (!red) { W(in.rd, u32(cur)); if (b64) W(in.rd + 1, u32(cur >> 32)); }
+                break;
+            }
+            case ShOp::Atoms: case ShOp::AtomsCas: {
+                const u32 addr = u32(s32(in.Bits(30, 22) << 10) >> 8) + R(in.ra);   // inmediato en palabras
+                u32 op, type;
+                if (in.op == ShOp::AtomsCas) { op = 0xFF; type = in.Bit(52) ? 2 : 0; }
+                else { op = in.Bits(52, 4); const u32 t = in.Bits(28, 2); type = t == 0 ? 0 : t == 1 ? 1 : t == 2 ? 2 : 5; }
+                const bool b64 = type == 2 || type == 5;
+                const u32 bytes = b64 ? 8 : 4;
+                const u32 src = in.Bits(20, 8);
+                u64 cur = 0;
+                const bool inside = env.shared && u64(addr) + bytes <= env.shared_size;
+                if (inside) std::memcpy(&cur, env.shared + addr, bytes);
+                u64 val = R(src), cmp = 0;
+                if (b64) val |= u64(R(src + 1)) << 32;
+                if (in.op == ShOp::AtomsCas) {
+                    cmp = val;
+                    val = b64 ? (R(src + 2) | (u64(R(src + 3)) << 32)) : R(src + 1);
+                }
+                bool ok = true;
+                const u64 nv = AtomicOp(op, type, cur, val, cmp, ok);
+                if (!ok) { fail("operacion atomica no soportada", in); return res; }
+                if (inside) std::memcpy(env.shared + addr, &nv, bytes);
+                W(in.rd, u32(cur));
+                if (b64) W(in.rd + 1, u32(cur >> 32));
+                break;
+            }
+            case ShOp::Bar: {
+                const u32 mode = in.Bits(32, 8) & 0x9B;
+                if (mode == 0x81) break;                       // ARRIVE: no espera
+                if (mode != 0x80) { fail("variante de BAR no soportada", in); return res; }
+                if (group_mode) {                              // SYNC: esperar al resto del grupo
+                    m_pc = npc;
+                    res.barrier = true;
+                    return res;
+                }
+                break;
+            }
+            case ShOp::Vote: {
+                // Un "warp" de un solo hilo: ALL y ANY = el predicado, EQ = cierto
+                const bool p = P(in.Bits(39, 3)) != in.Bit(42);
+                const u32 mode = in.Bits(48, 2);
+                W(in.rd, p ? (1u << (env.SystemRegister(0) & 31)) : 0u);
+                WP(in.Bits(45, 3), mode == 2 ? true : p);
                 break;
             }
 

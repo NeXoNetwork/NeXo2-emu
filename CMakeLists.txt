@@ -59,6 +59,8 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/system.cpp"
     "${SRC_DIR}/video_core/gpu.cpp"
     "${SRC_DIR}/video_core/engines.cpp"
+    "${SRC_DIR}/video_core/compute.cpp"
+    "${SRC_DIR}/video_core/tessellation.cpp"
     "${SRC_DIR}/video_core/surface.cpp"
     "${SRC_DIR}/video_core/shader_decode.cpp"
     "${SRC_DIR}/video_core/shader_exec.cpp"
@@ -243,6 +245,7 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/gpu_draw_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_texture_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_spirv_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/gpu_compute_tess_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/vulkan_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")

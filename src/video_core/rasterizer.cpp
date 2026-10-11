@@ -1,5 +1,6 @@
 // Dibujo por software (ver rasterizer.hpp y docs/07-nexo-internals/gpu-rasterizer.md).
 #include "rasterizer.hpp"
+#include "tessellation.hpp"
 #include "texture.hpp"
 #include "common/logger.hpp"
 #include <algorithm>
@@ -245,6 +246,7 @@ struct SoftwareRasterizer::DrawState {
     bool mrt = true;
     // Profundidad
     bool depth_enabled = false, depth_test = false, depth_write = false;
+    bool no_cull = false;       // puntos y lineas
     Surface zsurf;
     u32 zformat = 0, depth_func = 0;
     // Recorte
@@ -408,6 +410,135 @@ private:
 };
 } // namespace
 
+// Puntos y lineas: la GPU los dibuja como rectangulos. Aqui se hacen con dos triangulos
+// en espacio de recorte, con el ancho (en pixeles) pasado a coordenadas de la pantalla.
+class WidePrimitives {
+public:
+    using Vertex = SoftwareRasterizer::Vertex;
+    WidePrimitives(const u32* regs, SoftwareRasterizer::VertexStage& out) : m_out(out) {
+        const bool xform = regs[VIEWPORT_XFORM_ENABLE] & 1;
+        m_sx = xform ? std::fabs(F(regs[VIEWPORT_XFORM])) : 1.0f;
+        m_sy = xform ? std::fabs(F(regs[VIEWPORT_XFORM + 1])) : 1.0f;
+        if (!(m_sx > 0)) m_sx = 1.0f;
+        if (!(m_sy > 0)) m_sy = 1.0f;
+        m_lineWidth = F(regs[LINE_WIDTH_ALIASED]);
+        if (!(m_lineWidth > 0)) m_lineWidth = 1.0f;
+        m_pointSize = F(regs[POINT_SIZE]);
+        if (!(m_pointSize > 0)) m_pointSize = 1.0f;
+        m_shaderPointSize = regs[PROGRAM_POINT_SIZE] & 1;
+    }
+
+    void Line(s64 a, s64 b, s64 prov) {
+        if (a < 0 || b < 0) return;
+        Vertex A = m_out.verts[size_t(a)], B = m_out.verts[size_t(b)];
+        // Recortar contra w > 0 (lo que queda detras de la camara)
+        constexpr float EPS = 1e-6f;
+        const float aw = A.Pos(3), bw = B.Pos(3);
+        if (aw < EPS && bw < EPS) return;
+        if (aw < EPS) A = Lerp(A, B, (EPS - aw) / (bw - aw));
+        if (bw < EPS) B = Lerp(B, A, (EPS - bw) / (aw - bw));
+        const float ax = A.Pos(0) / A.Pos(3), ay = A.Pos(1) / A.Pos(3);
+        const float bx = B.Pos(0) / B.Pos(3), by = B.Pos(1) / B.Pos(3);
+        float dx = (bx - ax) * m_sx, dy = (by - ay) * m_sy;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len > 0) { dx /= len; dy /= len; } else { dx = 1; dy = 0; }
+        // Perpendicular en pixeles -> en coordenadas normalizadas
+        const float ox = -dy * m_lineWidth * 0.5f / m_sx, oy = dx * m_lineWidth * 0.5f / m_sy;
+        const u32 base = u32(m_out.verts.size());
+        const bool prov_a = prov == a;
+        Push(A, ox, oy); Push(A, -ox, -oy); Push(B, -ox, -oy); Push(B, ox, oy);
+        const u32 pv = prov_a ? base : base + 2;
+        m_out.tris.push_back({base, base + 1, base + 2, pv});
+        m_out.tris.push_back({base, base + 2, base + 3, pv});
+        m_out.no_cull = true;
+    }
+
+    void Point(s64 a) {
+        if (a < 0) return;
+        const Vertex P = m_out.verts[size_t(a)];   // copia: push_back puede mover 'verts'
+        if (!(P.Pos(3) > 0)) return;
+        float size = m_shaderPointSize ? F(P.attr[0x6C / 4]) : m_pointSize;
+        if (!(size > 0)) size = 1.0f;
+        const float hx = size * 0.5f / m_sx, hy = size * 0.5f / m_sy;
+        const u32 base = u32(m_out.verts.size());
+        // Esquinas con gl_PointCoord (a[0x2E0], a[0x2E4]) de 0 a 1
+        const float corners[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        for (const auto& c : corners) {
+            Vertex v = P;
+            v.attr[0x70 / 4] = U(P.Pos(0) + c[0] * hx * P.Pos(3));
+            v.attr[0x74 / 4] = U(P.Pos(1) + c[1] * hy * P.Pos(3));
+            v.attr[0x2E0 / 4] = U((c[0] + 1) * 0.5f);
+            v.attr[0x2E4 / 4] = U((1 - c[1]) * 0.5f);
+            m_out.verts.push_back(v);
+        }
+        m_out.tris.push_back({base, base + 1, base + 2, base});
+        m_out.tris.push_back({base, base + 2, base + 3, base});
+        m_out.no_cull = true;
+    }
+
+private:
+    static constexpr u32 LINE_WIDTH_ALIASED = 0x4ED, POINT_SIZE = 0x546, PROGRAM_POINT_SIZE = 0x644;
+    void Push(const Vertex& v, float ox, float oy) {
+        Vertex c = v;
+        c.attr[0x70 / 4] = U(v.Pos(0) + ox * v.Pos(3));
+        c.attr[0x74 / 4] = U(v.Pos(1) + oy * v.Pos(3));
+        m_out.verts.push_back(c);
+    }
+    static Vertex Lerp(const Vertex& a, const Vertex& b, float t) {
+        Vertex r = a;
+        for (size_t i = 0; i < r.attr.size(); ++i) r.attr[i] = U(F(a.attr[i]) + (F(b.attr[i]) - F(a.attr[i])) * t);
+        return r;
+    }
+    SoftwareRasterizer::VertexStage& m_out;
+    float m_sx = 1, m_sy = 1, m_lineWidth = 1, m_pointSize = 1;
+    bool m_shaderPointSize = false;
+};
+
+// Modo de poligono (0x36B delante, 0x36C detras): 0x1B00 puntos, 0x1B01 lineas, 0x1B02 relleno.
+// En modo lineas o puntos, cada triangulo se cambia por sus lados o sus vertices (despues de
+// descartar las caras que pida el culling, como en la GPU).
+void ApplyPolygonMode(const u32* regs, SoftwareRasterizer::VertexStage& out, WidePrimitives& wide) {
+    constexpr u32 POLY_FRONT = 0x36B, POLY_BACK = 0x36C, FILL = 0x1B02;
+    const u32 front_mode = regs[POLY_FRONT], back_mode = regs[POLY_BACK];
+    const bool front_fill = front_mode == FILL || front_mode == 0, back_fill = back_mode == FILL || back_mode == 0;
+    if ((front_fill && back_fill) || out.no_cull) return;
+    const bool xform = regs[VIEWPORT_XFORM_ENABLE] & 1;
+    const float sx = xform ? F(regs[VIEWPORT_XFORM]) : 1.0f, sy = xform ? F(regs[VIEWPORT_XFORM + 1]) : 1.0f;
+    const bool flip_y = (regs[WINDOW_ORIGIN] >> 4) & 1;
+    const bool cull_on = regs[CULL_ENABLE] & 1;
+    const u32 cull = regs[CULL_FACE];
+    std::vector<std::array<u32, 4>> tris;
+    tris.swap(out.tris);
+    for (const auto& t : tris) {
+        // Cara delantera o trasera, como en ProcessTriangle (sin recortar: w > 0)
+        float x[3], y[3];
+        bool behind = false;
+        for (int i = 0; i < 3; ++i) {
+            const auto& v = out.verts[t[i]];
+            const float w = v.Pos(3);
+            if (!(w > 0)) { behind = true; break; }
+            x[i] = sx * v.Pos(0) / w;
+            y[i] = sy * v.Pos(1) / w;
+        }
+        bool front = true;
+        if (!behind) {
+            const float area = (x[0] * y[1] - x[1] * y[0]) + (x[1] * y[2] - x[2] * y[1]) + (x[2] * y[0] - x[0] * y[2]);
+            const bool ccw = flip_y ? area > 0 : area < 0;
+            front = ccw == (regs[FRONT_FACE] == 0x901);
+            if (cull_on && (cull == 0x408 || (cull == 0x404 && front) || (cull == 0x405 && !front))) continue;
+        }
+        const u32 mode = front ? front_mode : back_mode;
+        if (mode == 0x1B01) {
+            for (int e = 0; e < 3; ++e) wide.Line(t[e], t[(e + 1) % 3], t[3]);
+        } else if (mode == 0x1B00) {
+            for (int e = 0; e < 3; ++e) wide.Point(t[e]);
+        } else {
+            out.tris.push_back(t);
+        }
+    }
+    if (front_mode != FILL || back_mode != FILL) out.no_cull = true;   // ya se descarto arriba
+}
+
 bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, const DrawCall& dc,
                                         TextureSampler* tex, u32 tex_cb, VertexStage& out, ShaderProgram* program) {
     GpuMemoryManager& mm = gpu.MemoryManager();
@@ -496,6 +627,14 @@ bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const Constbu
         if (a < 0 || b < 0 || c < 0) return;
         out.tris.push_back({u32(a), u32(b), u32(c), u32(prov)});
     };
+    WidePrimitives wide(regs, out);
+    if (dc.topology == 14) {   // parches: teselado (tessellation.cpp)
+        std::vector<std::array<u32, 2>> lines;
+        if (!RunTessellation(gpu, regs, cbs, tex, tex_cb, slots, out, lines)) return false;
+        for (const auto& l : lines) wide.Line(l[0], l[1], last ? l[1] : l[0]);
+        ApplyPolygonMode(regs, out, wide);
+        return !out.tris.empty();
+    }
     // Recorre la lista en trozos separados por los reinicios de primitiva
     size_t start = 0;
     while (start < slots.size()) {
@@ -528,15 +667,41 @@ bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const Constbu
                     tri(s[i], s[i + 3], s[i + 2], last ? s[i + 3] : s[i]);
                 }
                 break;
+            case 0:   // puntos
+                for (size_t i = 0; i < n; ++i) wide.Point(s[i]);
+                break;
+            case 1:   // lineas
+                for (size_t i = 0; i + 1 < n; i += 2) wide.Line(s[i], s[i + 1], last ? s[i + 1] : s[i]);
+                break;
+            case 2: case 3:   // bucle y tira de lineas
+                for (size_t i = 0; i + 1 < n; ++i) wide.Line(s[i], s[i + 1], last ? s[i + 1] : s[i]);
+                if (dc.topology == 2 && n > 2) wide.Line(s[n - 1], s[0], last ? s[0] : s[n - 1]);
+                break;
+            case 10:   // lineas con adyacencia: (0) 1-2 (3)
+                for (size_t i = 0; i + 3 < n; i += 4) wide.Line(s[i + 1], s[i + 2], last ? s[i + 2] : s[i + 1]);
+                break;
+            case 11:   // tira de lineas con adyacencia
+                for (size_t i = 1; i + 2 < n; ++i) wide.Line(s[i], s[i + 1], last ? s[i + 1] : s[i]);
+                break;
+            case 12:   // triangulos con adyacencia: vertices 0, 2, 4 de cada 6
+                for (size_t i = 0; i + 5 < n; i += 6) tri(s[i], s[i + 2], s[i + 4], last ? s[i + 4] : s[i]);
+                break;
+            case 13:   // tira de triangulos con adyacencia: 0 2 4, luego 2 6 4, 4 6 8...
+                for (size_t i = 0; i + 5 < n; i += 2) {
+                    if ((i / 2) & 1) tri(s[i + 2], s[i], s[i + 4], last ? s[i + 4] : s[i]);
+                    else tri(s[i], s[i + 2], s[i + 4], last ? s[i + 4] : s[i]);
+                }
+                break;
             default: {
                 char buf[64];
-                std::snprintf(buf, sizeof(buf), "dibujo: primitiva %u no soportada (puntos/lineas)", dc.topology);
+                std::snprintf(buf, sizeof(buf), "dibujo: primitiva %u no soportada", dc.topology);
                 gpu.Warn("topo" + std::to_string(dc.topology), buf);
                 return false;
             }
         }
         start = end + 1;
     }
+    ApplyPolygonMode(regs, out, wide);
     return !out.tris.empty();
 }
 
@@ -682,9 +847,9 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
     // --- Programas: vertices (etapa 1, "VertexB") y pixeles (etapa 5) ---
     const u64 region = Iova(regs[PROGRAM_REGION], regs[PROGRAM_REGION + 1]);
     auto stage_enabled = [&](u32 s) { return regs[PIPELINE + 0x10 * s] & 1; };
-    for (u32 s : {0u, 2u, 3u, 4u})
+    for (u32 s : {0u, 4u})   // (el teselado, etapas 2 y 3, lo hace RunVertexStage)
         if (stage_enabled(s)) {
-            m_gpu.Warn("stage" + std::to_string(s), "dibujo con teselado/geometria/VertexA: no soportado todavia");
+            m_gpu.Warn("stage" + std::to_string(s), "dibujo con geometria/VertexA: no soportado todavia");
             ++stats.draws_skipped;
             return;
         }
@@ -820,6 +985,7 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
         ++stats.shader_errors;
         return;
     }
+    st.no_cull = vstage.no_cull;
     for (const auto& t : vstage.tris)
         ProcessTriangle(st, vstage.verts[t[0]], vstage.verts[t[1]], vstage.verts[t[2]], vstage.verts[t[3]]);
     if (!st.failed && !st.tris.empty()) {
@@ -918,7 +1084,7 @@ void SoftwareRasterizer::ProcessTriangle(DrawState& st, const Vertex& a, const V
     if (area == 0) return;
     const bool ccw = st.flip_y ? area > 0 : area < 0;
     const bool front = ccw == (r[FRONT_FACE] == 0x901);
-    if (r[CULL_ENABLE] & 1) {
+    if ((r[CULL_ENABLE] & 1) && !st.no_cull) {
         const u32 cull = r[CULL_FACE];
         if (cull == 0x408 || (cull == 0x404 && front) || (cull == 0x405 && !front)) return;
     }

@@ -38,6 +38,9 @@ enum class ShOp : u8 {
     Shl, Shr, Popc, Bfi, Bfe, Flo,
     // Memoria y atributos
     Ald, Ast, Ipa, Ldc, Ldl, Stl,
+    Ldg, Stg, Ld, St, Lds, Sts, Atom, AtomCas, Atoms, AtomsCas, Red, Isberd,
+    // Grupo de hilos (compute, teselado)
+    Bar, Vote,
     // Texturas
     Tex, Texs, Tlds, Txd, Txq,
     Count
@@ -109,6 +112,8 @@ struct TextureRequest {
 // ----------------------------------------------------------------------------
 // Lo que el shader necesita de fuera (atributos, constantes, texturas)
 // ----------------------------------------------------------------------------
+class GpuMemoryManager;
+
 class ShaderEnv {
 public:
     virtual ~ShaderEnv() = default;
@@ -127,6 +132,13 @@ public:
     // valores del sistema (VertexID...). AST escribe las salidas.
     virtual u32 ReadAttribute(u32 addr) = 0;
     virtual void WriteAttribute(u32 addr, u32 value) = 0;
+    // ALD/AST completos: 'vertex' = registro de la posicion 39 (indice de vertice en
+    // teselado/geometria, ya pasado por ISBERD), 'patch' = atributo del parche (bit 31),
+    // 'output' = leer una salida (bit 32). Por defecto, lo de arriba.
+    virtual u32 ReadAttributeEx(u32 addr, u32 vertex, bool patch, bool output) {
+        (void)vertex; (void)patch; (void)output; return ReadAttribute(addr); }
+    virtual void WriteAttributeEx(u32 addr, u32 value, u32 vertex, bool patch) {
+        (void)vertex; (void)patch; WriteAttribute(addr, value); }
     // IPA (solo pixel): atributo interpolado en el pixel. mode: 0 lineal, 1 perspectiva
     // (el shader luego multiplica por w), 2 constante (flat), 3 "sc"
     virtual float Interpolate(u32 addr, u32 mode) = 0;
@@ -141,6 +153,14 @@ public:
         (void)handle; (void)lod; out[0] = out[1] = out[2] = out[3] = 0; }
     // Indice del constbuf con los handles de texturas (SetBindlessTexture)
     virtual u32 TextureConstbuf() { return 0; }
+
+    // Memoria global (LDG/STG/LD/ST/ATOM/RED, direcciones de la GPU). nullptr = se leen
+    // ceros y las escrituras se ignoran. Lo escrito queda apuntado en [written_lo, written_hi)
+    GpuMemoryManager* global = nullptr;
+    u64 written_lo = ~0ull, written_hi = 0;
+    // Memoria compartida del grupo de hilos (compute): LDS/STS/ATOMS
+    u8* shared = nullptr;
+    u32 shared_size = 0;
 };
 
 // ----------------------------------------------------------------------------
@@ -150,7 +170,8 @@ class ShaderProgram {
 public:
     // 'read' lee 'size' bytes de la memoria de la GPU en 'addr'
     using ReadFn = std::function<void(u64 addr, void* dst, size_t size)>;
-    ShaderProgram(u64 address, ReadFn read);
+    // 'has_header' = false: programa de compute (sin cabecera SPH: el codigo empieza en 'address')
+    ShaderProgram(u64 address, ReadFn read, bool has_header = true);
 
     const ShaderHeader& Header() const { return m_header; }
     u64 Address() const { return m_address; }
@@ -169,6 +190,7 @@ public:
 
 private:
     u64 m_address;
+    u64 m_codeStart = 0x50;              // donde empieza el codigo (0x50 = tras la SPH)
     ReadFn m_read;
     ShaderHeader m_header;
     std::vector<ShaderInstr> m_code;     // indexado por offset / 8
@@ -186,11 +208,17 @@ public:
     struct Result {
         bool ok = true;        // false = instruccion desconocida o bucle infinito
         bool killed = false;   // KIL (pixel descartado)
+        bool barrier = false;  // BAR.SYNC (solo con group_mode): seguir con Resume cuando
+                               // todos los hilos del grupo hayan llegado
         std::string error;
     };
     // Ejecuta desde el principio. Los registros quedan en Reg() para leer las salidas
     // del shader de pixeles (colores en R0.., profundidad...).
-    Result Run(ShaderProgram& program, ShaderEnv& env);
+    Result Run(ShaderProgram& program, ShaderEnv& env) { return Exec(program, env, false); }
+    // Sigue despues de un BAR.SYNC (con los mismos registros, pila y memoria local)
+    Result Resume(ShaderProgram& program, ShaderEnv& env) { return Exec(program, env, true); }
+    // true: BAR.SYNC para el hilo (devuelve barrier); false: no hace nada (un hilo suelto)
+    bool group_mode = false;
 
     u32 Reg(u32 i) const { return i < 255 ? m_r[i] : 0; }
     float RegF(u32 i) const;
@@ -206,6 +234,8 @@ public:
     };
 
 private:
+    Result Exec(ShaderProgram& program, ShaderEnv& env, bool resume);
+    u32 m_pc = 8;
     std::vector<StackEntry> m_stack;
     std::vector<u8> m_local;
     std::array<u32, 256> m_r{};

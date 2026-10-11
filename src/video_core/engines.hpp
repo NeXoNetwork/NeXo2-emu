@@ -6,7 +6,7 @@
 //   clase 0xB197  Maxwell3D        dibujo 3D: render targets, borrados, macros, semaforos
 //   clase 0xB0B5  MaxwellDma       copias de memoria (lineal <-> block linear) y rellenos
 //   clase 0x902D  Fermi2D          copias de imagenes con escalado (blits)
-//   clase 0xB1C0  KeplerCompute    compute (fase 1: solo guarda registros y sube datos)
+//   clase 0xB1C0  KeplerCompute    compute: QMD y programas de compute (compute.hpp)
 //   clase 0xA140  InlineToMemory   subir datos que van dentro del propio pushbuffer
 //
 // Los numeros de los metodos son los de los registros (direccion / 4). Fuente de los
@@ -132,7 +132,7 @@ private:
 };
 
 // ----------------------------------------------------------------------------
-// Compute (fase 1: guarda registros, sube datos; los lanzamientos se ignoran con aviso)
+// Compute: sube datos y lanza QMD (compute.hpp)
 // ----------------------------------------------------------------------------
 class KeplerCompute final : public Engine {
 public:

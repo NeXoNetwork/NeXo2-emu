@@ -17,6 +17,7 @@ How NeXo 2 itself is built (our code, not the console).
 | [gpu-shaders.md](gpu-shaders.md) | Maxwell shader decoder and interpreter, shader environment, random-program tests with uam |
 | [gpu-rasterizer.md](gpu-rasterizer.md) | Draws: vertex fetch, clipping, viewport, culling, rasterization rules, depth, blending |
 | [gpu-vulkan.md](gpu-vulkan.md) | GPU phase 3: Vulkan device (volk, no SDK), plan for the SPIR-V translator and Vulkan draws |
+| [gpu-compute-tessellation.md](gpu-compute-tessellation.md) | Compute dispatches (QMD, workgroups, barriers, shared memory, atomics), tessellation (TCS, tessellator, TES), points, wide lines and polygon mode |
 | [gpu-textures.md](gpu-textures.md) | Textures: TIC/TSC descriptors, formats (incl. BC1-5), block linear and mipmaps, TEX/TEXS/TLDS/TXD/TXQ, filtering |
 | [display.md](display.md) | vi + nvdrv: binder buffer queue, GraphicBuffer layout, block-linear deswizzle, the "Pantalla" window |
 

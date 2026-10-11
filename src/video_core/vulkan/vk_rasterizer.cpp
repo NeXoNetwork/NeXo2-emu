@@ -1234,10 +1234,11 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     auto& mm = m_gpu.MemoryManager();
     auto& stats = m_gpu.GetStats();
     auto stage_enabled = [&](u32 s) { return regs[PIPELINE + 0x10 * s] & 1; };
-    for (u32 s : {0u, 2u, 3u, 4u})
-        if (stage_enabled(s)) return Fallback("teselado, geometria o VertexA");
+    for (u32 s : {0u, 4u})
+        if (stage_enabled(s)) return Fallback("geometria o VertexA");
     if (!stage_enabled(1) || !stage_enabled(5)) return false;
-    if (dc.topology < 4 || dc.topology > 9) return false;   // puntos y lineas: el software avisa
+    if (dc.topology > 14) return false;   // primitiva desconocida: el software avisa
+    // (puntos, lineas y teselado salen como triangulos de RunVertexStage)
     u32 msx, msy;
     MsaaSampleGrid(regs[MULTISAMPLE_MODE], msx, msy);
     if (msx * msy != 1) return Fallback("MSAA");
@@ -1509,7 +1510,7 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
         d.depth_op = CompareOpVk(regs[DEPTH_FUNC]);
         d.depth_write = depth_write;
     }
-    if ((regs[CULL_ENABLE] & 1) && !std::getenv("NEXO2_NOCULL")) {
+    if ((regs[CULL_ENABLE] & 1) && !vstage.no_cull && !std::getenv("NEXO2_NOCULL")) {
         const u32 cull = regs[CULL_FACE];
         d.cull = cull == 0x404 ? VK_CULL_MODE_FRONT_BIT : cull == 0x405 ? VK_CULL_MODE_BACK_BIT
                : cull == 0x408 ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_NONE;

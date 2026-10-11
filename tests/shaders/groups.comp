@@ -1,0 +1,16 @@
+#version 460
+// Compute: memoria compartida + barrier + atomicos + buffer de almacenamiento
+layout (local_size_x = 64) in;
+layout (std430, binding = 0) buffer Out {
+    uint counter;
+    uint pad[3];
+    uint data[];
+} o;
+shared uint s[64];
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    s[i] = i * i + gl_WorkGroupID.x * 1000u;
+    barrier();
+    o.data[gl_GlobalInvocationID.x] = s[63u - i];
+    atomicAdd(o.counter, 1u);
+}

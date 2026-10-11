@@ -69,6 +69,7 @@ public:
         std::vector<Vertex> verts;
         // Triangulos: tres indices de 'verts' y el del vertice "que manda" (flat)
         std::vector<std::array<u32, 4>> tris;
+        bool no_cull = false;    // puntos y lineas (hechos con triangulos): nunca se descartan por la cara
         bool failed = false;     // el shader de vertices fallo (error)
         std::string error;
     };

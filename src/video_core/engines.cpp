@@ -1,4 +1,5 @@
 #include "engines.hpp"
+#include "compute.hpp"
 #ifdef NEXO2_HAS_VULKAN
 #include "vulkan/vk_rasterizer.hpp"
 #endif
@@ -643,9 +644,18 @@ void Fermi2D::Blit() {
 void KeplerCompute::CallMethod(u32 method, u32 arg, bool) {
     if (method < m_regs.size()) m_regs[method] = arg;
     if (m_i2m.CallMethod(m_regs.data(), method, arg)) return;
-    if (method == 0xAF) {   // LAUNCH: necesita shaders
-        m_gpu.Warn("compute", "lanzamiento de compute ignorado: los shaders llegan en la fase 2");
-        ++m_gpu.GetStats().draws_skipped;
+    if (method == 0xAF) {   // SendSignalingPcasB: lanzar la QMD de SendPcasA (direccion >> 8)
+        const u64 qmd_addr = u64(m_regs[0xAD]) << 8;
+        const u64 region = (u64(m_regs[0x582] & 0xFF) << 32) | m_regs[0x583];
+        const ComputeQmd qmd = ReadComputeQmd(m_gpu, qmd_addr, region);
+        std::string error;
+        auto& st = m_gpu.GetStats();
+        ++st.dispatches;
+        st.compute_threads += u64(qmd.grid[0]) * qmd.grid[1] * qmd.grid[2] * qmd.block[0] * qmd.block[1] * qmd.block[2];
+        if (!RunCompute(m_gpu, m_regs.data(), qmd, error)) {
+            ++st.shader_errors;
+            m_gpu.Warn("compute:" + error, "compute: " + error);
+        }
     }
 }
 

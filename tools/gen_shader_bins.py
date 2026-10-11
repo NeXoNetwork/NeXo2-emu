@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compila los shaders de prueba (tests/shaders/*.vert, *.frag) con uam y los guarda en
+Compila los shaders de prueba (tests/shaders/*.vert, *.frag, *.comp, *.tesc, *.tese) con uam y los guarda en
 tests/generated/shader_bins.hpp para los tests de la GPU.
 
     python3 tools/gen_shader_bins.py --uam ruta/a/uam
@@ -35,7 +35,8 @@ def main():
               "#pragma once", ""]
     with tempfile.TemporaryDirectory() as tmp:
         for f in sorted(SRC.iterdir()):
-            stage = {".vert": "vert", ".frag": "frag"}.get(f.suffix)
+            stage = {".vert": "vert", ".frag": "frag", ".comp": "comp",
+                     ".tesc": "tess_ctrl", ".tese": "tess_eval"}.get(f.suffix)
             if not stage:
                 continue
             out = os.path.join(tmp, "s.dksh")

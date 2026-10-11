@@ -54,11 +54,11 @@ written from scratch.
 
 | Group | Instructions |
 | :--- | :--- |
-| Flow | EXIT, BRA, JMP, SSY/SYNC, PBK/BRK, PCNT/CONT, CAL/RET, KIL, NOP (and DEPBAR, BAR, MEMBAR as no-ops) |
+| Flow | EXIT, BRA, JMP, SSY/SYNC, PBK/BRK, PCNT/CONT, CAL/RET, KIL, NOP (DEPBAR and MEMBAR as no-ops). BAR.SYNC stops the thread when `group_mode` is on (compute, tessellation control) and `Resume` continues it; otherwise it does nothing |
 | Move/convert | MOV, MOV32I, S2R, SEL, F2F (incl. f16, rounding to integer), F2I, I2F (byte/half select), I2I |
 | Float | FADD(32I), FMUL(32I) with post-scale and the "0 * x = 0" mode, FFMA(32I) (fused), MUFU (sin, cos, ex2, lg2, rcp, rsq, sqrt), RRO, FMNMX, FSET, FSETP, FCMP |
 | Integer | LOP(32I), IADD(32I) with carry and `.PO`, IMUL(32I), IMAD (incl. high half), ISCADD, XMAD (all modes), IMNMX, ISET, ISETP, ICMP, SHL, SHR, POPC, BFI, BFE, FLO |
-| Memory | ALD/AST (attributes), IPA (interpolation), LDC (indexed constant buffer), LDL/STL (local memory) |
+| Memory | ALD/AST (attributes; with a vertex register and the patch/output bits for tessellation), ISBERD, IPA (interpolation), LDC (indexed constant buffer), LDL/STL (local memory), LDG/STG and LD/ST (global memory, `ShaderEnv::global`), LDS/STS (shared memory), ATOM/ATOM.CAS/RED (global atomics), ATOMS/ATOMS.CAS (shared atomics), VOTE (a one-thread warp) |
 | Textures | TEX, TEXS, TLDS, TXD, TXQ (see [gpu-textures.md](gpu-textures.md)) |
 | Not yet | TLD, TLD4 (`textureGather`), image loads/stores, 64-bit floats, LOP3, PSETP and others that uam does not emit |
 

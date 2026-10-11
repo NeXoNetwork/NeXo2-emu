@@ -48,7 +48,8 @@ const Entry kTable[] = {
     {0xFFF00000u, 0xE3300000u, ShOp::Kil,  ShForm::None, ImmKind::None},
     {0xFFF80000u, 0x50B00000u, ShOp::Nop,  ShForm::None, ImmKind::None},
     {0xFFF80000u, 0xF0F00000u, ShOp::Nop,  ShForm::None, ImmKind::None},   // DEPBAR
-    {0xFFF80000u, 0xF0A80000u, ShOp::Nop,  ShForm::None, ImmKind::None},   // BAR (un hilo: nada)
+    {0xFFF80000u, 0xF0A80000u, ShOp::Bar,  ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0x50D80000u, ShOp::Vote, ShForm::None, ImmKind::None},
     {0xFFF80000u, 0xEF980000u, ShOp::Nop,  ShForm::None, ImmKind::None},   // MEMBAR
 
     // --- Movimientos y conversiones ---
@@ -117,6 +118,16 @@ const Entry kTable[] = {
     {0xFFF80000u, 0xEF900000u, ShOp::Ldc, ShForm::None, ImmKind::None},
     {0xFFF80000u, 0xEF400000u, ShOp::Ldl, ShForm::None, ImmKind::None},
     {0xFFF80000u, 0xEF500000u, ShOp::Stl, ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xEED00000u, ShOp::Ldg, ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xEED80000u, ShOp::Stg, ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xEF480000u, ShOp::Lds, ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xEF580000u, ShOp::Sts, ShForm::None, ImmKind::None},
+    {0xFFF00000u, 0xEEF00000u, ShOp::AtomCas, ShForm::None, ImmKind::None},
+    {0xFF800000u, 0xEE000000u, ShOp::AtomsCas, ShForm::None, ImmKind::None},
+    {0xFF000000u, 0xED000000u, ShOp::Atom, ShForm::None, ImmKind::None},
+    {0xFF000000u, 0xEC000000u, ShOp::Atoms, ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xEBF80000u, ShOp::Red, ShForm::None, ImmKind::None},
+    {0xFFF80000u, 0xEFD00000u, ShOp::Isberd, ShForm::None, ImmKind::None},
 
     // --- Texturas ---
     {0xFE000000u, 0xD8000000u, ShOp::Texs, ShForm::None, ImmKind::None},
@@ -124,6 +135,10 @@ const Entry kTable[] = {
     {0xFE380000u, 0xC0380000u, ShOp::Tex,  ShForm::None, ImmKind::None},
     {0xFFF80000u, 0xDE380000u, ShOp::Txd,  ShForm::None, ImmKind::None},
     {0xFFF80000u, 0xDF480000u, ShOp::Txq,  ShForm::None, ImmKind::None},
+
+    // --- Memoria generica (al final: ocupan todo 0x8000.. y 0xA000..) ---
+    {0xE0000000u, 0x80000000u, ShOp::Ld, ShForm::None, ImmKind::None},
+    {0xE0000000u, 0xA0000000u, ShOp::St, ShForm::None, ImmKind::None},
 };
 #undef FAM2
 #undef FAMCMP
@@ -190,6 +205,8 @@ const char* ShOpName(ShOp op) {
         "lop", "lop32i", "iadd", "iadd32i", "imul", "imul32i", "imad", "iscadd", "xmad", "imnmx", "iset", "isetp", "icmp",
         "shl", "shr", "popc", "bfi", "bfe", "flo",
         "ald", "ast", "ipa", "ldc", "ldl", "stl",
+        "ldg", "stg", "ld", "st", "lds", "sts", "atom", "atom.cas", "atoms", "atoms.cas", "red", "isberd",
+        "bar", "vote",
         "tex", "texs", "tlds", "txd", "txq",
     };
     static_assert(sizeof(names) / sizeof(names[0]) == size_t(ShOp::Count), "faltan nombres");
@@ -200,8 +217,9 @@ const char* ShOpName(ShOp op) {
 // Programa
 // ----------------------------------------------------------------------------
 
-ShaderProgram::ShaderProgram(u64 address, ReadFn read) : m_address(address), m_read(std::move(read)) {
-    m_read(address, m_header.words, sizeof(m_header.words));
+ShaderProgram::ShaderProgram(u64 address, ReadFn read, bool has_header)
+    : m_address(address), m_codeStart(has_header ? 0x50 : 0), m_read(std::move(read)) {
+    if (has_header) m_read(address, m_header.words, sizeof(m_header.words));
 }
 
 const ShaderInstr& ShaderProgram::AtSlow(u32 offset) {
@@ -219,7 +237,7 @@ const ShaderInstr& ShaderProgram::AtSlow(u32 offset) {
         // Leer el grupo de 32 bytes entero (planificacion + 3 instrucciones)
         const u32 group = index & ~3u;
         u64 words[4];
-        m_read(m_address + 0x50 + u64(group) * 8, words, sizeof(words));
+        m_read(m_address + m_codeStart + u64(group) * 8, words, sizeof(words));
         for (u32 i = 1; i < 4; ++i) {
             m_code[group + i] = DecodeShaderInstr(words[i]);
             m_decoded[group + i] = 1;
@@ -234,12 +252,14 @@ const ShaderInstr& ShaderProgram::AtSlow(u32 offset) {
 }
 
 bool ShaderProgram::StillValid() {
-    ShaderHeader h;
-    m_read(m_address, h.words, sizeof(h.words));
-    if (std::memcmp(h.words, m_header.words, sizeof(h.words)) != 0) return false;
+    if (m_codeStart) {
+        ShaderHeader h;
+        m_read(m_address, h.words, sizeof(h.words));
+        if (std::memcmp(h.words, m_header.words, sizeof(h.words)) != 0) return false;
+    }
     if (m_extent == 0) return true;
     std::vector<u64> now(m_extent);
-    m_read(m_address + 0x50, now.data(), now.size() * 8);
+    m_read(m_address + m_codeStart, now.data(), now.size() * 8);
     for (u32 i = 0; i < m_extent; ++i)
         if (m_decoded[i] && now[i] != m_raw[i]) return false;
     return true;

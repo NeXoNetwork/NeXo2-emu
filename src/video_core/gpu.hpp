@@ -290,6 +290,8 @@ public:
         u64 fs_instructions = 0;  // instrucciones de shaders de pixeles ejecutadas
         u64 present_ns = 0;       // tiempo presentando imagenes (hilo de la GPU)
         u64 cpu_wait_ns = 0;      // tiempo que la CPU emulada espera a la GPU (DequeueBuffer...)
+        u64 dispatches = 0;       // lanzamientos de compute
+        u64 compute_threads = 0;  // hilos de compute ejecutados
     };
     Stats& GetStats() { return m_stats; }
 

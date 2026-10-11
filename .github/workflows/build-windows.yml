@@ -35,9 +35,15 @@ jobs:
 
       - name: Tests (interprete y JIT)
         shell: pwsh
+        timeout-minutes: 20
         run: |
           build\Release\nexo2_tests.exe
-          if ($LASTEXITCODE -ne 0) { throw "Hay tests que fallan" }
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # 1 = algun test fallo (busca FAIL arriba); otro codigo = el programa revento
+            # (busca [CRASH] arriba: dice en que test)
+            throw ("nexo2_tests termino con el codigo {0} (0x{1:X8})" -f $code, $code)
+          }
 
       - name: Empaquetar
         shell: pwsh

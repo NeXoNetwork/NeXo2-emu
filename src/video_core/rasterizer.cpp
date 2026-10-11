@@ -236,6 +236,8 @@ struct SoftwareRasterizer::DrawState {
         u32 write_mask = 0xF;   // RGBA
         bool blend = false;
         u32 blend_regs[7] = {}; // separado, op, origen, destino, op alfa, origen alfa, destino alfa
+        bool fast8 = false;     // RGBA8 unorm escribiendo los 4 bytes: camino rapido
+        bool alpha_blend = false;   // mezcla "normal": src*a + dst*(1-a) en los 4 canales
     };
     std::vector<Target> targets;
     bool mrt = true;
@@ -600,6 +602,18 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
             m_gpu.Warn("drawfmt" + std::to_string(t.format), buf);
             continue;
         }
+        // Caminos rapidos para lo mas comun (interfaces 2D y juegos con OpenGL)
+        t.fast8 = (t.format == 0xD5 || t.format == 0xF9) && t.surf.bytes_per_pixel == 4 &&
+                  ColorWriteByteMask(t.format, t.write_mask) == 0xF;
+        if (t.blend) {
+            auto is_add = [](u32 op) { return op == 0x8006 || op == 0x01; };
+            auto is_sa = [](u32 f) { return f == 0x4302 || f == 0x05 || f == 0xC902 || f == 0x12; };
+            auto is_isa = [](u32 f) { return f == 0x4303 || f == 0x06 || f == 0xC903 || f == 0x13; };
+            const u32* b = t.blend_regs;
+            const bool color_ok = is_add(b[1]) && is_sa(b[2]) && is_isa(b[3]);
+            const bool alpha_ok = !(b[0] & 1) || (is_add(b[4]) && is_sa(b[5]) && is_isa(b[6]));
+            t.alpha_blend = color_ok && alpha_ok;
+        }
         st.targets.push_back(t);
     }
 
@@ -742,10 +756,13 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
         ++stats.shader_errors;
     }
     if (static const bool dbg = std::getenv("NEXO2_DRAW_DEBUG") != nullptr; dbg)
-        std::fprintf(stderr, "draw %llu: tris %llu pix %llu fs %llx rt %u fmt %X blend %d tex %d box %u,%u-%u,%u\n", (unsigned long long)stats.draws,
+        std::fprintf(stderr, "draw %llu: tris %llu pix %llu fs %llx rt %u fmt %X blend %d tex %d box %u,%u-%u,%u fast %d ab %d breg %X %X %X %X\n", (unsigned long long)stats.draws,
             (unsigned long long)st.triangles, (unsigned long long)st.pixels, (unsigned long long)(st.fs ? st.fs->Address() : 0),
             st.targets.empty() ? 0 : st.targets[0].surf.width, st.targets.empty() ? 0 : st.targets[0].format,
-            st.targets.empty() ? 0 : int(st.targets[0].blend), 0, st.bx0, st.by0, st.bx1, st.by1);
+            st.targets.empty() ? 0 : int(st.targets[0].blend), 0, st.bx0, st.by0, st.bx1, st.by1,
+            st.targets.empty() ? 0 : int(st.targets[0].fast8), st.targets.empty() ? 0 : int(st.targets[0].alpha_blend),
+            st.targets.empty() ? 0 : st.targets[0].blend_regs[0], st.targets.empty() ? 0 : st.targets[0].blend_regs[1],
+            st.targets.empty() ? 0 : st.targets[0].blend_regs[2], st.targets.empty() ? 0 : st.targets[0].blend_regs[3]);
     ++stats.draws;
     stats.triangles += st.triangles;
     stats.pixels += st.pixels;
@@ -1049,6 +1066,29 @@ void SoftwareRasterizer::RasterizeTriangle(DrawState& st, Worker& w, const Raste
                     src[c] = reg >= 0 ? w.interp.RegF(u32(reg)) : (c == 3 ? 1.0f : 0.0f);
                 }
                 u8* dst_px = &rows[t][size_t(i) * tg.surf.bytes_per_pixel];
+                if (tg.fast8 && (tg.blend || !uniform)) {   // (color fijo sin mezcla: lo hace el relleno de filas)
+                    // RGBA8: sin pasar por DecodeColor/EncodeColor (mismas cuentas que ellos)
+                    float r[4] = {src[0], src[1], src[2], src[3]};
+                    if (tg.blend) {
+                        const float dst[4] = {float(dst_px[0]) / 255.0f, float(dst_px[1]) / 255.0f,
+                                              float(dst_px[2]) / 255.0f, float(dst_px[3]) / 255.0f};
+                        if (tg.alpha_blend) {
+                            const float sa = src[3], ia = 1.0f - src[3];
+                            for (int c = 0; c < 4; ++c) r[c] = src[c] * sa + dst[c] * ia;
+                        } else {
+                            const u32* b = tg.blend_regs;
+                            const bool separate = b[0] & 1;
+                            for (int c = 0; c < 4; ++c) {
+                                const bool alpha = c == 3 && separate;
+                                const u32 op = alpha ? b[4] : b[1], fsr = alpha ? b[5] : b[2], fds = alpha ? b[6] : b[3];
+                                r[c] = BlendEquation(op, src[c], dst[c], BlendFactor(fsr, src, dst, bconst, c),
+                                                     BlendFactor(fds, src, dst, bconst, c));
+                            }
+                        }
+                    }
+                    for (int c = 0; c < 4; ++c) dst_px[c] = u8(u32(std::clamp(r[c], 0.0f, 1.0f) * 255.0f + 0.5f));
+                    continue;
+                }
                 if (tg.blend) {
                     float dst[4];
                     DecodeColor(tg.format, dst_px, dst);

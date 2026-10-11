@@ -159,9 +159,14 @@ if(NEXO2_BUILD_APP)
 # 1b. Fuentes del ejecutable (interfaz, icono)
 set(SOURCES
     "${SRC_DIR}/main.cpp"
+    "${SRC_DIR}/frontend/settings.cpp"
+    "${SRC_DIR}/frontend/game_list.cpp"
+    "${SRC_DIR}/frontend/theme.cpp"
     "${SRC_DIR}/core/memory/memory.hpp"
-    "${SRC_DIR}/resource.rc" # <--- Esto pone el icono al .exe
 )
+if(WIN32)
+    list(APPEND SOURCES "${SRC_DIR}/resource.rc")   # icono del .exe
+endif()
 
 # 2. Fuentes ImGui
 set(IMGUI_SOURCES
@@ -191,10 +196,14 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends"
     "${EXT_DIR}/SDL/include"
+    "${EXT_DIR}/stb"
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE nexo2_core SDL3-shared)
 target_compile_definitions(${PROJECT_NAME} PRIVATE NEXO2_VERSION="${NEXO2_VERSION}")
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)   # textos de la interfaz con acentos
+endif()
 
 # 5. Copia de DLL y Assets
 if(WIN32)

@@ -203,10 +203,34 @@ void Kernel::AcquireMutexAfterWait(KThread& t, u32 result) {
     t.wait_order = ++m_waitCounter;
 }
 
+void Kernel::ScheduleAt(u64 at, std::function<void()> fn) {
+    m_timers.emplace_back(at, std::move(fn));
+    if (m_multicore) m_coreCv.notify_all();
+}
+
+u64 Kernel::EarliestTimer() const {
+    u64 e = NEVER;
+    for (const auto& t : m_timers) e = std::min(e, t.first);
+    return e;
+}
+
 void Kernel::UpdateWaits() {
     // Avisos de la GPU (syncpoints que llegaron en su hilo): activan eventos de nvdrv
     m_gpu.GetSyncpoints().RunFired();
     const u64 now = Now();
+    // Temporizadores vencidos (ScheduleAt): se sacan antes de llamarlos (pueden programar otros)
+    if (!m_timers.empty()) {
+        std::vector<std::function<void()>> due;
+        for (size_t i = 0; i < m_timers.size();) {
+            if (m_timers[i].first <= now) {
+                due.push_back(std::move(m_timers[i].second));
+                m_timers.erase(m_timers.begin() + std::ptrdiff_t(i));
+            } else {
+                ++i;
+            }
+        }
+        for (auto& f : due) f();
+    }
     for (auto& tp : m_threads) {
         KThread& t = *tp;
         if (t.state != KThread::State::Waiting) continue;
@@ -295,7 +319,7 @@ u64 Kernel::Run(u64 budget) {
                 break;
             }
             // Nadie listo: adelantar el reloj hasta el primer plazo, o es un bloqueo
-            u64 earliest = NEVER;
+            u64 earliest = EarliestTimer();
             for (auto& t : m_threads)
                 if (t->state == KThread::State::Waiting && t->deadline < earliest) earliest = t->deadline;
             if (earliest == NEVER) {
@@ -673,7 +697,7 @@ void Kernel::CoreLoop(s32 core) {
         if (!next) {
             // Nada que hacer en este nucleo: esperar a que despierten a alguien (o al primer plazo)
             auto wait = std::chrono::microseconds(1000);
-            u64 earliest = NEVER;
+            u64 earliest = EarliestTimer();
             for (auto& t : m_threads)
                 if (t->state == KThread::State::Waiting && t->deadline < earliest) earliest = t->deadline;
             if (earliest != NEVER) {

@@ -7,6 +7,7 @@
 #include "services/fs.hpp"
 #include "services/hid.hpp"
 #include "services/misc.hpp"
+#include "services/audio.hpp"
 #include "services/bsd.hpp"
 #include "services/ssl.hpp"
 #include "services/nvdrv.hpp"
@@ -69,6 +70,7 @@ void Kernel::RegisterDefaultServices() {
     m_services.Register("pl:u",     [] { return std::make_shared<PlService>(); });
     m_services.Register("ssl",      [] { return std::make_shared<SslService>(); });
     m_services.Register("audren:u", [] { return std::make_shared<AudioRendererManager>(); });
+    m_services.Register("audout:u", [] { return std::make_shared<AudioOutManager>(); });
     m_services.Register("apm",      [] { return std::make_shared<ApmManager>(); });
     m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
     m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
@@ -90,6 +92,7 @@ void Kernel::Reset() {
     m_gpu.WaitIdle();   // la GPU (si va en su hilo) no puede seguir usando nada de lo que se borra
     std::lock_guard lock(m_lock);
     m_network.reset();  // cierra los sockets del programa anterior
+    m_timers.clear();
     m_coresHalted = false;
     m_coreHaltReason.clear();
     for (auto& c : m_extraCpus) if (c) c->Resume();

@@ -1,9 +1,11 @@
-name: Build Prerelease (Windows)
+# Prerelease automatica: cada commit que llega a main se compila, se prueba y se publica
+# como prerelease en GitHub (tag v<version>-dev.<numero>). Solo se guardan las 10 ultimas.
+# Los pull requests solo se compilan y prueban (no se publica nada).
+name: Prerelease
 
 on:
   push:
-    branches: [ main, develop ]
-    tags: [ 'v*-pre*', 'v*-rc*', 'v*-beta*' ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -11,86 +13,72 @@ on:
 permissions:
   contents: write
 
+# Si llegan varios commits seguidos, solo se termina el ultimo
+concurrency:
+  group: prerelease-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-windows:
-    name: Build (Windows x64, MSVC)
-    runs-on: windows-2022
-    env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_FEATURE_FLAGS: manifests,binarycaching
-
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      package: ${{ steps.v.outputs.package }}
     steps:
-      - name: Checkout con submódulos
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Cache de vcpkg (binary caching)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/vcpkg_cache
-          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-
-
-      - name: Setup vcpkg
-        shell: pwsh
+      - uses: actions/checkout@v4
+      - id: v
         run: |
-          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-          C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
-          echo "VCPKG_BINARY_SOURCES=clear;files,${{ github.workspace }}/vcpkg_cache,readwrite" >> $env:GITHUB_ENV
+          base=$(sed -n 's/^set(NEXO2_VERSION "\([^"]*\)".*/\1/p' CMakeLists.txt)
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "version=${base}-dev.${GITHUB_RUN_NUMBER}+${short}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${base}-dev.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "package=NeXo2-v${base}-dev.${GITHUB_RUN_NUMBER}-windows-x64" >> "$GITHUB_OUTPUT"
 
-      - name: Configurar CMake (RelWithDebInfo)
-        shell: pwsh
-        run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DVCPKG_MANIFEST_MODE=ON
+  build:
+    needs: version
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      package: ${{ needs.version.outputs.package }}
 
-      - name: Compilar
-        shell: pwsh
-        run: cmake --build build --config RelWithDebInfo --parallel $env:NUMBER_OF_PROCESSORS
-
-      - name: Empaquetar artefacto
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          # AJUSTA la ruta si tu binario se llama distinto:
-          $exe = Get-ChildItem -Path build -Recurse -Filter "nexo2*.exe" | Select-Object -First 1
-          if ($exe) { Copy-Item $exe.FullName dist\ -Force }
-          # Copia DLLs necesarias (vcpkg las deja en build\vcpkg_installed\...\bin)
-          Get-ChildItem -Path build\vcpkg_installed -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
-            Where-Object { $_.DirectoryName -match '\\bin$' } |
-            Copy-Item -Destination dist\ -Force -ErrorAction SilentlyContinue
-          Copy-Item assets dist\ -Recurse -Force -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist\* -DestinationPath nexo2-prerelease-windows-x64.zip -Force
-
-      - name: Subir artefacto
-        uses: actions/upload-artifact@v4
-        with:
-          name: nexo2-prerelease-windows-x64
-          path: nexo2-prerelease-windows-x64.zip
-          retention-days: 14
-
-  publish-prerelease:
-    name: Publicar prerelease en GitHub
-    needs: build-windows
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-2022
+  publish:
+    name: Publicar prerelease
+    needs: [ version, build ]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: nexo2-prerelease-windows-x64
+          name: ${{ needs.version.outputs.package }}
 
-      - name: Crear/actualizar prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          prerelease: true
-          generate_release_notes: true
-          files: nexo2-prerelease-windows-x64.zip
-          tag_name: ${{ github.ref_name }}
+      - name: Crear la prerelease
+        run: |
+          tag="${{ needs.version.outputs.tag }}"
+          msg=$(gh api "repos/$GH_REPO/commits/$GITHUB_SHA" --jq '.commit.message' | sed -n '1,20p')
+          {
+            echo "Compilacion automatica del commit ${GITHUB_SHA:0:7}. **No es una version estable.**"
+            echo
+            echo '```'
+            echo "$msg"
+            echo '```'
+            echo
+            echo "Descomprime el .zip, pon tus .nro en sdmc/switch y abre NeXo2.exe."
+          } > notes.md
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true   # por si se repite la ejecucion
+          gh release create "$tag" *.zip *.zip.sha256 \
+            --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "NeXo 2 ${{ needs.version.outputs.version }}" --notes-file notes.md
+
+      - name: Borrar prereleases viejas (se quedan las 10 ultimas)
+        run: |
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | test("-dev\\.")))] | sort_by(.createdAt) | reverse | .[10:] | .[].tagName' |
+          while read -r old; do
+            echo "Borrando $old"
+            gh release delete "$old" --yes --cleanup-tag
+          done

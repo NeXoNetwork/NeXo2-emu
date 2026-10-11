@@ -12,6 +12,9 @@ option(NEXO2_BUILD_APP "Compilar la aplicacion (necesita SDL3 e ImGui)" ON)
 option(NEXO2_BUILD_TESTS "Compilar los tests de la CPU (nexo2_tests)" ON)
 option(NEXO2_ENABLE_JIT "JIT dynarmic (ARM64 -> x86-64). Necesita externals/dynarmic y externals/ext-boost" ON)
 option(NEXO2_ENABLE_VULKAN "GPU por Vulkan (fase 3). Necesita externals/Vulkan-Headers y externals/volk" ON)
+# Version que se ve en el titulo de la ventana. Los workflows de GitHub la cambian
+# (por ejemplo 0.0.3 en una release o 0.0.2-dev.57+abc1234 en una prerelease).
+set(NEXO2_VERSION "0.0.2" CACHE STRING "Version de NeXo 2 (titulo de la ventana)")
 option(NEXO2_ENABLE_TLS "https para los programas (servicio ssl). Necesita externals/mbedtls" ON)
 
 # 1a. Nucleo del emulador (CPU, memoria, cargador NRO, kernel HLE) como libreria estatica.
@@ -40,6 +43,7 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/hle/services/set.cpp"
     "${SRC_DIR}/core/hle/services/apm.cpp"
     "${SRC_DIR}/core/hle/services/misc.cpp"
+    "${SRC_DIR}/core/hle/services/audio.cpp"
     "${SRC_DIR}/core/hle/services/bsd.cpp"
     "${SRC_DIR}/core/hle/services/ssl.cpp"
     "${SRC_DIR}/core/hle/net/host_net.cpp"
@@ -190,6 +194,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE nexo2_core SDL3-shared)
+target_compile_definitions(${PROJECT_NAME} PRIVATE NEXO2_VERSION="${NEXO2_VERSION}")
 
 # 5. Copia de DLL y Assets
 if(WIN32)

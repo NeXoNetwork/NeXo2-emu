@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <memory>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -111,6 +112,19 @@ public:
     // sigan). Solo dentro de una SVC. Devuelve si lo solto (para volver a cogerlo despues).
     bool ReleaseLockForWait();
     void ReacquireLockAfterWait(bool released);
+    // --- Tiempo y sonido (audout) ---
+    // Llama a 'fn' (con el candado del kernel) cuando el reloj emulado llegue a 'at' (ticks).
+    // Lo usa audout para "terminar" cada buffer de sonido a su hora.
+    void ScheduleAt(u64 at, std::function<void()> fn);
+    // Salida de sonido del PC: la pone la interfaz. Recibe PCM de 16 bits estereo a 48 kHz.
+    using AudioSink = std::function<void(const s16* samples, size_t frames)>;
+    void SetAudioSink(AudioSink sink) { std::lock_guard l(m_audioMutex); m_audioSink = std::move(sink); }
+    void PushAudio(const s16* samples, size_t frames) {
+        std::lock_guard l(m_audioMutex);
+        if (m_audioSink) m_audioSink(samples, frames);
+    }
+    u64 TicksNow() { return Now(); }
+    static u64 TicksFromNs(s64 ns) { return NsToTicks(ns); }
     // El emulador quiere parar los nucleos: las esperas largas deben terminar ya
     bool StopRequested() const { return m_coresStop.load(); }
     void HandleSvcImpl(u32 imm, Core::CPUState& state);
@@ -314,6 +328,10 @@ private:
     std::vector<std::shared_ptr<KThread>> m_threads;
     std::shared_ptr<KThread> m_current;    // el hilo cuyos registros estan en la CPU (modo de un hilo)
     std::shared_ptr<NetworkState> m_network;
+    std::vector<std::pair<u64, std::function<void()>>> m_timers;   // ScheduleAt
+    u64 EarliestTimer() const;
+    std::mutex m_audioMutex;
+    AudioSink m_audioSink;
 
     // Modo multinucleo
     std::recursive_mutex m_lock;

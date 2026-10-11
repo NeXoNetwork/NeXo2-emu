@@ -1,0 +1,62 @@
+# Compilacion de Windows compartida por prerelease.yml y release-windows.yml.
+# Compila con Visual Studio 2022 (todas las dependencias son submodulos: no hace falta
+# vcpkg), pasa los tests y deja un .zip listo para descargar como artefacto.
+name: Compilar (Windows)
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version que se ve en el titulo de la ventana (NEXO2_VERSION)"
+        required: true
+        type: string
+      package:
+        description: "Nombre del .zip (sin extension)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Windows x64 (MSVC, Release)
+    runs-on: windows-2022
+    steps:
+      - name: Descargar el codigo con los submodulos
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configurar
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DNEXO2_VERSION=${{ inputs.version }}"
+
+      - name: Compilar
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Tests (interprete y JIT)
+        shell: pwsh
+        run: |
+          build\Release\nexo2_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "Hay tests que fallan" }
+
+      - name: Empaquetar
+        shell: pwsh
+        run: |
+          $dist = "dist\${{ inputs.package }}"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item build\Release\NeXo2.exe, build\Release\SDL3.dll $dist
+          Copy-Item build\Release\assets $dist -Recurse
+          Copy-Item LICENSE, README.md $dist
+          New-Item -ItemType Directory -Force -Path "$dist\sdmc\switch" | Out-Null   # tarjeta SD vacia: los .nro van aqui
+          Compress-Archive -Path $dist -DestinationPath "${{ inputs.package }}.zip"
+          (Get-FileHash "${{ inputs.package }}.zip" -Algorithm SHA256).Hash.ToLower() + "  ${{ inputs.package }}.zip" |
+            Out-File "${{ inputs.package }}.zip.sha256" -Encoding ascii
+
+      - name: Guardar el paquete
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.package }}
+          path: |
+            ${{ inputs.package }}.zip
+            ${{ inputs.package }}.zip.sha256
+          retention-days: 30

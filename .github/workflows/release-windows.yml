@@ -1,145 +1,82 @@
-name: Build Official Release (Windows, manual)
+# Release oficial: SOLO cuando tu la lanzas a mano.
+# GitHub -> Actions -> "Release oficial" -> Run workflow -> escribe la version (ej. 0.0.3).
+# Compila, pasa los tests, crea el tag v<version> en el ultimo commit de la rama elegida
+# y publica la release con las notas desde la release oficial anterior.
+name: Release oficial
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Versión de la release (ej: 1.0.0) — se usará como tag v<version>'
+        description: "Version (sin la v), por ejemplo 0.0.3"
         required: true
         type: string
-      tag:
-        description: 'Tag exacto a crear/publicar (ej: v1.0.0). Si lo dejas vacío se usa v<version>'
-        required: false
-        type: string
-        default: ''
       draft:
-        description: '¿Crear como borrador?'
-        required: true
-        type: boolean
-        default: false
-      prerelease:
-        description: '¿Marcar como prerelease en GitHub?'
-        required: true
+        description: "Crearla como borrador (la publicas tu despues desde GitHub)"
+        required: false
         type: boolean
         default: false
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build-windows:
-    name: Build (Windows x64, MSVC, Release)
-    runs-on: windows-2022
-    env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows
-      VCPKG_FEATURE_FLAGS: manifests,binarycaching
-
+  check:
+    name: Comprobar version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      package: ${{ steps.v.outputs.package }}
     steps:
-      - name: Checkout con submódulos
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 0
-
-      - name: Resolver tag final
-        id: vars
-        shell: pwsh
+      - id: v
         run: |
-          $tag = "${{ inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v${{ inputs.version }}" }
-          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
-          echo "Tag final: $tag"
+          ver="${{ inputs.version }}"
+          ver="${ver#v}"
+          if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::La version debe ser como 0.0.3 (recibido: '${{ inputs.version }}')"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
+            echo "::error::El tag v$ver ya existe"; exit 1
+          fi
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+          echo "package=NeXo2-v$ver-windows-x64" >> "$GITHUB_OUTPUT"
 
-      - name: Cache de vcpkg (binary caching)
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/vcpkg_cache
-          key: vcpkg-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-release-${{ runner.os }}-
+  build:
+    needs: check
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      version: ${{ inputs.version }}
+      package: ${{ needs.check.outputs.package }}
 
-      - name: Setup vcpkg
-        shell: pwsh
-        run: |
-          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-          C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
-          echo "VCPKG_BINARY_SOURCES=clear;files,${{ github.workspace }}/vcpkg_cache,readwrite" >> $env:GITHUB_ENV
-
-      - name: Configurar CMake (Release)
-        shell: pwsh
-        run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DVCPKG_MANIFEST_MODE=ON `
-            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
-
-      - name: Compilar
-        shell: pwsh
-        run: cmake --build build --config Release --parallel $env:NUMBER_OF_PROCESSORS
-
-      - name: Empaquetar artefacto
-        shell: pwsh
-        run: |
-          $tag = "${{ steps.vars.outputs.TAG }}"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-
-          # AJUSTA aquí si tu target CMake se llama distinto a nexo2
-          $exe = Get-ChildItem -Path build -Recurse -Filter "nexo2*.exe" | Select-Object -First 1
-          if ($exe) { Copy-Item $exe.FullName dist\ -Force }
-
-          # DLLs de vcpkg
-          Get-ChildItem -Path build\vcpkg_installed -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
-            Where-Object { $_.DirectoryName -match '\\bin$' } |
-            Copy-Item -Destination dist\ -Force -ErrorAction SilentlyContinue
-
-          Copy-Item assets dist\ -Recurse -Force -ErrorAction SilentlyContinue
-          Copy-Item LICENSE,README.md,BUILDING.md dist\ -Force -ErrorAction SilentlyContinue
-
-          $zipName = "nexo2-$tag-windows-x64.zip"
-          Compress-Archive -Path dist\* -DestinationPath $zipName -Force
-          (Get-FileHash $zipName -Algorithm SHA256).Hash |
-            Out-File "$zipName.sha256" -Encoding ascii
-          echo "ZIP=$zipName" >> $env:GITHUB_OUTPUT
-        id: package
-
-      - name: Subir artefacto
-        uses: actions/upload-artifact@v4
-        with:
-          name: nexo2-release-windows-x64
-          path: |
-            ${{ steps.package.outputs.ZIP }}
-            ${{ steps.package.outputs.ZIP }}.sha256
-          retention-days: 30
-
-  publish-release:
-    name: Publicar release oficial en GitHub
-    needs: build-windows
-    runs-on: windows-2022
+  publish:
+    name: Publicar release
+    needs: [ check, build ]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Descargar artefacto
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: nexo2-release-windows-x64
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.check.outputs.package }}
+          path: out
 
-      - name: Resolver tag final
-        id: vars
-        shell: pwsh
+      - name: Crear la release
         run: |
-          $tag = "${{ inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v${{ inputs.version }}" }
-          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
-
-      - name: Crear release oficial
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.vars.outputs.TAG }}
-          name: ${{ steps.vars.outputs.TAG }}
-          draft: ${{ inputs.draft }}
-          prerelease: ${{ inputs.prerelease }}
-          generate_release_notes: true
-          files: |
-            nexo2-${{ steps.vars.outputs.TAG }}-windows-x64.zip
-            nexo2-${{ steps.vars.outputs.TAG }}-windows-x64.zip.sha256
+          tag="${{ needs.check.outputs.tag }}"
+          # Notas desde la ultima release oficial (sin contar las -dev)
+          prev=$(git tag --list 'v*' --sort=-v:refname | grep -v -- '-' | head -n 1 || true)
+          args=(--target "$GITHUB_SHA" --title "NeXo 2 $tag" --generate-notes --latest)
+          [ -n "$prev" ] && args+=(--notes-start-tag "$prev")
+          [ "${{ inputs.draft }}" = "true" ] && args+=(--draft)
+          gh release create "$tag" out/*.zip out/*.zip.sha256 "${args[@]}"

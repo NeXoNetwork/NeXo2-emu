@@ -342,7 +342,10 @@ int main(int argc, char** argv) {
     float main_scale = SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay());
     if (main_scale <= 0.0f) main_scale = 1.0f;
     LogUi("Escala de pantalla: " + std::to_string(main_scale));
-    SDL_Window* window = SDL_CreateWindow("NeXo 2 | 0.0.0.2", (int)(1400 * main_scale), (int)(800 * main_scale),
+#ifndef NEXO2_VERSION
+#define NEXO2_VERSION "0.0.2"
+#endif
+    SDL_Window* window = SDL_CreateWindow("NeXo 2 | " NEXO2_VERSION, (int)(1400 * main_scale), (int)(800 * main_scale),
                                           SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
     SDL_SetRenderVSync(renderer, 1); // no dibujar mas rapido que la pantalla (ahorra CPU)
@@ -368,6 +371,29 @@ int main(int argc, char** argv) {
     {
         const char* env = std::getenv("NEXO2_GPU_ASYNC");
         sys.GetKernel().GetGpu().SetAsync(!(env && env[0] == '0'));
+    }
+
+    // Sonido: audout manda PCM de 16 bits estereo a 48 kHz y aqui va a la tarjeta del PC.
+    // Si se acumula mas de 1/4 de segundo (la emulacion fue a rafagas) se tira lo viejo,
+    // para que el sonido no se quede cada vez mas atrasado. NEXO2_AUDIO=0 lo apaga.
+    SDL_AudioStream* audioStream = nullptr;
+    {
+        const char* env = std::getenv("NEXO2_AUDIO");
+        if (!(env && env[0] == '0') && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            const SDL_AudioSpec spec{SDL_AUDIO_S16, 2, 48000};
+            audioStream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, nullptr, nullptr);
+            if (audioStream) {
+                SDL_ResumeAudioStreamDevice(audioStream);
+                sys.GetKernel().SetAudioSink([audioStream](const s16* samples, size_t frames) {
+                    constexpr int MAX_QUEUED = 48000 / 4 * 4;   // 0,25 s en bytes (2 canales x 2 bytes)
+                    if (SDL_GetAudioStreamQueued(audioStream) > MAX_QUEUED) SDL_ClearAudioStream(audioStream);
+                    SDL_PutAudioStreamData(audioStream, samples, int(frames * 4));
+                });
+                LogUi("Sonido: 48000 Hz estereo");
+            } else {
+                LogUi(std::string("Sin sonido: ") + SDL_GetError());
+            }
+        }
     }
 
     // Tarjeta SD emulada: carpeta "sdmc" junto al ejecutable
@@ -767,6 +793,8 @@ int main(int argc, char** argv) {
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+    sys.GetKernel().SetAudioSink(nullptr);
+    if (audioStream) SDL_DestroyAudioStream(audioStream);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

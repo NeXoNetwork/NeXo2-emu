@@ -10,6 +10,17 @@
 #include <cstdlib>
 
 namespace NeXo2::GPU {
+
+// El mismo hash rapido, de una copia ya leida (bytes desde el principio de la imagen)
+static u64 QuickBufferHash(const u8* data, size_t size) {
+    u64 h = 0x9E3779B97F4A7C15ull;
+    for (size_t a = 0; a < size; a += 4096) {
+        const size_t n = std::min<size_t>(32, size - a);
+        for (size_t k = 0; k < n; ++k) h = (h ^ data[a + k]) * 0x100000001B3ull;
+    }
+    return h;
+}
+
 using Common::Logger;
 
 namespace {
@@ -349,7 +360,9 @@ bool VulkanRasterizer::Init(std::string& error) {
 bool VulkanRasterizer::EnsureBuffer(Vulkan::Buffer& b, VkDeviceSize size, VkBufferUsageFlags usage) {
     if (b.buffer && b.size >= size) return true;
     m_dev.DestroyBuffer(b);
-    b = m_dev.CreateBuffer(size, usage, true);
+    // Solo destino de copias = la CPU lo va a leer: memoria con cache
+    const bool readback = (usage & VK_BUFFER_USAGE_TRANSFER_DST_BIT) && !(usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    b = m_dev.CreateBuffer(size, usage, true, readback);
     return b.buffer != VK_NULL_HANDLE && b.mapped;
 }
 
@@ -539,12 +552,24 @@ VulkanRasterizer::Image* VulkanRasterizer::GetImage(const Surface& surf, u32 gue
         return found;
     }
     if (found->epoch != m_epoch && !found->mem_dirty) {
-        // Nuevo envio: la CPU puede haber escrito en la memoria. Se compara su hash.
+        // Nuevo envio: la CPU puede haber escrito en la memoria. Leer y comparar la imagen
+        // entera (8 MB a 1080p) en cada envio era lo que mas costaba: ahora se mira un hash
+        // rapido (32 bytes de cada pagina) y el completo solo si cambia o cada 30 envios.
+        m_busy = true;
+        const u64 quick = QuickRangeHash(lo, hi);
+        const bool need_full = !found->hash_known || quick != found->quick || m_epoch - found->full_epoch >= 30;
+        m_busy = false;
+        if (!need_full) {
+            found->epoch = m_epoch;
+            return found;
+        }
         std::vector<u8> guest(size_t(hi - lo));
         m_busy = true;
         m_gpu.MemoryManager().ReadBlock(lo, guest.data(), guest.size());
         m_busy = false;
         const u64 h = Hash(guest.data(), guest.size());
+        found->quick = QuickBufferHash(guest.data(), guest.size());
+        found->full_epoch = m_epoch;
         if (!found->hash_known) {
             // Desde que se borro en la GPU la memoria no se ha escrito desde aqui: lo que tenga
             // es viejo. Se apunta para ver cambios de la CPU a partir de ahora.
@@ -564,6 +589,18 @@ VulkanRasterizer::Image* VulkanRasterizer::GetImage(const Surface& surf, u32 gue
     return found;
 }
 
+u64 VulkanRasterizer::QuickRangeHash(u64 lo, u64 hi) {
+    u64 h = 0x9E3779B97F4A7C15ull;
+    u8 buf[32];
+    auto& mm = m_gpu.MemoryManager();
+    for (u64 a = lo; a < hi; a += 4096) {
+        const size_t n = size_t(std::min<u64>(32, hi - a));
+        mm.ReadBlock(a, buf, n);
+        for (size_t k = 0; k < n; ++k) h = (h ^ buf[k]) * 0x100000001B3ull;
+    }
+    return h;
+}
+
 void VulkanRasterizer::Upload(Image& img) {
     const Surface& s = img.surf;
     std::vector<u8> guest(size_t(s.SizeBytes()));
@@ -571,6 +608,8 @@ void VulkanRasterizer::Upload(Image& img) {
     m_gpu.MemoryManager().ReadBlock(s.address, guest.data(), guest.size());
     m_busy = false;
     img.hash = Hash(guest.data(), guest.size());
+    img.quick = QuickBufferHash(guest.data(), guest.size());
+    img.full_epoch = m_epoch;
     img.hash_known = true;
     const size_t pixels = size_t(s.width) * s.height;
     std::vector<u8> rows(pixels * s.bytes_per_pixel);
@@ -645,6 +684,8 @@ void VulkanRasterizer::Download(const std::vector<Image*>& imgs) {
         mm.WriteBlock(s.address, guest.data(), guest.size());   // avisa a la cache de texturas
         m_busy = false;
         im.hash = Hash(guest.data(), guest.size());
+        im.quick = QuickBufferHash(guest.data(), guest.size());
+        im.full_epoch = m_epoch;
         im.hash_known = true;
         im.epoch = m_epoch;
         if (im.gpu_dirty) { im.gpu_dirty = false; --m_dirtyCount; }
@@ -669,7 +710,8 @@ void VulkanRasterizer::Flush(bool depth) {
     Submit();
 }
 
-bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba) {
+bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba,
+                                      PresentRegion& region) {
     if (format != 1) return false;   // RGBA8888 (lo normal); el resto, por memoria
     // La imagen de color que empieza en esa direccion. Puede ser sRGB (mismos bytes) y de otro
     // tamano que el buffer de vi (un juego dibuja 1280x720 en un buffer de 1920x1080): se
@@ -685,7 +727,12 @@ bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format,
     }
     if (!img || img->mem_dirty) return false;   // no esta en la GPU, o la memoria es mas nueva: presentar desde ella
     Timer t(m_stats.ns_present);
-    const u32 cw = std::min(width, img->surf.width), ch = std::min(height, img->surf.height);
+    // Solo el trozo visible (dentro de la imagen y del buffer)
+    const u32 iw = std::min(width, img->surf.width), ih = std::min(height, img->surf.height);
+    const u32 x0 = std::min(region.x, iw), y0 = std::min(region.y, ih);
+    const u32 cw = region.w ? std::min(region.w, iw - x0) : iw - x0;
+    const u32 ch = region.h ? std::min(region.h, ih - y0) : ih - y0;
+    if (!cw || !ch) return false;
     const VkDeviceSize bytes = VkDeviceSize(cw) * ch * 4;
     if (!m_readback.buffer || m_readback.size < bytes) {
         Submit();
@@ -694,13 +741,22 @@ bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format,
     TransferBarrier();
     VkBufferImageCopy r{};
     r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    r.imageOffset = {s32(x0), s32(y0), 0};
     r.imageExtent = {cw, ch, 1};
     vkCmdCopyImageToBuffer(Cmd(), img->image, VK_IMAGE_LAYOUT_GENERAL, m_readback.buffer, 1, &r);
     FullBarrier(Cmd());
     Submit();
-    rgba.assign(size_t(width) * height, 0xFF000000u);
+    // Copiar fila a fila (al reves si va volteada en vertical)
+    rgba.resize(size_t(cw) * ch);
     const u32* src = static_cast<const u32*>(m_readback.mapped);
-    for (u32 y = 0; y < ch; ++y) std::memcpy(&rgba[size_t(y) * width], src + size_t(y) * cw, size_t(cw) * 4);
+    for (u32 y = 0; y < ch; ++y) {
+        u32* dst = &rgba[size_t(region.flip_v ? ch - 1 - y : y) * cw];
+        const u32* row = src + size_t(y) * cw;
+        if (!region.flip_h) std::memcpy(dst, row, size_t(cw) * 4);
+        else for (u32 x = 0; x < cw; ++x) dst[x] = row[cw - 1 - x];
+    }
+    region.w = cw;
+    region.h = ch;
     ++m_stats.presents;
     return true;
 }
@@ -840,7 +896,9 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
 
     // Un render target que esta en la GPU: se lee la imagen directamente (sin escribirla en
     // memoria, decodificarla y volver a subirla, que es lo que mas costaba)
+    std::optional<Timer> trt(std::in_place, m_stats.ns_tex_rt);
     if (Image* rt = RenderTargetAsTexture(info, want)) {
+        ++m_stats.tex_rt;
         const u32 sw = info.swizzle[0] | (info.swizzle[1] << 3) | (info.swizzle[2] << 6) | (info.swizzle[3] << 9);
         VkImageView& view = rt->sampled[sw];
         if (!view) {
@@ -862,12 +920,15 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
         return true;
     }
 
+    trt.reset();
     // Formato nativo (RGBA8, BC1-5...): se sube tal cual esta en memoria (solo se quita el block
     // linear). Si no, la cache de la CPU decodifica a 4 floats por texel.
     const u32 nlevels = std::min<u32>(info.max_level - info.min_level + 1, 16);
     VkFormat nfmt = VK_FORMAT_UNDEFINED;
     bool alpha_one = false;
     const bool native = NativeTextureFormat(info, nfmt, alpha_one);
+    ++(native ? m_stats.tex_native : m_stats.tex_decoded);
+    Timer tkind(native ? m_stats.ns_tex_native : m_stats.ns_tex_decoded);
     std::vector<std::shared_ptr<const DecodedLevel>> levels;
     u32 bw, bh, bd;
     if (native) {
@@ -976,16 +1037,22 @@ bool VulkanRasterizer::PrepareTexture(u32 handle, const SpirvTexture& want, u64 
     for (u32 i = 0; i < nlevels; ++i) {
         if (native) {
             // Se reutiliza si nadie lo ha escrito: la GPU avisa (OnGpuWrite); la CPU se mira con un
-            // hash rapido en cada envio y uno completo cada 30
+            // hash rapido en cada envio y uno completo cada 300 (leer entera una textura grande
+            // cuesta milisegundos: cada 30 envios se llevaba el 15-25 % del tiempo de la GPU)
             auto& st = tex.lv[i];
             const u32 level = info.min_level + i;
             bool read = !st.valid || st.dirty;
             if (!read && st.epoch != m_epoch) {
-                if (m_epoch - st.full_epoch >= 30) read = true;
-                else if (TextureLevelQuickHash(m_gpu, info, level) != st.quick) read = true;
-                else st.epoch = m_epoch;
+                if (m_epoch - st.full_epoch >= 300) read = true;
+                else {
+                    Timer tq(m_stats.ns_tex_quick);
+                    if (TextureLevelQuickHash(m_gpu, info, level) != st.quick) read = true;
+                }
+                if (!read) st.epoch = m_epoch;
             }
             if (!read) continue;
+            Timer tf(m_stats.ns_tex_full);
+            ++m_stats.tex_full;
             RawTextureLevel raw;
             if (!ReadTextureLevelRaw(m_gpu, info, level, raw)) return Fallback("no se pudo leer la textura");
             if (!st.valid || raw.hash != st.hash) {

@@ -43,6 +43,12 @@ namespace Vulkan { class Device; }
 // Con que se dibuja
 enum class RendererKind { Software, Vulkan };
 
+// Trozo visible de un buffer de pantalla (ver Gpu::ReadForPresent)
+struct PresentRegion {
+    u32 x = 0, y = 0, w = 0, h = 0;   // w/h = 0: todo
+    bool flip_h = false, flip_v = false;
+};
+
 // ----------------------------------------------------------------------------
 // Memoria virtual de la GPU
 // ----------------------------------------------------------------------------
@@ -241,7 +247,11 @@ public:
     // Presentar: si la imagen [cpu, ...) es un render target que esta en la GPU real (Vulkan),
     // la deja en 'rgba' leyendola directamente de alli (sin escribirla en memoria y volver a
     // leerla). 'format' = formato de Android del buffer (1 = RGBA8888). false = no estaba.
-    bool ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba);
+    // 'region': trozo del buffer que se ve (recorte de QueueBuffer) y si va volteado. Devuelve
+    // solo ese trozo, ya volteado (asi se lee de la GPU lo justo: 1280x720 de un buffer de 1080p);
+    // region.w/h quedan con el tamano de verdad de 'rgba'
+    bool ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba,
+                        PresentRegion& region);
     // Escribe en memoria lo que la GPU real tenga pendiente. 'depth' = tambien la
     // profundidad (al final de cada envio solo hace falta el color, que es lo que se presenta;
     // la profundidad se escribe cuando alguien va a leer su memoria).

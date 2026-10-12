@@ -112,10 +112,10 @@ public:
         std::vector<u32> out(size_t(cw) * ch);
         for (u32 y = 0; y < ch; ++y) {
             const u32 sy = u32(top) + (flip_v ? ch - 1 - y : y);
-            for (u32 x = 0; x < cw; ++x) {
-                const u32 sx = u32(left) + (flip_h ? cw - 1 - x : x);
-                out[size_t(y) * cw + x] = f.rgba[size_t(sy) * u32(w) + sx];
-            }
+            const u32* row = &f.rgba[size_t(sy) * u32(w) + u32(left)];
+            u32* dst = &out[size_t(y) * cw];
+            if (!flip_h) std::copy(row, row + cw, dst);   // fila entera de una vez
+            else for (u32 x = 0; x < cw; ++x) dst[x] = row[cw - 1 - x];
         }
         f.width = cw;
         f.height = ch;

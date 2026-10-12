@@ -266,7 +266,7 @@ s32 Device::FindMemoryType(u32 bits, VkMemoryPropertyFlags props) const {
     return -1;
 }
 
-Buffer Device::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_visible) {
+Buffer Device::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_visible, bool cached) {
     Buffer b;
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = size;
@@ -278,7 +278,10 @@ Buffer Device::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool ho
     const VkMemoryPropertyFlags want = host_visible
         ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
         : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    s32 type = FindMemoryType(req.memoryTypeBits, want);
+    s32 type = -1;
+    if (host_visible && cached)
+        type = FindMemoryType(req.memoryTypeBits, want | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (type < 0) type = FindMemoryType(req.memoryTypeBits, want);
     if (type < 0 && !host_visible) type = FindMemoryType(req.memoryTypeBits, 0);
     if (type < 0) { vkDestroyBuffer(m_device, b.buffer, nullptr); return {}; }
     VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};

@@ -468,12 +468,13 @@ std::string Gpu::RendererName() const {
     return "Software";
 }
 
-bool Gpu::ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba) {
+bool Gpu::ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba,
+                         PresentRegion& region) {
 #ifdef NEXO2_HAS_VULKAN
     if (!m_hw) return false;
     const std::vector<u64> vas = m_mm.ReverseTranslateAll(cpu_address);
     for (u64 va : vas)
-        if (m_hw->ReadForPresent(va, width, height, format, rgba)) return true;
+        if (m_hw->ReadForPresent(va, width, height, format, rgba, region)) return true;
     // Se presentara desde la memoria: antes hay que escribir en ella lo dibujado con Vulkan
     // (block linear: el buffer ocupa algo mas que ancho x alto x 4)
     const u64 bytes = ((u64(width) * 4 + 63) & ~63ull) * ((u64(height) + 127) & ~127ull);
@@ -490,7 +491,7 @@ bool Gpu::ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std
     }
     return false;
 #else
-    (void)cpu_address; (void)width; (void)height; (void)format; (void)rgba;
+    (void)cpu_address; (void)width; (void)height; (void)format; (void)rgba; (void)region;
     return false;
 #endif
 }

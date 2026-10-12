@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QSortFilterProxyModel>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -134,16 +135,18 @@ void CardDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt, const QMo
     p->setRenderHint(QPainter::SmoothPixmapTransform);
     // Tarjeta de ancho fijo, centrada en su celda (la cuadricula reparte el ancho sobrante)
     QRectF card(opt.rect.center().x() - CARD_W / 2.0 + 0.5, opt.rect.top() + GAP, CARD_W, CARD_H);
-    if (hover) card.translate(0, -3);   // la tarjeta "se levanta" con el raton encima
+    if (hover) card.translate(0, -2);   // la tarjeta "se levanta" con el raton encima (sin salir de su celda)
 
     // Sombra y fondo
     if (hover || sel) {
-        for (int i = 8; i > 0; --i) {
+        // Sombra/halo: como mucho 6 px alrededor, siempre dentro de la celda (GAP = 14): si se
+        // saliera, al quitar el raton quedarian restos sin borrar
+        for (int i = 6; i > 0; --i) {
             QColor c = sel ? Color::Accent : QColor(0, 0, 0);
-            c.setAlpha(sel ? 7 : 12);
+            c.setAlpha(sel ? 8 : 14);
             p->setPen(::Qt::NoPen);
             p->setBrush(c);
-            p->drawRoundedRect(card.adjusted(-i, -i + 4, i, i + 4), 16 + i, 16 + i);
+            p->drawRoundedRect(card.adjusted(-i, -i + 3, i, i + 3), 16 + i, 16 + i);
         }
     }
     p->setPen(::Qt::NoPen);
@@ -152,12 +155,28 @@ void CardDelegate::paint(QPainter* p, const QStyleOptionViewItem& opt, const QMo
 
     // Caratula cuadrada
     const QRectF cover(card.left() + 10, card.top() + 10, card.width() - 20, card.width() - 20);
-    QPainterPath clip;
-    clip.addRoundedRect(cover, 12, 12);
-    p->setClipPath(clip);
-    p->drawImage(cover, g->cover);
-    if (hover) p->fillRect(cover, QColor(255, 255, 255, 10));
-    p->setClipping(false);
+    // Escalar y recortar la caratula cuesta: se hace la primera vez y se guarda
+    const qreal dpr = p->device()->devicePixelRatioF();
+    const QSize px(int(cover.width() * dpr), int(cover.height() * dpr));
+    if (g->card.size() != px) {
+        QPixmap pm(px);
+        pm.fill(::Qt::transparent);
+        QPainter cp(&pm);
+        cp.setRenderHint(QPainter::Antialiasing);
+        cp.setRenderHint(QPainter::SmoothPixmapTransform);
+        QPainterPath clip;
+        clip.addRoundedRect(QRectF(0, 0, px.width(), px.height()), 12 * dpr, 12 * dpr);
+        cp.setClipPath(clip);
+        cp.drawImage(QRectF(0, 0, px.width(), px.height()), g->cover);
+        cp.end();
+        g->card = pm;
+    }
+    p->drawPixmap(cover, g->card, QRectF(0, 0, px.width(), px.height()));
+    if (hover) {
+        QPainterPath clip;
+        clip.addRoundedRect(cover, 12, 12);
+        p->fillPath(clip, QColor(255, 255, 255, 10));
+    }
 
     // Etiqueta del formato (arriba a la derecha)
     QFont small = opt.font;
@@ -280,6 +299,10 @@ LibraryPage::LibraryPage(QWidget* parent) : QWidget(parent) {
     m_view->setMouseTracking(true);
     m_view->setSelectionMode(QAbstractItemView::SingleSelection);
     m_view->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    // Barra siempre visible: si apareciera y desapareciera, el ancho cambiaria, las columnas se
+    // recolocarian y la cuadricula parpadearia
+    m_view->setVerticalScrollBarPolicy(::Qt::ScrollBarAlwaysOn);
+    m_view->setGridSize(QSize(CardDelegate::CARD_W + 2 * CardDelegate::GAP, CardDelegate::CARD_H + 2 * CardDelegate::GAP));
     m_view->setContextMenuPolicy(::Qt::CustomContextMenu);
     m_view->viewport()->setAttribute(::Qt::WA_Hover);
     m_view->setCursor(::Qt::PointingHandCursor);
@@ -327,7 +350,28 @@ LibraryPage::LibraryPage(QWidget* parent) : QWidget(parent) {
     m_details->setObjectName("details");
     m_details->setAttribute(::Qt::WA_StyledBackground);
     m_details->setStyleSheet("#details { background: #0F131B; border-left: 1px solid #1A202C; }");
-    auto* dv = new QVBoxLayout(m_details);
+    // El panel esta siempre (si apareciera y desapareciera, la cuadricula cambiaria de ancho)
+    auto* dOuter = new QVBoxLayout(m_details);
+    dOuter->setContentsMargins(0, 0, 0, 0);
+    m_detailsStack = new QStackedWidget;
+    dOuter->addWidget(m_detailsStack);
+    auto* none = new QWidget;
+    auto* nv = new QVBoxLayout(none);
+    nv->addStretch();
+    auto* noneIcon = new QLabel;
+    noneIcon->setPixmap(MakeIcon(Icon::Gamepad, Color::TextFaint, 56).pixmap(56, 56));
+    noneIcon->setAlignment(::Qt::AlignCenter);
+    auto* noneText = new QLabel("Elige un juego para ver\nsus detalles");
+    noneText->setObjectName("faint");
+    noneText->setAlignment(::Qt::AlignCenter);
+    nv->addWidget(noneIcon);
+    nv->addSpacing(6);
+    nv->addWidget(noneText);
+    nv->addStretch();
+    m_detailsStack->addWidget(none);
+    auto* gameBox = new QWidget;
+    m_detailsStack->addWidget(gameBox);
+    auto* dv = new QVBoxLayout(gameBox);
     dv->setContentsMargins(22, 30, 22, 26);
     dv->setSpacing(10);
     m_dCover = new QLabel;
@@ -361,7 +405,6 @@ LibraryPage::LibraryPage(QWidget* parent) : QWidget(parent) {
     dv->addWidget(m_dPlay);
     dv->addWidget(openLoc);
     root->addWidget(m_details);
-    m_details->hide();
 
     connect(m_dPlay, &QPushButton::clicked, this, [this] { if (!m_selectedPath.isEmpty()) emit PlayRequested(m_selectedPath); });
     connect(openLoc, &QPushButton::clicked, this, [this] {
@@ -416,12 +459,17 @@ void LibraryPage::SetGames(std::vector<Frontend::GameEntry> games) {
 void LibraryPage::FocusSearch() { m_search->setFocus(); m_search->selectAll(); }
 
 bool LibraryPage::eventFilter(QObject* obj, QEvent* e) {
-    if (obj == m_view->viewport() && e->type() == QEvent::Resize) {
-        const int w = m_view->viewport()->width() - 2;
-        const int cell = CardDelegate::CARD_W + 2 * CardDelegate::GAP;
-        const int cols = std::max(1, w / cell);
-        const QSize grid(std::max(cell, w / cols), CardDelegate::CARD_H + 2 * CardDelegate::GAP);
-        if (m_view->gridSize() != grid) m_view->setGridSize(grid);
+    if (obj == m_view->viewport() && e->type() == QEvent::Resize && m_view->viewport()->width() != m_lastViewport.width()) {
+        m_lastViewport = m_view->viewport()->size();
+        // Despues de este evento (cambiar la cuadricula dentro de un resize la vuelve a recolocar
+        // mientras se dibuja)
+        QTimer::singleShot(0, this, [this] {
+            const int w = m_view->viewport()->width() - 2;
+            const int cell = CardDelegate::CARD_W + 2 * CardDelegate::GAP;
+            const int cols = std::max(1, w / cell);
+            const QSize grid(std::max(cell, w / cols), CardDelegate::CARD_H + 2 * CardDelegate::GAP);
+            if (m_view->gridSize() != grid) m_view->setGridSize(grid);
+        });
     }
     return QWidget::eventFilter(obj, e);
 }
@@ -439,7 +487,7 @@ void LibraryPage::UpdateCount() {
 }
 
 void LibraryPage::ShowDetails(const LibraryGame* g) {
-    if (!g) { m_details->hide(); m_selectedPath.clear(); return; }
+    if (!g) { m_detailsStack->setCurrentIndex(0); m_selectedPath.clear(); return; }
     m_selectedPath = QString::fromUtf8(g->entry.path.c_str());
     m_dCover->setPixmap(MakeHero(g->cover, 286, 300, devicePixelRatioF()));
     m_dTitle->setText(QString::fromUtf8(g->entry.title.c_str()));
@@ -449,7 +497,7 @@ void LibraryPage::ShowDetails(const LibraryGame* g) {
     if (g->entry.size) meta += "&nbsp;&nbsp;&nbsp;" + HumanSize(g->entry.size);
     m_dMeta->setText(meta);
     m_dPath->setText(m_selectedPath);
-    m_details->show();
+    m_detailsStack->setCurrentIndex(1);
 }
 
 } // namespace NeXo2::QtUi

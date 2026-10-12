@@ -389,14 +389,21 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
                     bool ok = false;
                     // (NVN pone los dos buffers en un solo bloque nvmap: el segundo va desplazado)
                     if (address && info.layout == 3) {
+                        GPU::PresentRegion region;
+                        if (crop_r > crop_l && crop_b > crop_t && crop_l >= 0 && crop_t >= 0) {
+                            region.x = u32(crop_l); region.y = u32(crop_t);
+                            region.w = u32(crop_r - crop_l); region.h = u32(crop_b - crop_t);
+                        }
+                        region.flip_h = transform & 1;
+                        region.flip_v = (transform & 2) != 0;
                         std::vector<u32> rgba;
-                        if (gpu.ReadForPresent(address + info.offset, info.width, info.height, info.format, rgba)) {
-                            display.PresentRgba(info.width, info.height, std::move(rgba));
+                        if (gpu.ReadForPresent(address + info.offset, info.width, info.height, info.format, rgba, region)) {
+                            display.PresentRgba(region.w, region.h, std::move(rgba));   // ya recortada y volteada
                             ok = true;
                         }
                     }
-                    if (!ok) ok = display.PresentAt(memory, info, address);
-                    if (ok) display.CropAndTransformFrame(crop_l, crop_t, crop_r, crop_b, transform);
+                    if (!ok && display.PresentAt(memory, info, address))
+                        ok = true, display.CropAndTransformFrame(crop_l, crop_t, crop_r, crop_b, transform);
                     gpu.GetStats().present_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t0).count());
                     if (ok && first)

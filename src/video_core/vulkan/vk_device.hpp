@@ -54,7 +54,9 @@ public:
 
     // Memoria: tipo que cumpla 'bits' (de vkGet*MemoryRequirements) y 'props'. -1 si no hay.
     s32 FindMemoryType(u32 bits, VkMemoryPropertyFlags props) const;
-    Buffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_visible);
+    // cached: para leer desde la CPU lo que escribe la GPU. La memoria visible sin cache (la
+    // primera que suele haber en NVIDIA) es muy lenta de leer: 8 MB tardaban mas de 10 ms.
+    Buffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool host_visible, bool cached = false);
     void DestroyBuffer(Buffer& b);
 
     // Graba comandos en 'record' y los ejecuta ya, esperando a que terminen

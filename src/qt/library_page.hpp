@@ -3,6 +3,7 @@
 // panel a la derecha con los detalles del elegido y el boton Jugar.
 #include <QAbstractListModel>
 #include <QImage>
+#include <QPixmap>
 #include <QStyledItemDelegate>
 #include <QWidget>
 #include <vector>
@@ -21,6 +22,7 @@ struct LibraryGame {
     Frontend::GameEntry entry;
     QImage cover;       // icono del juego (vacio si no tiene)
     QString format;     // "NSP", "XCI", "NRO", "Carpeta"
+    mutable QPixmap card;   // caratula ya escalada y redondeada para la tarjeta (se hace una vez)
 };
 
 class LibraryModel : public QAbstractListModel {
@@ -41,7 +43,7 @@ public:
     explicit CardDelegate(QObject* parent = nullptr) : QStyledItemDelegate(parent) {}
     void paint(QPainter* p, const QStyleOptionViewItem& opt, const QModelIndex& index) const override;
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override { return {CARD_W + 2 * GAP, CARD_H + 2 * GAP}; }
-    static constexpr int CARD_W = 188, CARD_H = 262, GAP = 10;
+    static constexpr int CARD_W = 188, CARD_H = 262, GAP = 14;
 };
 
 class LibraryPage : public QWidget {
@@ -69,6 +71,8 @@ private:
     QStackedWidget* m_body;      // la cuadricula o el mensaje de "no hay juegos"
     // Panel de detalles
     QWidget* m_details;
+    QStackedWidget* m_detailsStack;   // 0 = nada elegido, 1 = el juego
+    QSize m_lastViewport;
     QLabel* m_dCover;
     QLabel* m_dTitle;
     QLabel* m_dAuthor;

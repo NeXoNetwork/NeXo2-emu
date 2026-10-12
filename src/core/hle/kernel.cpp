@@ -75,6 +75,11 @@ void Kernel::RegisterDefaultServices() {
     m_services.Register("audren:u", [] { return std::make_shared<AudioRendererManager>(); });
     m_services.Register("audout:u", [] { return std::make_shared<AudioOutManager>(); });
     m_services.Register("apm",      [] { return std::make_shared<ApmManager>(); });
+    m_services.Register("apm:p",    [] { return std::make_shared<ApmManager>(); });   // (postal)
+    // Servicios de sistema que algunos homebrew abren pero no necesitan de verdad (pipensx):
+    // contestan OK a todo (LenientService) en vez de parar el programa
+    for (const char* n : {"hid:sys", "lbl", "ins:s", "ins:r"})
+        m_services.Register(n, [n] { return std::make_shared<LenientService>(n); });
     m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
     m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
     m_services.Register("time:u",   [] { return std::make_shared<TimeService>("time:u"); });
@@ -566,6 +571,8 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 15: value = STACK_REGION_SIZE; break;
         case 16: case 17: value = 0; break;                    // SystemResourceSize total/usado
         case 18: value = m_programId; break;                   // ProgramId (el del main.npdm; inventado en homebrew)
+        case 19: value = 0; break;                             // InitialProcessIdRange (solo 1 proceso)
+        case 20: value = 0; break;                             // UserExceptionContextAddress
         case 21: value = TOTAL_MEMORY; break;                  // TotalNonSystemMemorySize
         case 22: value = m_imageSize + m_mainStackSize + m_heapSize; break;
         case 23: value = 1; break;                             // IsApplication

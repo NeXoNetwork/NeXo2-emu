@@ -55,7 +55,7 @@ public:
     void PrepareSoftwareDraw(const u32* regs);
 
     // Imagen para presentar leida directamente del render target (ver Gpu::ReadForPresent)
-    bool ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba);
+    bool ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba, PresentRegion& region);
     std::string DescribeImages() const;   // imagenes de la GPU (para el registro)
     // Termina el trabajo pendiente y escribe en memoria las imagenes cambiadas (las de
     // profundidad solo si 'depth')
@@ -84,6 +84,9 @@ public:
         u64 ns_draw = 0;       // Draw entero
         u64 ns_vertex = 0;     // shader de vertices en la CPU
         u64 ns_texture = 0;    // preparar texturas (decodificar y subir)
+        u64 ns_tex_rt = 0, ns_tex_native = 0, ns_tex_decoded = 0;   // ...de ello: render targets, nativas, decodificadas
+        u64 tex_rt = 0, tex_native = 0, tex_decoded = 0;            // cuantas veces cada tipo
+        u64 ns_tex_quick = 0, ns_tex_full = 0, tex_full = 0;        // nativas: hash rapido, lectura entera
         u64 ns_images = 0;     // render targets: comprobar hash y subir
         u64 ns_wait = 0;       // esperando a la GPU (Submit)
         u64 ns_download = 0;   // escribir imagenes en memoria (sin la espera)
@@ -104,6 +107,8 @@ private:
         bool gpu_dirty = false;   // la imagen tiene cosas que la memoria aun no
         bool mem_dirty = true;    // la memoria tiene cosas que la imagen aun no
         u64 hash = 0;             // hash de la memoria la ultima vez que coincidian
+        u64 quick = 0;            // hash rapido (32 bytes de cada pagina de 4 KB) de esa misma memoria
+        u64 full_epoch = 0;       // envio en el que se hizo el hash completo
         bool hash_known = false;  // false: borrada/copiada entera en la GPU sin pasar por memoria;
                                   // lo que haya en memoria es viejo y no cuenta como cambio de la CPU
         u64 epoch = 0;            // envio en el que se comprobo el hash
@@ -116,6 +121,7 @@ private:
     bool CreateImage(Image& img);
     void DestroyImage(Image& img);
     void Upload(Image& img);
+    u64 QuickRangeHash(u64 lo, u64 hi);   // 32 bytes de cada pagina de 4 KB
     void Download(const std::vector<Image*>& imgs);
     void FlushImages(const std::vector<Image*>& imgs);
 

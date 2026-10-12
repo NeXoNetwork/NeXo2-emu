@@ -67,7 +67,7 @@ jobs:
             echo "$msg"
             echo '```'
             echo
-            echo "Descomprime el .zip, pon tus .nro en sdmc/switch y abre NeXo2.exe."
+            echo "Descomprime el .zip y abre NeXo2-Qt.exe. Homebrew: los .nro van en sdmc/switch. NSP/XCI: tu prod.keys en keys/."
           } > notes.md
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true   # por si se repite la ejecucion
           gh release create "$tag" *.zip *.zip.sha256 \

@@ -1,6 +1,7 @@
 # Compilacion de Windows compartida por prerelease.yml y release-windows.yml.
 # Compila con Visual Studio 2022 (todas las dependencias son submodulos: no hace falta
-# vcpkg), pasa los tests y deja un .zip listo para descargar como artefacto.
+# vcpkg; Qt 6 se instala con install-qt-action y queda en cache), pasa los tests y deja un
+# .zip con NeXo2-Qt.exe (para jugar) y NeXo2.exe (depuracion) listo para descargar.
 name: Compilar (Windows)
 
 on:
@@ -25,9 +26,18 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Instalar Qt 6 (para NeXo2-Qt.exe)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          cache: true
+
       - name: Configurar
         shell: pwsh
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DNEXO2_VERSION=${{ inputs.version }}"
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 "-DNEXO2_VERSION=${{ inputs.version }}" "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR"
 
       - name: Compilar
         shell: pwsh
@@ -50,10 +60,15 @@ jobs:
         run: |
           $dist = "dist\${{ inputs.package }}"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          Copy-Item build\Release\NeXo2.exe, build\Release\SDL3.dll $dist
+          if (-not (Test-Path build\Release\NeXo2-Qt.exe)) { throw "No se compilo NeXo2-Qt.exe (no se encontro Qt)" }
+          Copy-Item build\Release\NeXo2-Qt.exe, build\Release\NeXo2.exe, build\Release\SDL3.dll $dist
+          # Las DLL y plugins de Qt junto a NeXo2-Qt.exe
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler --no-opengl-sw "$dist\NeXo2-Qt.exe"
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt fallo" }
           Copy-Item build\Release\assets $dist -Recurse
           Copy-Item LICENSE, README.md $dist
           New-Item -ItemType Directory -Force -Path "$dist\sdmc\switch" | Out-Null   # tarjeta SD vacia: los .nro van aqui
+          New-Item -ItemType Directory -Force -Path "$dist\keys" | Out-Null           # prod.keys del usuario (para NSP/XCI)
           Compress-Archive -Path $dist -DestinationPath "${{ inputs.package }}.zip"
           (Get-FileHash "${{ inputs.package }}.zip" -Algorithm SHA256).Hash.ToLower() + "  ${{ inputs.package }}.zip" |
             Out-File "${{ inputs.package }}.zip.sha256" -Encoding ascii

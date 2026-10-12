@@ -111,6 +111,13 @@ std::optional<u64> GpuMemoryManager::ReverseTranslate(u64 cpu) const {
     return std::nullopt;
 }
 
+std::vector<u64> GpuMemoryManager::ReverseTranslateAll(u64 cpu) const {
+    std::vector<u64> out;
+    for (const auto& [va, m] : m_maps)
+        if (cpu >= m.cpu && cpu < m.cpu + m.size) out.push_back(va + (cpu - m.cpu));
+    return out;
+}
+
 void GpuMemoryManager::ReadBlock(u64 va, void* dst, size_t size) const {
     if (m_hook) m_hook->BeforeAccess(va, size, false);
     auto* out = static_cast<u8*>(dst);
@@ -464,8 +471,14 @@ std::string Gpu::RendererName() const {
 bool Gpu::ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std::vector<u32>& rgba) {
 #ifdef NEXO2_HAS_VULKAN
     if (!m_hw) return false;
-    const auto va = m_mm.ReverseTranslate(cpu_address);
-    return va && m_hw->ReadForPresent(*va, width, height, format, rgba);
+    const std::vector<u64> vas = m_mm.ReverseTranslateAll(cpu_address);
+    for (u64 va : vas)
+        if (m_hw->ReadForPresent(va, width, height, format, rgba)) return true;
+    // Se presentara desde la memoria: antes hay que escribir en ella lo dibujado con Vulkan
+    // (block linear: el buffer ocupa algo mas que ancho x alto x 4)
+    const u64 bytes = ((u64(width) * 4 + 63) & ~63ull) * ((u64(height) + 127) & ~127ull);
+    for (u64 va : vas) m_hw->FlushRegion(va, bytes);
+    return false;
 #else
     (void)cpu_address; (void)width; (void)height; (void)format; (void)rgba;
     return false;

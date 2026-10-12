@@ -86,6 +86,9 @@ public:
     // Al reves: la direccion de la GPU de una direccion de la memoria del programa (la primera
     // proyeccion que la contiene)
     std::optional<u64> ReverseTranslate(u64 cpu) const;
+    // Todas: la misma memoria puede estar proyectada varias veces (NVN lo hace con los buffers
+    // de pantalla: una vez para la CPU y otra con el "kind" de la GPU)
+    std::vector<u64> ReverseTranslateAll(u64 cpu) const;
 
     void ReadBlock(u64 va, void* dst, size_t size) const;
     void WriteBlock(u64 va, const void* src, size_t size);

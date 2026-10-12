@@ -671,14 +671,41 @@ void VulkanRasterizer::Flush(bool depth) {
 
 bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba) {
     if (format != 1) return false;   // RGBA8888 (lo normal); el resto, por memoria
+    // La imagen de color que empieza en esa direccion. Puede ser sRGB (mismos bytes) y de otro
+    // tamano que el buffer de vi (un juego dibuja 1280x720 en un buffer de 1920x1080): se
+    // prefiere la del tamano exacto y si no, la mas grande.
     Image* img = nullptr;
-    for (auto& im : m_images)
-        if (!im->depth && im->surf.address == va && im->surf.width == width && im->surf.height == height &&
-            im->format == VK_FORMAT_R8G8B8A8_UNORM)
+    for (auto& im : m_images) {
+        if (im->depth || im->surf.address != va) continue;
+        if (im->format != VK_FORMAT_R8G8B8A8_UNORM && im->format != VK_FORMAT_R8G8B8A8_SRGB) continue;
+        const bool exact = im->surf.width == width && im->surf.height == height;
+        if (!img || exact || (!(img->surf.width == width && img->surf.height == height) &&
+                              u64(im->surf.width) * im->surf.height > u64(img->surf.width) * img->surf.height))
             img = im.get();
-    if (!img || img->mem_dirty) return false;   // la memoria es mas nueva: presentar desde ella
+    }
+    if (!img || img->mem_dirty) {   // no esta en la GPU, o la memoria es mas nueva: presentar desde ella
+        // En el registro cada situacion distinta (como mucho 6), para ver donde dibuja el juego
+        static std::string last;
+        static int told = 0;
+        {
+            std::string list;
+            const u64 span = ((u64(width) * 4 + 63) & ~63ull) * ((u64(height) + 127) & ~127ull);
+            for (auto& im : m_images)
+                if (im->lo < va + span && im->hi > va)
+                    list += " [+" + std::to_string(s64(im->surf.address) - s64(va)) + "] " + std::to_string(im->surf.width) + "x" + std::to_string(im->surf.height) + " fmt " +
+                            std::to_string(int(im->format)) + (im->depth ? " prof" : "") + (im->mem_dirty ? " mem" : "");
+            char where[32];
+            std::snprintf(where, sizeof(where), "0x%llX", (unsigned long long)va);
+            const std::string msg = "[Vulkan] Presentar " + std::to_string(width) + "x" + std::to_string(height) +
+                " de " + where + " desde memoria (imagenes en esa direccion:" + (list.empty() ? " ninguna" : list) +
+                "; imagenes en total " + std::to_string(m_images.size()) + ")";
+            if (msg != last && told < 6) { last = msg; ++told; Common::Logger::Log(Common::Logger::Level::Info, msg); }
+        }
+        return false;
+    }
     Timer t(m_stats.ns_present);
-    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
+    const u32 cw = std::min(width, img->surf.width), ch = std::min(height, img->surf.height);
+    const VkDeviceSize bytes = VkDeviceSize(cw) * ch * 4;
     if (!m_readback.buffer || m_readback.size < bytes) {
         Submit();
         EnsureBuffer(m_readback, AlignUp(bytes, 1 << 20), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -686,12 +713,13 @@ bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format,
     TransferBarrier();
     VkBufferImageCopy r{};
     r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    r.imageExtent = {width, height, 1};
+    r.imageExtent = {cw, ch, 1};
     vkCmdCopyImageToBuffer(Cmd(), img->image, VK_IMAGE_LAYOUT_GENERAL, m_readback.buffer, 1, &r);
     FullBarrier(Cmd());
     Submit();
-    rgba.resize(size_t(width) * height);
-    std::memcpy(rgba.data(), m_readback.mapped, size_t(bytes));
+    rgba.assign(size_t(width) * height, 0xFF000000u);
+    const u32* src = static_cast<const u32*>(m_readback.mapped);
+    for (u32 y = 0; y < ch; ++y) std::memcpy(&rgba[size_t(y) * width], src + size_t(y) * cw, size_t(cw) * 4);
     ++m_stats.presents;
     return true;
 }

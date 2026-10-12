@@ -105,6 +105,7 @@ struct KThread final : KObject {
     u64  arbiter_addr = 0;       // Wait::Arbiter (svcWaitForAddress)
     u32  pending_result = 0;     // resultado a devolver al conseguir el mutex tras un CondVar
     bool cancel_pending = false; // svcCancelSynchronization antes de esperar
+    bool paused = false;         // svcSetThreadActivity(1): no se ejecuta hasta que lo reanuden
 
     u64  last_run = 0;           // reparto justo entre hilos de la misma prioridad
     // Varios nucleos: en que nucleo esta cargado ahora (-1 = en ninguno, registros en ctx).

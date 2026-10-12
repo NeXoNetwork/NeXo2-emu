@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 
 namespace NeXo2::HLE {
@@ -276,7 +277,7 @@ KThread* Kernel::PickNext() {
         const s32 core = (m_currentCore + i) % NUM_CORES;
         KThread* best = nullptr;
         for (auto& t : m_threads) {
-            if (t->state != KThread::State::Ready || t->core != core) continue;
+            if (t->state != KThread::State::Ready || t->paused || t->core != core) continue;
             if (!best || t->priority < best->priority ||
                 (t->priority == best->priority && t->last_run < best->last_run))
                 best = t.get();
@@ -416,6 +417,57 @@ void Kernel::SvcGetThreadPriority(CPUState& s) {
     if (!t) { SetResult(s, Result::InvalidHandle); return; }
     SetResult(s, Result::Success);
     s.x[1] = static_cast<u32>(t->priority);
+}
+
+// svcSetThreadActivity(handle = W0, actividad = W1): 1 = pausar el hilo, 0 = reanudarlo.
+// Los recolectores de basura (Unity/Mono) paran los hilos asi para leer sus registros.
+void Kernel::SvcSetThreadActivity(CPUState& s) {
+    auto t = ThreadFromHandle(static_cast<u32>(s.x[0]));
+    const u32 activity = static_cast<u32>(s.x[1]);
+    if (!t) { SetResult(s, Result::InvalidHandle); return; }
+    if (activity > 1) { SetResult(s, Result::InvalidEnumValue); return; }
+    if (t == Cur()) { SetResult(s, 0xF401 /* Busy: no puede pausarse a si mismo */); return; }
+    if (t->state == KThread::State::Terminated) { SetResult(s, Result::InvalidState); return; }
+    t->paused = activity == 1;
+    if (t->paused && t->on_core >= 0)
+        if (auto* cpu = CoreCpu(t->on_core)) cpu->RequestStop();   // que deje su nucleo cuanto antes
+    if (!t->paused) m_coreCv.notify_all();
+    SetResult(s, Result::Success);
+}
+
+// svcGetThreadContext3(destino = X0, handle = W1): registros de un hilo pausado (0x320 bytes:
+// X0-X28, FP, LR, SP, PC, PSTATE, V0-V31, FPCR, FPSR, TPIDR)
+void Kernel::SvcGetThreadContext3(CPUState& s) {
+    const u64 out = s.x[0];
+    auto t = ThreadFromHandle(static_cast<u32>(s.x[1]));
+    if (!t) { SetResult(s, Result::InvalidHandle); return; }
+    if (t == Cur()) { SetResult(s, 0xF401); return; }
+    // Si aun corre en otro nucleo, esperar a que lo deje (soltando el candado)
+    if (t->on_core >= 0 && ReleaseLockForWait()) {
+        for (int i = 0; i < 2000 && t->on_core >= 0; ++i) {
+            if (auto* cpu = CoreCpu(t->on_core)) cpu->RequestStop();
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        m_lock.lock();
+    }
+    if (t->on_core >= 0) { SetResult(s, 0xF401); return; }
+    const Core::CPUState& c = t->ctx;
+    for (u32 i = 0; i < 29; ++i) m_memory.Write<u64>(out + 8 * i, c.x[i]);
+    m_memory.Write<u64>(out + 0xE8, c.x[29]);
+    m_memory.Write<u64>(out + 0xF0, c.x[30]);
+    m_memory.Write<u64>(out + 0xF8, c.sp);
+    m_memory.Write<u64>(out + 0x100, c.pc);
+    const u32 pstate = (u32(c.flags.n) << 31) | (u32(c.flags.z) << 30) | (u32(c.flags.c) << 29) | (u32(c.flags.v) << 28);
+    m_memory.Write<u32>(out + 0x108, pstate);
+    m_memory.Write<u32>(out + 0x10C, 0);
+    for (u32 i = 0; i < 32; ++i) {
+        m_memory.Write<u64>(out + 0x110 + 16 * i, c.v[i].lo);
+        m_memory.Write<u64>(out + 0x118 + 16 * i, c.v[i].hi);
+    }
+    m_memory.Write<u32>(out + 0x310, u32(c.fpcr));
+    m_memory.Write<u32>(out + 0x314, u32(c.fpsr));
+    m_memory.Write<u64>(out + 0x318, c.tpidr_el0);
+    SetResult(s, Result::Success);
 }
 
 // svcSetThreadPriority(handle = W0, prioridad = W1)
@@ -761,7 +813,7 @@ void Kernel::StopCores() {
 KThread* Kernel::PickNextOnCore(s32 core) {
     KThread* best = nullptr;
     for (auto& t : m_threads) {
-        if (t->state != KThread::State::Ready || t->core != core || t->on_core >= 0) continue;
+        if (t->state != KThread::State::Ready || t->paused || t->core != core || t->on_core >= 0) continue;
         if (!best || t->priority < best->priority ||
             (t->priority == best->priority && t->last_run < best->last_run))
             best = t.get();
@@ -774,7 +826,7 @@ KThread* Kernel::PickNextOnCore(s32 core) {
     // ejecutar a los demas de su nucleo aunque haya nucleos parados (GTA Chinatown Wars).
     KThread* steal = nullptr;
     for (auto& t : m_threads) {
-        if (t->state != KThread::State::Ready || t->core == core || t->on_core >= 0) continue;
+        if (t->state != KThread::State::Ready || t->paused || t->core == core || t->on_core >= 0) continue;
         if (!((t->affinity >> core) & 1)) continue;
         const auto& running = m_coreThread[size_t(t->core)];
         if (!running || running->priority > t->priority) continue;   // en su nucleo le toca ya

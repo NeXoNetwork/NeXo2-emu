@@ -24,6 +24,7 @@ NpdmResult ParseNpdm(const std::vector<u8>& f) {
     i.address_space = (flags >> 1) & 7;
     i.main_priority = Get<u8>(f, 0x0E);
     i.main_core = Get<u8>(f, 0x0F);
+    i.system_resource_size = Get<u32>(f, 0x14);
     i.main_stack_size = Get<u32>(f, 0x1C);
     for (size_t k = 0; k < 0x10 && f[0x20 + k]; ++k) i.name += char(f[0x20 + k]);
 

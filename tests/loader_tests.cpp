@@ -122,11 +122,11 @@ TEST(Nro_RejectsInvalidFiles) {
 
 TEST(Kernel_UnknownSvcStopsCpu) {
     Core::System sys;
-    const u32 program[] = { 0xD4000581u /* svc #0x2C */ };
+    const u32 program[] = { 0xD40005C1u /* svc #0x2E */ };
     sys.LoadRawProgram(program, 1, HLE::Layout::CODE_BASE);
     sys.Run(10);
     CHECK(sys.GetCpu().IsHalted());
-    CHECK(sys.GetCpu().GetHaltReason().find("MapPhysicalMemory") != std::string::npos);
+    CHECK(sys.GetCpu().GetHaltReason().find("GetDebugFutureThreadInfo") != std::string::npos);
     CHECK(std::string(HLE::Kernel::SvcName(0x29)) == "GetInfo");
     CHECK(std::string(HLE::Kernel::SvcName(0x6F)) == "GetSystemInfo");
     CHECK(std::string(HLE::Kernel::SvcName(0x7F)) == "CallSecureMonitor");
@@ -231,7 +231,8 @@ void WriteFile(const std::filesystem::path& p, const std::vector<u8>& d) {
 TEST(Game_LoadsExtractedExefs) {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / "nexo2_test_game";
-    fs::remove_all(dir);
+    std::error_code ec0;
+    fs::remove_all(dir, ec0);
     fs::create_directories(dir / "exefs");
     WriteFile(dir / "exefs" / "main", NroToNso(ReadTestFile("hello.nro")));
     WriteFile(dir / "exefs" / "main.npdm", MakeNpdm(49, 0x40000, 0x0100ABCD00000000ULL));
@@ -239,6 +240,7 @@ TEST(Game_LoadsExtractedExefs) {
 
     CHECK(Core::System::IsGameFolder(dir.string()));
     CHECK(!Core::System::IsGameFolder(fs::temp_directory_path().string()));
+    {   // (el sistema tiene romfs.bin abierto: en Windows no se puede borrar hasta cerrarlo)
     Core::System sys;
     CHECK(sys.LoadGame(dir.string()));
     auto& k = sys.GetKernel();
@@ -264,5 +266,7 @@ TEST(Game_LoadsExtractedExefs) {
 
     sys.Restart();                                             // vuelve a cargar el juego
     CHECK(sys.GetKernel().IsApplication());
-    fs::remove_all(dir);
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }

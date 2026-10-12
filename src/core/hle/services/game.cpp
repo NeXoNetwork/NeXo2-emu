@@ -197,6 +197,10 @@ AocService::AocService() : LenientService("aoc:u") {
     RegisterCommand(101, "CreatePermanentEcPurchasedEventManager", Open<PurchaseEventManager>());
 }
 
+ErrorContextWriter::ErrorContextWriter() : LenientService("ectx:aw") {
+    RegisterCommand(0, "CreateContextRegistrar", Open<LenientService>("ectx:IContextRegistrar"));
+}
+
 FatalService::FatalService() : ServiceObject("fatal:u") {
     auto fatal = [](IpcContext& ctx) {
         const u32 result = u32(ctx.Pop<u64>());

@@ -21,6 +21,7 @@ struct NpdmInfo {
     u8   main_priority = 44;
     u8   main_core = 0;
     u32  main_stack_size = 0x100000;
+    u32  system_resource_size = 0;   // memoria del sistema para el proceso (svcMapPhysicalMemory)
     u64  program_id = 0;
     std::string name;
 };

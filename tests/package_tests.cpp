@@ -1,6 +1,7 @@
 // Tests de NSP / NCA / RomFS: se fabrica un NSP de prueba con claves inventadas (las de una
 // consola de verdad no pueden ir en el repositorio) y se comprueba que NeXo lo abre igual que
 // abriria uno real: cabecera con AES-XTS, area de claves, secciones con AES-CTR, PFS0 y RomFS.
+#include <optional>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -32,6 +33,33 @@ template <typename T> void Put(Bytes& b, size_t off, T v) {
     std::memcpy(&b[off], &v, sizeof(T));
 }
 void Align(Bytes& b, size_t a) { b.resize((b.size() + a - 1) / a * a, 0); }
+
+// HFS0 (particiones de un XCI): como PFS0 pero con entradas de 0x40 (con hash)
+Bytes Hfs0(const std::map<std::string, Bytes>& files) {
+    Bytes strings;
+    std::vector<u32> name_off;
+    for (auto& [n, d] : files) { name_off.push_back(u32(strings.size())); strings.insert(strings.end(), n.begin(), n.end()); strings.push_back(0); }
+    Align(strings, 0x20);
+    Bytes out(0x10 + files.size() * 0x40, 0);
+    std::memcpy(out.data(), "HFS0", 4);
+    Put<u32>(out, 4, u32(files.size()));
+    Put<u32>(out, 8, u32(strings.size()));
+    u64 off = 0;
+    size_t i = 0;
+    Bytes data;
+    for (auto& [n, d] : files) {
+        const size_t e = 0x10 + i * 0x40;
+        Put<u64>(out, e, off);
+        Put<u64>(out, e + 8, d.size());
+        Put<u32>(out, e + 16, name_off[i]);
+        data.insert(data.end(), d.begin(), d.end());
+        off += d.size();
+        ++i;
+    }
+    out.insert(out.end(), strings.begin(), strings.end());
+    out.insert(out.end(), data.begin(), data.end());
+    return out;
+}
 
 Bytes Pfs0(const std::map<std::string, Bytes>& files) {
     Bytes strings;
@@ -202,7 +230,8 @@ TEST(Crypto_AesKnownAnswer) {
 
 TEST(Package_NspLoadsAndRuns) {
     const fs::path dir = fs::temp_directory_path() / "nexo2_test_nsp";
-    fs::remove_all(dir);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
     fs::create_directories(dir / "keys");
     fs::create_directories(dir / "sdmc");
 
@@ -221,7 +250,10 @@ TEST(Package_NspLoadsAndRuns) {
     const Bytes ctrl = Nca(2, 0x0100123400000000ULL, {{0, Romfs({{"control.nacp", nacp}})}});
     WriteFile(dir / "juego.nsp", Pfs0({{"0123.nca", prog}, {"4567.nca", ctrl}}));
 
-    Core::System sys;
+    // Los sistemas tienen abiertos los archivos del juego: en Windows hay que cerrarlos
+    // (destruirlos) antes de borrar la carpeta
+    std::optional<Core::System> sys_holder(std::in_place);
+    Core::System& sys = *sys_holder;
     sys.GetKernel().SetSdmcRoot(dir / "sdmc");
     // Sin claves: mensaje claro
     CHECK(!sys.LoadGame((dir / "juego.nsp").string()));
@@ -251,5 +283,30 @@ TEST(Package_NspLoadsAndRuns) {
     CHECK(Loader::LoadKeys(sys.KeyDirs(), ks, where));
     auto info = Loader::OpenGamePackage(dir / "juego.nsp", ks, false);
     CHECK(info.ok && info.nacp.size() == 0x4000);
-    fs::remove_all(dir);
+
+    // El mismo juego en un XCI: cabecera "HEAD" y HFS0 raiz con update/normal/secure. Como en los
+    // cartuchos de verdad, en 0x138 va el tamano de la CABECERA del HFS0 raiz, no de la particion.
+    const Bytes secure = Hfs0({{"0123.nca", prog}, {"4567.nca", ctrl}});
+    const Bytes root = Hfs0({{"normal", Hfs0({})}, {"secure", secure}, {"update", Hfs0({})}});
+    Bytes xci(0x200, 0);
+    std::memcpy(&xci[0x100], "HEAD", 4);
+    Put<u64>(xci, 0x130, 0x200);
+    Put<u64>(xci, 0x138, 0x10 + 3 * 0x40 + 0x20);
+    xci.insert(xci.end(), root.begin(), root.end());
+    WriteFile(dir / "juego.xci", xci);
+    std::optional<Core::System> sys2_holder(std::in_place);
+    Core::System& sys2 = *sys2_holder;
+    sys2.GetKernel().SetSdmcRoot(dir / "sdmc");
+    CHECK(sys2.LoadGame((dir / "juego.xci").string()));
+    if (!sys2.GetLastError().empty()) std::printf("    %s\n", sys2.GetLastError().c_str());
+    CHECK(sys2.GetProgramName() == "Juego NSP de prueba");
+    CHECK_EQ(sys2.GetKernel().ProgramId(), 0x0100123400000000ULL);
+    auto xinfo = Loader::OpenGamePackage(dir / "juego.xci", ks, false);
+    CHECK(xinfo.ok && xinfo.nacp.size() == 0x4000);
+    f.reset();
+    info = {};
+    xinfo = {};
+    sys2_holder.reset();
+    sys_holder.reset();
+    fs::remove_all(dir, ec);
 }

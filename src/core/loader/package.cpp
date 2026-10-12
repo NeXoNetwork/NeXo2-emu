@@ -368,11 +368,14 @@ GamePackage OpenGamePackage(const fs::path& path, const KeySet& keys, bool need_
             base = 0x1000;
             if (file->Read(0x1100, magic, 4) != 4 || std::memcmp(magic, "HEAD", 4) != 0) { g.error = "no es un XCI"; return g; }
         }
+        // En 0x130: donde esta la cabecera del HFS0 raiz y cuanto ocupa LA CABECERA (sus
+        // particiones van detras): la particion raiz llega hasta el final del archivo
         u8 hdr[0x10];
         file->Read(base + 0x130, hdr, 0x10);
-        const u64 root_off = Get<u64>(hdr), root_size = Get<u64>(hdr + 8);
+        const u64 root_off = base + Get<u64>(hdr);
+        if (root_off >= file->Size()) { g.error = "XCI sin particion raiz"; return g; }
         std::map<std::string, VFilePtr> root;
-        if (!ParsePartition(MakeSubFile(file, base + root_off, root_size), root) || !root.count("secure")) {
+        if (!ParsePartition(MakeSubFile(file, root_off, file->Size() - root_off), root) || !root.count("secure")) {
             g.error = "XCI sin particion 'secure'";
             return g;
         }

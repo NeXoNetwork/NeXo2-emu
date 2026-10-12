@@ -238,7 +238,14 @@ WindowController::WindowController() : LenientService("IWindowController") {
 ApplicationFunctions::ApplicationFunctions() : LenientService("IApplicationFunctions") {
     // Idioma: codigo empaquetado en un u64, igual que set ("es-ES")
     RegisterCommand(21, "GetDesiredLanguage", Reply<u64>(0x53452D7365ULL)); // "es-ES"
-    RegisterStub(22, "SetTerminateResult");
+    RegisterCommand(22, "SetTerminateResult", [](IpcContext& ctx) {
+        // El codigo con el que el juego dice que va a terminar (suele venir justo antes de abortar)
+        const u32 r = ctx.Pop<u32>();
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "[am] El juego termina con el resultado 0x%X (modulo %u, codigo %u)", r, r & 0x1FF, (r >> 9) & 0x1FFF);
+        Common::Logger::Log(r ? Common::Logger::Level::Warning : Common::Logger::Level::Info, buf);
+        ctx.SetResult(Result::Success);
+    });
     RegisterCommand(40, "NotifyRunning", Reply<u8>(1));
     RegisterStub(66, "InitializeGamePlayRecording");
     RegisterStub(67, "SetGamePlayRecordingState");

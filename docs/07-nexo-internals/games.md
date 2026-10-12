@@ -16,6 +16,9 @@ Put your `prod.keys`, and `title.keys` if you have one, in `keys/` next to the e
 
 - **NSP** = PFS0. Its `.tik` tickets give the title key (common tickets only; personalized ones are tied to a console).
 - **XCI** = "HEAD" header at 0x100 (or 0x1100 if the dump starts with the key area) → root HFS0 → `secure` partition (HFS0).
+  The header gives the root HFS0's offset (0x130) and the size of its *header* (0x138), not of the partition:
+  the root partition runs to the end of the file. Reading 0x138 as the partition size cut it to 0x200 bytes,
+  and every real cartridge dump failed with "particion 'secure' no valida".
 - **NCA**:
   - The 0xC00-byte header is AES-128-XTS with `header_key`. Sectors are 0x200 bytes with a big-endian sector number as the tweak.
   - NCA3 decrypts 0x000–0xBFF as sectors 0–5. NCA2 decrypts each FS header as sector 0.

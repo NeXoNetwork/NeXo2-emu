@@ -80,6 +80,8 @@ void Kernel::RegisterDefaultServices() {
     // contestan OK a todo (LenientService) en vez de parar el programa
     for (const char* n : {"hid:sys", "lbl", "ins:s", "ins:r"})
         m_services.Register(n, [n] { return std::make_shared<LenientService>(n); });
+    // Contexto de errores (informes de error de la consola): no hace falta, OK a todo
+    m_services.Register("ectx:aw", [] { return std::make_shared<ErrorContextWriter>(); });
     m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
     m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
     m_services.Register("time:u",   [] { return std::make_shared<TimeService>("time:u"); });
@@ -119,6 +121,8 @@ void Kernel::Reset() {
     m_heapSize = 0;
     m_imageSize = 0;
     m_mainStackSize = Layout::MAIN_STACK_SIZE;
+    m_systemResourceSize = 0;
+    m_physicalSize = 0;
     m_isApplication = false;
     m_programId = 0x0100000000001000ULL;
     m_romfs.reset();
@@ -225,9 +229,14 @@ void Kernel::SetupHomebrewProcess(u64 entry, u64 image_base, u64 image_size, con
     Logger::Log(Logger::Level::Info, "[HLE] Proceso homebrew listo. Entrada = " + Hex(entry));
 }
 
-void Kernel::SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 core, u64 stack_size, u64 program_id) {
+void Kernel::SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 core, u64 stack_size, u64 program_id,
+                                     u64 system_resource_size) {
     using namespace Layout;
     m_imageSize = image_size;
+    m_systemResourceSize = system_resource_size;
+    if (system_resource_size)
+        Logger::Log(Logger::Level::Info, "[HLE] Memoria del sistema para el proceso (main.npdm): " +
+                    std::to_string(system_resource_size / 1024) + " KB");
     m_isApplication = true;
     m_programId = program_id;
     stack_size = std::clamp<u64>((stack_size + 0xFFF) & ~u64(0xFFF), 0x4000, STACK_REGION_SIZE);
@@ -300,9 +309,9 @@ void Kernel::HandleSvc(u32 imm, CPUState& s) {
         char buf[160];
         const u64 a0 = s.x[0], a1 = s.x[1], a2 = s.x[2], a3 = s.x[3];
         HandleSvcImpl(imm, s);
-        std::snprintf(buf, sizeof(buf), "[SVC] %s(%llX, %llX, %llX, %llX) -> %X", SvcName(imm),
+        std::snprintf(buf, sizeof(buf), "[SVC] %s(%llX, %llX, %llX, %llX) -> %X, x1 = %llX", SvcName(imm),
                       (unsigned long long)a0, (unsigned long long)a1, (unsigned long long)a2,
-                      (unsigned long long)a3, unsigned(s.x[0]));
+                      (unsigned long long)a3, unsigned(s.x[0]), (unsigned long long)s.x[1]);
         Logger::Log(Logger::Level::Debug, buf);
         return;
     }
@@ -333,6 +342,10 @@ void Kernel::HandleSvcImpl(u32 imm, CPUState& s) {
         case 0x12: SvcClearEvent(s);        return;
         case 0x04: SvcMapMemory(s, true);   return;
         case 0x05: SvcMapMemory(s, false);  return;
+        case 0x32: SvcSetThreadActivity(s); return;
+        case 0x33: SvcGetThreadContext3(s); return;
+        case 0x2C: SvcMapPhysicalMemory(s, true);  return;
+        case 0x2D: SvcMapPhysicalMemory(s, false); return;
         case 0x13: SvcMapSharedMemory(s);   return;
         case 0x73: SvcSetProcessMemoryPermission(s); return;
         case 0x77: SvcMapProcessCodeMemory(s, true);  return;
@@ -418,18 +431,89 @@ void Kernel::SvcMapMemory(CPUState& s, bool map) {
     const u64 dst = s.x[0], src = s.x[1], size = s.x[2];
     constexpr u64 PAGE = Core::Memory::PAGE_SIZE;
     if (dst % PAGE || src % PAGE || size % PAGE || size == 0) { SetResult(s, Result::InvalidAddress); return; }
+    static const std::string SUFFIX = " (mapeada en otro sitio)";
+    // Zonas que cubren [src, src+size) (heap o memoria fisica; puede haber varias seguidas)
+    std::vector<Core::MemoryRegion> parts;
+    for (u64 a = src; a < src + size;) {
+        Core::MemoryRegion r = m_memory.QueryRegion(a);
+        if (r.state == MemoryState::Free || r.state == MemoryState::Inaccessible) { SetResult(s, Result::InvalidState); return; }
+        r.size = std::min(r.End(), src + size) - a;
+        r.base = a;
+        parts.push_back(r);
+        a += r.size;
+    }
     if (map) {
-        const Core::MemoryRegion r = m_memory.QueryRegion(src);
-        if (r.state == MemoryState::Free || src + size > r.End()) { SetResult(s, Result::InvalidState); return; }
-        if (m_memory.QueryRegion(dst).state != MemoryState::Free) { SetResult(s, Result::InvalidCurrentMemory); return; }
+        for (const auto& p : parts)
+            if (p.perm != MemoryPermission::ReadWrite) { SetResult(s, Result::InvalidState); return; }
+        const Core::MemoryRegion d = m_memory.QueryRegion(dst);
+        if (d.state != MemoryState::Free || dst + size > d.End()) { SetResult(s, Result::InvalidCurrentMemory); return; }
         m_memory.MovePages(dst, src, size);
         m_memory.MapRegion(dst, size, MemoryState::Stack, MemoryPermission::ReadWrite, "pila (svcMapMemory)");
-        m_memory.MapRegion(src, size, r.state, MemoryPermission::None, r.name + " (mapeada en otro sitio)");
+        for (const auto& p : parts) m_memory.MapRegion(p.base, p.size, p.state, MemoryPermission::None, p.name + SUFFIX);
     } else {
         m_memory.MovePages(src, dst, size);
         m_memory.UnmapRegion(dst, size);
-        const Core::MemoryRegion r = m_memory.QueryRegion(src);
-        m_memory.MapRegion(src, size, r.state, MemoryPermission::ReadWrite, "heap");
+        for (const auto& p : parts) {
+            std::string name = p.name;
+            if (name.size() > SUFFIX.size() && name.compare(name.size() - SUFFIX.size(), SUFFIX.size(), SUFFIX) == 0)
+                name.resize(name.size() - SUFFIX.size());
+            m_memory.MapRegion(p.base, p.size, p.state, MemoryPermission::ReadWrite, name);
+        }
+    }
+    SetResult(s, Result::Success);
+}
+
+// svcMapPhysicalMemory(addr = X0, size = X1): pone memoria nueva (a ceros) en las paginas libres
+// de [addr, addr+size) dentro de la zona de alias; svcUnmapPhysicalMemory la quita. Solo si el
+// main.npdm reserva memoria del sistema (system_resource_size). Los juegos lo usan con la
+// "memoria virtual" de nn::os (reservar direcciones y poner memoria segun haga falta: Unity).
+void Kernel::SvcMapPhysicalMemory(CPUState& s, bool map) {
+    using namespace Layout;
+    const u64 addr = s.x[0], size = s.x[1], end = addr + size;
+    constexpr u64 PAGE = Core::Memory::PAGE_SIZE;
+    if (addr % PAGE || size % PAGE || size == 0 || end <= addr) { SetResult(s, Result::InvalidAddress); return; }
+    if (addr < ALIAS_REGION_BASE || end > ALIAS_REGION_BASE + ALIAS_REGION_SIZE) { SetResult(s, 0xDC01 /* InvalidMemoryRegion */); return; }
+    if (m_systemResourceSize == 0) { SetResult(s, Result::InvalidState); return; }
+    static const char* NAME = "memoria fisica";
+    // Trozos de [addr, end): libres o ya con memoria fisica; cualquier otra cosa es un error
+    std::vector<Core::MemoryRegion> parts;
+    u64 free_bytes = 0, mapped_bytes = 0;
+    for (u64 a = addr; a < end;) {
+        Core::MemoryRegion r = m_memory.QueryRegion(a);
+        const u64 seg_end = std::min(r.End(), end);
+        // Ya mapeada: memoria fisica (tambien la que esta prestada a una pila con svcMapMemory)
+        const bool physical = r.state == MemoryState::Normal && r.name.rfind(NAME, 0) == 0;
+        if (!map && physical && r.name != NAME) { SetResult(s, Result::InvalidCurrentMemory); return; }
+        if (r.state != MemoryState::Free && !physical) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "[HLE] svcMapPhysicalMemory: 0x%llX ocupada por '%s' (estado 0x%X)",
+                          (unsigned long long)a, r.name.c_str(), unsigned(r.state));
+            Logger::Log(Logger::Level::Warning, buf);
+            SetResult(s, Result::InvalidCurrentMemory);
+            return;
+        }
+        r.base = a;
+        r.size = seg_end - a;
+        (r.state == MemoryState::Free ? free_bytes : mapped_bytes) += r.size;
+        parts.push_back(r);
+        a = seg_end;
+    }
+    if (map) {
+        const u64 used = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize;
+        if (used + free_bytes > TOTAL_MEMORY - m_systemResourceSize) { SetResult(s, 0xD801 /* LimitReached */); return; }
+        for (const auto& p : parts) {
+            if (p.state != MemoryState::Free) continue;
+            m_memory.ZeroPages(p.base, p.size);
+            m_memory.MapRegion(p.base, p.size, MemoryState::Normal, MemoryPermission::ReadWrite, NAME);
+        }
+        m_physicalSize += free_bytes;
+    } else {
+        for (const auto& p : parts) {
+            if (p.state == MemoryState::Free) continue;
+            m_memory.ZeroPages(p.base, p.size);
+            m_memory.UnmapRegion(p.base, p.size);
+        }
+        m_physicalSize -= std::min(m_physicalSize, mapped_bytes);
     }
     SetResult(s, Result::Success);
 }
@@ -562,19 +646,20 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 4:  value = HEAP_REGION_BASE;  break;
         case 5:  value = HEAP_REGION_SIZE;  break;
         case 6:  value = TOTAL_MEMORY;      break;             // TotalMemorySize
-        case 7:  value = m_imageSize + m_mainStackSize + m_heapSize; break; // UsedMemorySize
+        case 7:  value = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize; break; // UsedMemorySize
         case 8:  value = 0; break;                             // DebuggerAttached
         case 11: value = 0x4E65586F32ULL ^ (id1 * 0x9E3779B97F4A7C15ULL); break; // RandomEntropy (fijo)
         case 12: value = ASLR_REGION_BASE;  break;
         case 13: value = ASLR_REGION_SIZE;  break;
         case 14: value = STACK_REGION_BASE; break;
         case 15: value = STACK_REGION_SIZE; break;
-        case 16: case 17: value = 0; break;                    // SystemResourceSize total/usado
+        case 16: value = m_systemResourceSize; break;          // SystemResourceSizeTotal (del main.npdm)
+        case 17: value = std::min<u64>(m_systemResourceSize, m_physicalSize / 512); break; // ...usado (tablas de paginas)
         case 18: value = m_programId; break;                   // ProgramId (el del main.npdm; inventado en homebrew)
         case 19: value = 0; break;                             // InitialProcessIdRange (solo 1 proceso)
         case 20: value = 0; break;                             // UserExceptionContextAddress
-        case 21: value = TOTAL_MEMORY; break;                  // TotalNonSystemMemorySize
-        case 22: value = m_imageSize + m_mainStackSize + m_heapSize; break;
+        case 21: value = TOTAL_MEMORY - m_systemResourceSize; break; // TotalNonSystemMemorySize
+        case 22: value = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize; break;
         case 23: value = 1; break;                             // IsApplication
         case 28: value = 0; break;                             // AliasRegionExtraSize [18.0.0+]
         default:
@@ -836,7 +921,14 @@ void Kernel::SvcMapSharedMemory(CPUState& s) {
     if (!shmem) { SetResult(s, Result::InvalidHandle); return; }
     if (addr % Core::Memory::PAGE_SIZE || size % Core::Memory::PAGE_SIZE) { SetResult(s, Result::InvalidAddress); return; }
     if (size > shmem->data.size()) { SetResult(s, Result::InvalidSize); return; }
-    if (m_memory.QueryRegion(addr).state != MemoryState::Free) { SetResult(s, Result::InvalidState); return; }
+    // Como en la consola: ni en la zona del heap ni en la de alias (el juego elige otra direccion)
+    auto overlaps = [&](u64 base, u64 len) { return addr < base + len && base < addr + size; };
+    if (overlaps(Layout::HEAP_REGION_BASE, Layout::HEAP_REGION_SIZE) || overlaps(Layout::ALIAS_REGION_BASE, Layout::ALIAS_REGION_SIZE)) {
+        SetResult(s, 0xDC01);   // InvalidMemoryRegion
+        return;
+    }
+    const Core::MemoryRegion here = m_memory.QueryRegion(addr);
+    if (here.state != MemoryState::Free || addr + size > here.End()) { SetResult(s, Result::InvalidCurrentMemory); return; }
 
     m_memory.WriteBytes(addr, shmem->data.data(), size);
     shmem->mapped_address = addr;

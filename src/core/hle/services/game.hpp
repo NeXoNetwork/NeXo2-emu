@@ -23,6 +23,8 @@ class FriendsService final : public LenientService { public: explicit FriendsSer
 class PrepoService final : public LenientService { public: explicit PrepoService(std::string name); };
 class AocService final : public LenientService { public: AocService(); };
 class FatalService final : public ServiceObject { public: FatalService(); };
+// ectx:aw: contexto de errores (17.0.0+). CreateContextRegistrar -> objeto que acepta todo
+class ErrorContextWriter final : public LenientService { public: ErrorContextWriter(); };
 
 // Usuario unico (UID que ven los juegos)
 constexpr u64 USER_ID_LO = 0x4E65586F55736572ULL;   // "NeXoUser"

@@ -35,11 +35,13 @@ class NetworkState;   // services/bsd.hpp
 namespace Layout {
     constexpr u64 CODE_BASE        = 0x0000'0000'0800'0000; // donde se carga el NRO
     constexpr u64 ASLR_REGION_BASE = 0x0000'0000'0800'0000;
-    constexpr u64 ASLR_REGION_SIZE = 0x0000'0002'F800'0000; // hasta 0x3'0000'0000 (12 GB)
+    constexpr u64 ASLR_REGION_SIZE = 0x0000'0003'F800'0000; // hasta 0x4'0000'0000 (16 GB)
     constexpr u64 HEAP_REGION_BASE = 0x0000'0000'8000'0000;
     constexpr u64 HEAP_REGION_SIZE = 0x0000'0001'0000'0000; // 4 GB (hasta 0x1'8000'0000)
-    constexpr u64 ALIAS_REGION_BASE = 0x0000'0001'8000'0000;
-    constexpr u64 ALIAS_REGION_SIZE = 0x0000'0000'4000'0000;
+    // Alias: donde va la "memoria virtual" de nn::os (svcMapPhysicalMemory). Los juegos de Unity
+    // reservan ahi direcciones para toda su memoria: con 1 GB no les cabia. 4 GB, al final.
+    constexpr u64 ALIAS_REGION_BASE = 0x0000'0002'0000'0000;
+    constexpr u64 ALIAS_REGION_SIZE = 0x0000'0002'0000'0000; // 8 GB, hasta 0x4'0000'0000 (16 GB)
     constexpr u64 STACK_REGION_BASE = 0x0000'0001'C000'0000;
     constexpr u64 STACK_REGION_SIZE = 0x0000'0000'1000'0000;
     constexpr u64 MAIN_STACK_SIZE   = 0x0000'0000'0010'0000; // 1 MB
@@ -106,7 +108,8 @@ public:
     // Prepara el proceso de un juego (NSO + main.npdm), como lo crea Horizon: sin lista de
     // configuracion (X0 = 0, X1 = handle del hilo principal) y con la prioridad, el nucleo y
     // la pila que pide su main.npdm.
-    void SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 core, u64 stack_size, u64 program_id);
+    void SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 core, u64 stack_size, u64 program_id,
+                                 u64 system_resource_size = 0);
     bool IsApplication() const { return m_isApplication; }
     u64  ProgramId() const { return m_programId; }
 
@@ -274,6 +277,9 @@ private:
     void SvcMapSharedMemory(Core::CPUState& s);
     void SvcUnmapSharedMemory(Core::CPUState& s);
     void SvcMapMemory(Core::CPUState& s, bool map);
+    void SvcMapPhysicalMemory(Core::CPUState& s, bool map);
+    void SvcSetThreadActivity(Core::CPUState& s);
+    void SvcGetThreadContext3(Core::CPUState& s);
     void SvcMapProcessCodeMemory(Core::CPUState& s, bool map);
     void SvcSetProcessMemoryPermission(Core::CPUState& s);
 
@@ -385,6 +391,8 @@ private:
     u64  m_heapSize = 0;
     u64  m_imageSize = 0;
     u64  m_mainStackSize = Layout::MAIN_STACK_SIZE;
+    u64  m_systemResourceSize = 0;   // del main.npdm: sin el, no hay svcMapPhysicalMemory
+    u64  m_physicalSize = 0;         // memoria puesta con svcMapPhysicalMemory
     bool m_isApplication = false;
     u64  m_programId = 0x0100000000001000ULL;
     Loader::VFilePtr m_romfs;

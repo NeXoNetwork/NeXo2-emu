@@ -27,16 +27,26 @@ Interpreter::Run()
 | :--- | :--- | :--- |
 | `0x0008000000` | image | NRO: `.text` (R-X), `.rodata` (R--), `.data`+`.bss` (RW-) |
 | `0x0080000000` | up to 4 GB | Heap (`svcSetHeapSize`) |
-| `0x0180000000` | 1 GB | Alias region (reserved) |
 | `0x01C0000000` | 1 MB | Main thread stack (SP starts at the top) |
 | `0x01FFFE0000` | 4 KB | HLE loader page: exit stub, argv, config entries |
 | `0x01FFFF0000` | 4 KB | TLS of the main thread (`TPIDRRO_EL0`) |
+| `0x0200000000` | 8 GB | Alias region: `svcMapPhysicalMemory` (nn::os virtual memory) |
 
 The process "has" 3285 MB (`svcGetInfo` TotalMemorySize), like a game on the console. Games
 size their heap from that (malloc, GPU memory...); with 1 GB some ran out of memory.
 Host memory is only used for pages the program touches.
 
-All of it fits in the 12 GB that `Core::Memory` supports. The values are in
+The NPDM's `system_resource_size` (META +0x14) is reported by `svcGetInfo` 16, and
+TotalNonSystemMemorySize (21) is the total minus it. Games with it (Unity: Pokémon Brilliant Diamond)
+turn on nn::os "virtual memory": they reserve address ranges in the alias region and back them with
+`svcMapPhysicalMemory` as needed. The alias region was 1 GB between the heap and the stacks; these
+games reserve the whole memory (about 3 GB) there, so it moved to the end with 8 GB.
+
+`svcMapSharedMemory` refuses addresses in the heap and alias regions (`InvalidMemoryRegion`), like
+the console. The SDK picks a random address and tries again; before this, the `time` shared memory
+landed in the middle of a range the game had reserved.
+
+All of it fits in the 16 GB that `Core::Memory` supports (the JIT's flat page table covers exactly 16 GB). The values are in
 `HLE::Layout` (kernel.hpp) and are reported to programs through `svcGetInfo`.
 
 ## Homebrew ABI (entry)
@@ -69,7 +79,7 @@ way exits without asking for anything, it goes back to the menu, like hbloader.
 | 0x01 | SetHeapSize | Size must be a multiple of 2 MB. Heap at `0x80000000`. |
 | 0x02 | SetMemoryPermission | Changes the permission in the region map. |
 | 0x03 | SetMemoryAttribute | Only checks alignment (no caches to emulate). |
-| 0x04 / 0x05 | MapMemory / UnmapMemory | Moves the pages to the new address (`Memory::MovePages`); the source stays inaccessible. libnx uses it for thread stacks. |
+| 0x04 / 0x05 | MapMemory / UnmapMemory | Moves the pages to the new address (`Memory::MovePages`); the source stays inaccessible. libnx uses it for thread stacks. The source can be heap or physical memory, and can span several regions. |
 | 0x06 | QueryMemory | Fills `MemoryInfo` from the region map (free gaps included). |
 | 0x07 | ExitProcess | Halts the CPU. |
 | 0x08-0x0F | CreateThread, StartThread, ExitThread, SleepThread, Get/SetThreadPriority, Get/SetThreadCoreMask | Real threads: see [threads.md](threads.md). |
@@ -88,7 +98,10 @@ way exits without asking for anything, it goes back to the menu, like hbloader.
 | 0x24 / 0x25 | GetProcessId / GetThreadId | Process id fixed; thread ids 1, 2, 3... |
 | 0x26 | Break | Halts the CPU (program aborted). |
 | 0x27 | OutputDebugString | Text shown in the "Programa" window and the console. |
-| 0x29 | GetInfo | Region addresses/sizes, memory totals, core mask, entropy, program id. |
+| 0x29 | GetInfo | Region addresses/sizes, memory totals, core mask, entropy, program id, system resource size. |
+| 0x2C / 0x2D | MapPhysicalMemory / UnmapPhysicalMemory | Alias region only, and only when the NPDM has a system resource size. Maps zeroed memory on the free pages of the range; counts toward the process memory. |
+| 0x32 | SetThreadActivity | Pauses (1) or resumes (0) another thread; a paused thread is not scheduled. Garbage collectors use it. |
+| 0x33 | GetThreadContext3 | Registers of a paused thread (0x320 bytes). Waits until it leaves its core. |
 | 0x73 | SetProcessMemoryPermission | Own process only: changes permissions in the region map. |
 | 0x77 / 0x78 | MapProcessCodeMemory / UnmapProcessCodeMemory | Own process only: like MapMemory, the destination becomes code. Used by `.so` loaders. |
 

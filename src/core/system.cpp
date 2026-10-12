@@ -223,7 +223,8 @@ bool System::LoadGame(const std::string& path) {
 
     m_kernel.SetRomfs(romfs);
     m_kernel.SetupApplicationProcess(entry, m_nroInfo.image_size, npdm.main_priority, npdm.main_core,
-                                     npdm.main_stack_size, npdm.program_id);
+                                     npdm.main_stack_size, npdm.program_id,
+                                     npdm.system_resource_size);
     Logger::Log(Logger::Level::Info, "[Loader] Juego cargado: " + m_programName + " (modulos: " + loaded + ")" +
                 (romfs ? ", con RomFS" : ", sin RomFS"));
     return true;

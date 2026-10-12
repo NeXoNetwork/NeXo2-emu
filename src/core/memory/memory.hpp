@@ -55,7 +55,7 @@ struct MemoryRegion {
 // Clear() y el mapa de zonas solo se usan con la GPU parada.
 class Memory {
 public:
-    static constexpr u64 ADDRESS_SPACE = 12ULL * 1024 * 1024 * 1024; // 12 GB
+    static constexpr u64 ADDRESS_SPACE = 16ULL * 1024 * 1024 * 1024; // 16 GB (lo que cubre la tabla plana del JIT)
     static constexpr u64 PAGE_SIZE     = 0x1000;                     // 4 KB
 
     Memory() = default;
@@ -144,6 +144,16 @@ public:
     // Mueve las paginas de [src, src+size) a [dst, dst+size): los datos pasan a verse en 'dst'
     // y 'src' queda sin paginas. Es lo que hace svcMapMemory (la memoria original queda
     // inaccesible mientras esta mapeada en otro sitio) y, al reves, svcUnmapMemory.
+    // Pone a cero las paginas que ya existan en [addr, addr+size) (las demas ya son ceros)
+    void ZeroPages(VAddr addr, u64 size) {
+        if (addr + size > ADDRESS_SPACE) return;
+        std::lock_guard lock(m_pageMutex);
+        for (u64 off = 0; off < size; off += PAGE_SIZE) {
+            Page* page = FindPage((addr + off) / PAGE_SIZE);
+            if (page) std::memset(page->bytes.data(), 0, PAGE_SIZE);
+        }
+    }
+
     void MovePages(VAddr dst, VAddr src, u64 size) {
         if (dst + size > ADDRESS_SPACE || src + size > ADDRESS_SPACE) return;
         std::lock_guard lock(m_pageMutex);
@@ -213,7 +223,17 @@ public:
     void MapRegion(VAddr base, u64 size, MemoryState state, MemoryPermission perm, std::string name) {
         UnmapRegion(base, size);
         if (size == 0) return;
-        m_regions[base] = MemoryRegion{base, size, state, perm, std::move(name)};
+        auto it = m_regions.emplace(base, MemoryRegion{base, size, state, perm, std::move(name)}).first;
+        // Junta con las zonas vecinas iguales (como Horizon: QueryMemory da la zona entera)
+        auto same = [](const MemoryRegion& a, const MemoryRegion& b) {
+            return a.End() == b.base && a.state == b.state && a.perm == b.perm && a.name == b.name;
+        };
+        if (it != m_regions.begin()) {
+            auto prev = std::prev(it);
+            if (same(prev->second, it->second)) { prev->second.size += it->second.size; m_regions.erase(it); it = prev; }
+        }
+        auto next = std::next(it);
+        if (next != m_regions.end() && same(it->second, next->second)) { it->second.size += next->second.size; m_regions.erase(next); }
     }
 
     // Quita [base, base+size) del mapa (partiendo las zonas que lo crucen).

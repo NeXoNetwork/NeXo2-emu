@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include "common/types.hpp"
+#include "loader/package.hpp"
 
 namespace NeXo2::Frontend {
 
@@ -29,8 +30,12 @@ bool ReadNroMetadata(const std::filesystem::path& file, GameEntry& out);
 bool IsGameDirectory(const std::filesystem::path& dir);
 bool ReadGameFolderMetadata(const std::filesystem::path& dir, GameEntry& out);
 
-// Busca .nro y juegos extraidos en las carpetas (y subcarpetas, hasta 3 niveles). Sin repetidos.
-std::vector<GameEntry> ScanGames(const std::vector<std::filesystem::path>& dirs);
+// .nsp / .xci: nombre e icono de su NCA de control (con las claves del usuario; sin ellas,
+// solo el nombre del archivo)
+bool ReadPackageMetadata(const std::filesystem::path& file, const Loader::KeySet* keys, GameEntry& out);
+
+// Busca .nro, .nsp, .xci y juegos extraidos en las carpetas (y subcarpetas, hasta 3 niveles). Sin repetidos.
+std::vector<GameEntry> ScanGames(const std::vector<std::filesystem::path>& dirs, const Loader::KeySet* keys = nullptr);
 
 // Conversiones de ruta <-> texto UTF-8 (Windows usa UTF-16 por dentro)
 std::string PathToUtf8(const std::filesystem::path& p);

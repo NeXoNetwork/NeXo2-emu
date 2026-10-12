@@ -1,11 +1,33 @@
-# Games (NSO + NPDM)
+# Games (NSP, XCI, NSO + NPDM)
 
 Homebrew comes as a single `.nro` file ([nro-loader-and-hle.md](nro-loader-and-hle.md)).
 Games for Switch 1 and Switch 2 are built differently. The executable part, the **ExeFS**,
 is a set of NSO modules plus a `main.npdm` file, and the data lives in the **RomFS**.
 
-NeXo loads games that are already **extracted**, i.e. a folder made from your own console's dump.
-NeXo never decrypts anything. Reading NSP/XCI/NCA files directly with your own keys is the next phase.
+NeXo loads games in two ways. Both need a dump of your own console:
+
+- **NSP / XCI** files, decrypted with **your console's keys**. NeXo ships no keys.
+- **extracted** folders (ExeFS + `romfs.bin`).
+
+## Keys and NSP / XCI (`loader/package.*`, `crypto/aes.*`)
+
+Put your `prod.keys`, and `title.keys` if you have one, in `keys/` next to the executable. NeXo creates that folder.
+`NEXO2_KEYS` can point somewhere else. Without keys, opening an NSP gives a clear message saying where to put them.
+
+- **NSP** = PFS0. Its `.tik` tickets give the title key (common tickets only; personalized ones are tied to a console).
+- **XCI** = "HEAD" header at 0x100 (or 0x1100 if the dump starts with the key area) → root HFS0 → `secure` partition (HFS0).
+- **NCA**:
+  - The 0xC00-byte header is AES-128-XTS with `header_key`. Sectors are 0x200 bytes with a big-endian sector number as the tweak.
+  - NCA3 decrypts 0x000–0xBFF as sectors 0–5. NCA2 decrypts each FS header as sector 0.
+  - Key generation = max(0x206, 0x220) − 1.
+  - If there is a rights id: title key (ticket or title.keys) decrypted with `titlekek_XX`.
+  - If not: key area (0x300) decrypted with `key_area_key_{application,ocean,system}_XX`; key 2 is the CTR key.
+  - Sections: start/end at 0x240 + 0x10·i, in 0x200 units. FS header at 0x400 + 0x200·i: type (0 RomFS, 1 PFS0) at +2, encryption at +4 (1 none, 3 CTR).
+  - CTR counter: the 8 bytes at +0x140 reversed, then the absolute offset / 16 (big endian). Sections are decrypted on read (`CtrFile`).
+  - PFS0 is at hash data +0x38 (FS header 0x40). The RomFS is IVFC level 6 (FS header 0x90).
+- The program NCA (type 0) gives the ExeFS and the RomFS. The control NCA (type 2) gives `control.nacp` and the icon from its RomFS (the library shows them).
+- AES uses mbedTLS when it is built (with the CPU's AES instructions), or a built-in implementation otherwise (checked against FIPS-197).
+- Not supported yet: updates (BKTR), DLC, XTS-encrypted sections.
 
 ## Folder layout
 
@@ -50,13 +72,16 @@ games/
 ## What is still missing
 
 - Many services that commercial games use and homebrew does not:
-  - `acc:u0` (user accounts), `pctl`, `friends`, `ns`, `aoc` (DLC), `prepo`, `mm:u`, `audren:u` (real audio renderer)…
+  - `acc:u0` (user accounts), `pctl`, `friends`, `ns`, `aoc` (DLC), `prepo`, `mm:u`, `hwopus`…
   - each is added as games ask for it. The log names any service that does not exist yet.
-- Reading NSP / XCI / NCA directly (needs the user's own keys).
 - Updates (patch RomFS) and DLC.
 
 ## Tests
 
+- `Crypto_AesKnownAnswer`: FIPS-197 vector, XTS round trip, CTR from the middle = CTR of the whole.
+- `Package_NspLoadsAndRuns`: builds a real-format NSP with made-up keys.
+  - Program NCA (PFS0 ExeFS from `hello.nro` + RomFS) and control NCA, headers XTS-encrypted and sections CTR-encrypted.
+  - Checks the missing-keys message, loading, the title from the NACP, a RomFS file, that it runs, and that the library reads the control.
 - `Nso_Lz4Block`: LZ4 blocks, including overlapping copies, lengths over 15 and broken data.
 - `Game_LoadsExtractedExefs`:
   - Builds a game folder from `hello.nro`: its `.text` becomes an LZ4-compressed NSO, plus a `main.npdm` and a `romfs.bin`.

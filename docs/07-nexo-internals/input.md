@@ -80,7 +80,18 @@ service copy and to the program's mapped copy.
 
 The keyboard is ignored while an ImGui text field has focus.
 
+## Touch screen
+
+- `HidTouchScreenLifo` is at 0x400: a 0x20 header and 17 entries of 0x298.
+  - Each entry is a u64 sampling number and a `HidTouchScreenState`: u64 sampling number, s32 count, then 16 touches of 0x28 bytes.
+  - Each touch: delta time, attributes (bit 0 = Start, the first frame of a finger), finger id, x, y, diameter 15×15, angle.
+- Coordinates are always 1280×720, the console screen, docked or not.
+- The app sends the touch state every UI frame (`Kernel::SetTouchInput`). Holding the left mouse button over the game image is one finger, scaled from the image rectangle to 1280×720.
+  On a PC with a touch screen, SDL turns the finger into the mouse, so it works the same way.
+- Test: `Input_TouchScreenLifo`.
+
 ## Limitations
 
-- One player only; touch screen, mouse, keyboard device and motion sensors are not filled.
+- One player only. Mouse, keyboard device and motion sensors are not filled: the six-axis and vibration commands are accepted but do nothing.
+- One finger on the touch screen.
 - Input is sampled once per UI frame, not on a hid timer.

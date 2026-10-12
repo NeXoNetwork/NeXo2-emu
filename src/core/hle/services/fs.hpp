@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include "hle/service.hpp"
+#include "loader/package.hpp"
 
 // "fsp-srv": sistema de archivos (tarjeta SD, partidas guardadas, datos del juego...).
 // Referencia: https://switchbrew.org/wiki/Filesystem_services
@@ -45,14 +46,12 @@ private:
     u32 m_mode;  // bit 0 leer, bit 1 escribir, bit 2 ampliar al escribir
 };
 
-// IStorage de solo lectura sobre un archivo del PC (la RomFS de un juego: romfs.bin)
+// IStorage de solo lectura (la RomFS de un juego: romfs.bin o la de su NCA)
 class FileStorage final : public ServiceObject {
 public:
-    explicit FileStorage(const std::filesystem::path& path);
-    bool IsOpen() const { return m_file.is_open(); }
+    explicit FileStorage(Loader::VFilePtr file);
 private:
-    std::ifstream m_file;
-    u64 m_size = 0;
+    Loader::VFilePtr m_file;
 };
 
 // IDirectory: lista de entradas de una carpeta

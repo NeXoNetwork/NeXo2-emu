@@ -9,6 +9,7 @@
 #include "loader/nro.hpp"
 #include "loader/npdm.hpp"
 #include "loader/nso.hpp"
+#include "loader/package.hpp"
 
 // "La consola": junta memoria, CPU y kernel HLE, y sabe cargar programas.
 // La interfaz (main.cpp) y los tests solo hablan con esta clase.
@@ -31,8 +32,11 @@ public:
     // directamente o en una subcarpeta "exefs") y opcionalmente romfs.bin y control.nacp.
     // 'path' puede ser la carpeta o cualquier archivo de dentro. Ver docs/07-nexo-internals/games.md
     bool LoadGame(const std::string& path);
-    // true si 'path' parece un juego extraido (lo que acepta LoadGame)
+    // Tambien .nsp y .xci, con las claves de la consola del usuario (keys/prod.keys).
+    // true si 'path' es algo que acepta LoadGame (carpeta extraida, .nsp o .xci)
     static bool IsGameFolder(const std::string& path);
+    // Carpetas donde se buscan prod.keys y title.keys
+    std::vector<std::filesystem::path> KeyDirs() const;
 
     // Carga instrucciones sueltas en 'base' (la demo de main.cpp y algunos tests).
     void LoadRawProgram(const u32* words, size_t count, u64 base);

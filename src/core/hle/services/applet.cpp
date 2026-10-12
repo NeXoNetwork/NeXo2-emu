@@ -84,8 +84,26 @@ SelfController::SelfController() : ServiceObject("ISelfController") {
     RegisterStub(13, "SetFocusHandlingMode");
     RegisterStub(14, "SetRestartMessageEnabled");
     RegisterStub(16, "SetOutOfFocusSuspendingEnabled");
+    RegisterStub(3,  "EnterFatalSection");
+    RegisterStub(4,  "LeaveFatalSection");
+    // Evento "ya se puede lanzar un applet" (teclado, errores...): siempre listo
+    RegisterCommand(9, "GetLibraryAppletLaunchableEvent", [](IpcContext& ctx) {
+        ctx.PushCopyHandle(ctx.GetKernel().CreateEvent("applet lanzable", true));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterStub(15, "SetScreenShotAppletIdentityInfo");
+    RegisterStub(17, "SetControllerFirmwareUpdateSection");
+    RegisterStub(18, "SetRequiresCaptureButtonShortPressedMessage");
+    RegisterStub(19, "SetAlbumImageOrientation");
     RegisterCommand(40, "CreateManagedDisplayLayer", Reply<u64>(1)); // id de la capa
+    RegisterStub(50, "SetHandlesRequestToDisplay");
+    RegisterStub(62, "SetIdleTimeDetectionExtension");
+    RegisterCommand(63, "GetIdleTimeDetectionExtension", Reply<u32>(0));
+    RegisterStub(65, "ReportUserIsActive");
+    RegisterStub(68, "SetAutoSleepDisabled");
+    RegisterCommand(69, "IsAutoSleepDisabled", Reply<u8>(0));
     RegisterCommand(91, "GetAccumulatedSuspendedTickChangedEvent", NewEvent("tiempo suspendido"));
+    RegisterStub(100, "SetAlbumImageTakenNotificationEnabled");
 }
 
 WindowController::WindowController() : ServiceObject("IWindowController") {

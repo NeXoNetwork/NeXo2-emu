@@ -37,13 +37,6 @@ public:
     PlService();
 };
 
-// "audren:u": renderizador de audio. Aun no hay audio: contesta "no disponible" y los
-// programas (SDL) siguen sin sonido.
-class AudioRendererManager final : public ServiceObject {
-public:
-    AudioRendererManager();
-};
-
 // "csrng": numeros aleatorios de calidad (claves, TLS de los programas)
 class CsrngService final : public ServiceObject {
 public:

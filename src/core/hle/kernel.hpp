@@ -17,6 +17,7 @@
 #include "display.hpp"
 #include "input.hpp"
 #include "video_core/gpu.hpp"
+#include "loader/package.hpp"
 #include <array>
 
 // Kernel HLE (High-Level Emulation) de Horizon.
@@ -221,9 +222,9 @@ public:
         m_selfNro = std::make_shared<const std::vector<u8>>(std::move(data));
     }
     const std::string& GetSelfNroPath() const { return m_selfNroPath; }
-    // RomFS del juego (archivo romfs.bin): lo lee fsp-srv OpenDataStorageByCurrentProcess
-    void SetRomfsFile(const std::filesystem::path& p) { m_romfsFile = p; }
-    const std::filesystem::path& GetRomfsFile() const { return m_romfsFile; }
+    // RomFS del juego (romfs.bin o la de su NCA): la lee fsp-srv OpenDataStorageByCurrentProcess
+    void SetRomfs(Loader::VFilePtr f) { m_romfs = std::move(f); }
+    const Loader::VFilePtr& GetRomfs() const { return m_romfs; }
     // Carpeta del PC donde se guardan las partidas de los juegos (junto a la SD: "save/<id>")
     std::filesystem::path GetSaveRoot() const;
     // Lo que el programa pidio cargar al terminar (envSetNextLoad del hbmenu): ruta "sdmc:/..."
@@ -241,6 +242,8 @@ public:
     // Mandos: memoria compartida de hid (una por proceso) y estado nuevo de los botones
     u32  GetHidSharedMemoryHandle();
     void SetPadInput(const PadInput& pad);
+    // Dedos en la pantalla tactil (la interfaz: el raton o el tactil del PC sobre la imagen del juego)
+    void SetTouchInput(const std::vector<TouchPoint>& touches);
     const InputState& GetInput() const { return m_input; }
 
     // Objetos que los servicios entregan como handles "copy"
@@ -379,7 +382,7 @@ private:
     u64  m_mainStackSize = Layout::MAIN_STACK_SIZE;
     bool m_isApplication = false;
     u64  m_programId = 0x0100000000001000ULL;
-    std::filesystem::path m_romfsFile;
+    Loader::VFilePtr m_romfs;
     bool m_exited = false;
     std::string m_debugOutput;
 };

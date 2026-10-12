@@ -35,6 +35,8 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/loader/nro.cpp"
     "${SRC_DIR}/core/loader/nso.cpp"
     "${SRC_DIR}/core/loader/npdm.cpp"
+    "${SRC_DIR}/core/loader/package.cpp"
+    "${SRC_DIR}/core/crypto/aes.cpp"
     "${SRC_DIR}/core/hle/kernel.cpp"
     "${SRC_DIR}/core/hle/kernel_threads.cpp"
     "${SRC_DIR}/core/hle/ipc.cpp"
@@ -46,6 +48,7 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/hle/services/apm.cpp"
     "${SRC_DIR}/core/hle/services/misc.cpp"
     "${SRC_DIR}/core/hle/services/audio.cpp"
+    "${SRC_DIR}/core/hle/services/audren.cpp"
     "${SRC_DIR}/core/hle/services/bsd.cpp"
     "${SRC_DIR}/core/hle/services/ssl.cpp"
     "${SRC_DIR}/core/hle/net/host_net.cpp"
@@ -167,6 +170,7 @@ set(SOURCES
     "${SRC_DIR}/main.cpp"
     "${SRC_DIR}/frontend/settings.cpp"
     "${SRC_DIR}/frontend/game_list.cpp"
+    "${SRC_DIR}/frontend/crash_report.cpp"
     "${SRC_DIR}/frontend/theme.cpp"
     "${SRC_DIR}/core/memory/memory.hpp"
 )
@@ -209,6 +213,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE nexo2_core SDL3-shared)
 target_compile_definitions(${PROJECT_NAME} PRIVATE NEXO2_VERSION="${NEXO2_VERSION}")
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)   # textos de la interfaz con acentos
+    # .pdb tambien en Release: si NeXo revienta, nexo2.log lleva la pila con nombres y lineas
+    target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_compile_options(nexo2_core PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
 endif()
 
 # 5. Copia de DLL y Assets
@@ -246,6 +254,8 @@ if(NEXO2_BUILD_TESTS)
         "${CMAKE_SOURCE_DIR}/tests/gpu_texture_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_spirv_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/gpu_compute_tess_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/package_tests.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/audio_tests.cpp"
         "${CMAKE_SOURCE_DIR}/tests/vulkan_tests.cpp"
     )
     target_include_directories(nexo2_tests PRIVATE "${CMAKE_SOURCE_DIR}/tests")

@@ -130,20 +130,6 @@ PlService::PlService() : ServiceObject("pl:u") {
     });
 }
 
-// ============================================================================
-//  audren:u (sin audio todavia)
-// ============================================================================
-AudioRendererManager::AudioRendererManager() : ServiceObject("audren:u") {
-    constexpr u32 RESULT_AUDIO_NOT_AVAILABLE = (2u << 9) | 153u;   // audio (modulo 153)
-    auto unavailable = [](IpcContext& ctx) {
-        Common::Logger::Log(Common::Logger::Level::Info, "[audren:u] Sin audio todavia: el programa sigue sin sonido");
-        ctx.SetResult(RESULT_AUDIO_NOT_AVAILABLE);
-    };
-    RegisterCommand(0, "OpenAudioRenderer", unavailable);
-    RegisterCommand(1, "GetWorkBufferSize", unavailable);
-    RegisterCommand(2, "GetAudioDeviceService", unavailable);
-}
-
 CsrngService::CsrngService() : ServiceObject("csrng") {
     RegisterCommand(0, "GenerateRandomBytes", [](IpcContext& ctx) {
         static std::random_device device;

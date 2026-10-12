@@ -38,6 +38,12 @@ struct PadInput {
     s32 rx = 0, ry = 0;
 };
 
+// Un dedo en la pantalla tactil (coordenadas de la pantalla de la consola: 1280 x 720)
+struct TouchPoint {
+    u32 x = 0, y = 0;
+    u32 id = 0;
+};
+
 // Offsets dentro de la memoria compartida de hid (comprobados con las cabeceras de libnx)
 namespace HidLayout {
     constexpr size_t SIZE            = 0x40000;
@@ -56,6 +62,11 @@ namespace HidLayout {
     constexpr size_t LIFO_ENTRIES    = 17;
     constexpr size_t LIFO_STORAGE    = 0x20;
     constexpr size_t LIFO_ENTRY_SIZE = 0x30;
+    // Pantalla tactil (HidTouchScreenLifo): cabecera de 0x20 + 17 entradas de 0x298
+    // (u64 sampling + HidTouchScreenState: u64 sampling, s32 count, u32, 16 toques de 0x28)
+    constexpr size_t TOUCH           = 0x400;
+    constexpr size_t TOUCH_ENTRY     = 0x298;
+    constexpr size_t TOUCH_LIFO_SIZE = 0x20 + 17 * TOUCH_ENTRY;
 }
 
 class InputState {
@@ -67,7 +78,10 @@ public:
     // mapeo la memoria (mapped_address != 0), tambien en su copia.
     void Update(std::vector<u8>& shm, Core::Memory& memory, u64 mapped_address, const PadInput& pad);
 
-    void Reset() { m_sampling = 0; }
+    // Estado nuevo de la pantalla tactil (0 a 16 dedos)
+    void UpdateTouch(std::vector<u8>& shm, Core::Memory& memory, u64 mapped_address, const std::vector<TouchPoint>& touches);
+
+    void Reset() { m_sampling = 0; m_touchSampling = 0; m_prevTouches.clear(); }
     u64 SamplingNumber() const { return m_sampling; }
 
     // Anade a 'buttons' los botones virtuales de los sticks
@@ -76,6 +90,8 @@ public:
 private:
     void PushState(std::vector<u8>& shm, size_t lifo_offset, const PadInput& pad, u32 attributes);
     u64 m_sampling = 0;
+    u64 m_touchSampling = 0;
+    std::vector<u32> m_prevTouches;   // dedos del estado anterior (para marcar los que empiezan)
 };
 
 } // namespace NeXo2::HLE

@@ -40,6 +40,15 @@
 
 Icons become SDL textures the first time they are drawn.
 
+## Log and crashes
+
+- `nexo2.log` is next to the executable. The previous run's log is kept as `nexo2-anterior.log`.
+- If NeXo crashes (`frontend/crash_report.*`), it appends `[CRASH]` lines to the log:
+  - the exception and the address;
+  - the game, and the PC/LR of each emulated core;
+  - the call stack. Function names and lines come from the `.pdb`, which the Release build now writes next to the exe. Otherwise module + offset.
+- It catches Windows SEH exceptions, Linux signals, `abort()` and uncaught C++ exceptions.
+
 ## Shortcuts and environment
 
 - F5 pauses or resumes, Ctrl+O opens a file, Ctrl+, opens settings. Dropping a `.nro` on the window plays it.

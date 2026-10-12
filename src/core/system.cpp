@@ -1,7 +1,9 @@
 #include "system.hpp"
 #include "common/logger.hpp"
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
+#include <map>
 #include <iterator>
 
 namespace NeXo2::Core {
@@ -109,9 +111,8 @@ std::filesystem::path FindExefs(const std::string& path) {
 }
 
 // Nombre del juego en control.nacp (primer idioma que lo tenga)
-std::string NacpTitle(const std::filesystem::path& file) {
-    std::vector<u8> nacp;
-    if (!ReadWholeFile(file, nacp) || nacp.size() < 0x3000) return {};
+std::string NacpTitle(const std::vector<u8>& nacp) {
+    if (nacp.size() < 0x3000) return {};
     for (int lang = 0; lang < 16; ++lang) {
         std::string name;
         for (size_t i = 0; i < 0x200 && nacp[lang * 0x300 + i]; ++i) name += char(nacp[lang * 0x300 + i]);
@@ -121,32 +122,73 @@ std::string NacpTitle(const std::filesystem::path& file) {
 }
 } // namespace
 
-bool System::IsGameFolder(const std::string& path) { return !FindExefs(path).empty(); }
+bool System::IsGameFolder(const std::string& path) {
+    return Loader::IsPackageFile(Utf8Path(path)) || !FindExefs(path).empty();
+}
+
+std::vector<std::filesystem::path> System::KeyDirs() const {
+    // keys/ junto al ejecutable (la carpeta sdmc esta ahi) o al lado de sdmc; NEXO2_KEYS manda
+    std::vector<std::filesystem::path> dirs;
+    if (const char* e = std::getenv("NEXO2_KEYS")) dirs.push_back(Utf8Path(e));
+    const auto base = m_kernel.GetSdmcRoot().parent_path();
+    dirs.push_back(base / "keys");
+    dirs.push_back(base.empty() ? std::filesystem::path(".") : base);
+    return dirs;
+}
 
 bool System::LoadGame(const std::string& path) {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path exefs = FindExefs(path);
-    if (exefs.empty()) {
-        m_lastError = "No es un juego extraido (falta el archivo 'main' del ExeFS): " + path;
+    auto fail = [&](const std::string& why) {
+        m_lastError = why;
         Logger::Log(Logger::Level::Error, "[Loader] " + m_lastError);
         return false;
+    };
+
+    // --- De donde salen los archivos: un NSP/XCI o una carpeta extraida ---
+    std::map<std::string, Loader::VFilePtr> exefs;
+    Loader::VFilePtr romfs;
+    std::vector<u8> nacp;
+    std::string fallback_name;
+    u64 package_program_id = 0;
+    if (Loader::IsPackageFile(Utf8Path(path))) {
+        Loader::KeySet keys;
+        std::string where;
+        if (!Loader::LoadKeys(KeyDirs(), keys, where)) {
+            const auto dir = KeyDirs()[std::getenv("NEXO2_KEYS") ? 1 : 0].u8string();
+            return fail("Para abrir NSP y XCI hacen falta las claves de TU consola: copia tu prod.keys (y title.keys "
+                        "si lo tienes) en " + std::string(dir.begin(), dir.end()));
+        }
+        auto pkg = Loader::OpenGamePackage(Utf8Path(path), keys);
+        if (!pkg.ok) return fail("No se pudo abrir " + path + ": " + pkg.error);
+        exefs = std::move(pkg.exefs);
+        romfs = pkg.romfs;
+        nacp = std::move(pkg.nacp);
+        package_program_id = pkg.program_id;
+        fallback_name = Utf8Path(path).stem().string();
+        Logger::Log(Logger::Level::Info, "[Loader] Claves leidas de " + where);
+    } else {
+        const fs::path dir_exefs = FindExefs(path);
+        if (dir_exefs.empty()) return fail("No es un juego extraido (falta el archivo 'main' del ExeFS): " + path);
+        const fs::path dir = (dir_exefs.filename() == "exefs" || dir_exefs.filename() == "ExeFS") ? dir_exefs.parent_path() : dir_exefs;
+        for (const auto& e : fs::directory_iterator(dir_exefs, ec))
+            if (e.is_regular_file(ec)) exefs[e.path().filename().string()] = Loader::OpenHostFile(e.path());
+        for (const fs::path& r : {dir / "romfs.bin", dir_exefs / "romfs.bin"})
+            if (fs::is_regular_file(r, ec)) { romfs = Loader::OpenHostFile(r); break; }
+        std::vector<u8> d;
+        if (ReadWholeFile(dir / "control.nacp", d)) nacp = std::move(d);
+        fallback_name = dir.filename().string();
     }
-    const fs::path dir = (exefs.filename() == "exefs" || exefs.filename() == "ExeFS") ? exefs.parent_path() : exefs;
 
     Loader::NpdmInfo npdm;
-    std::vector<u8> data;
-    if (ReadWholeFile(exefs / "main.npdm", data)) {
-        auto r = Loader::ParseNpdm(data);
-        if (!r.ok) {
-            m_lastError = r.error;
-            Logger::Log(Logger::Level::Error, "[Loader] " + m_lastError);
-            return false;
-        }
+    if (auto it = exefs.find("main.npdm"); it != exefs.end() && it->second) {
+        auto r = Loader::ParseNpdm(it->second->ReadAll());
+        if (!r.ok) return fail(r.error);
         npdm = r.info;
     } else {
         Logger::Log(Logger::Level::Warning, "[Loader] No hay main.npdm: se usan valores por defecto");
     }
+    if (!npdm.program_id) npdm.program_id = package_program_id;
 
     ResetMachine();
     // Los modulos van seguidos en memoria, en este orden; se empieza por el primero
@@ -156,20 +198,18 @@ bool System::LoadGame(const std::string& path) {
     u64 base = HLE::Layout::CODE_BASE, entry = 0;
     std::string loaded;
     for (const auto& name : names) {
-        if (!ReadWholeFile(exefs / name, data)) continue;
-        auto r = Loader::LoadNso(data, m_memory, base, name);
-        if (!r.ok) {
-            m_lastError = "NSO no valido: " + r.error;
-            Logger::Log(Logger::Level::Error, "[Loader] " + m_lastError);
-            return false;
-        }
+        auto it = exefs.find(name);
+        if (it == exefs.end() || !it->second) continue;
+        auto r = Loader::LoadNso(it->second->ReadAll(), m_memory, base, name);
+        if (!r.ok) return fail("NSO no valido: " + r.error);
         if (!entry) entry = base;
         base += r.image_size;
         loaded += (loaded.empty() ? "" : ", ") + name;
     }
+    if (!entry) return fail("El juego no tiene codigo (ExeFS sin 'main')");
 
-    const std::string title = NacpTitle(dir / "control.nacp");
-    m_programName = !title.empty() ? title : !npdm.name.empty() ? npdm.name : dir.filename().string();
+    const std::string title = NacpTitle(nacp);
+    m_programName = !title.empty() ? title : !npdm.name.empty() ? npdm.name : fallback_name;
     m_nroInfo = {};
     m_nroInfo.base = HLE::Layout::CODE_BASE;
     m_nroInfo.entry = entry;
@@ -181,12 +221,11 @@ bool System::LoadGame(const std::string& path) {
     m_lastGame = path;
     m_currentFile = path;
 
-    for (const fs::path& r : {dir / "romfs.bin", exefs / "romfs.bin"})
-        if (fs::is_regular_file(r, ec)) { m_kernel.SetRomfsFile(r); break; }
+    m_kernel.SetRomfs(romfs);
     m_kernel.SetupApplicationProcess(entry, m_nroInfo.image_size, npdm.main_priority, npdm.main_core,
                                      npdm.main_stack_size, npdm.program_id);
     Logger::Log(Logger::Level::Info, "[Loader] Juego cargado: " + m_programName + " (modulos: " + loaded + ")" +
-                (m_kernel.GetRomfsFile().empty() ? ", sin romfs.bin" : ", con romfs.bin"));
+                (romfs ? ", con RomFS" : ", sin RomFS"));
     return true;
 }
 

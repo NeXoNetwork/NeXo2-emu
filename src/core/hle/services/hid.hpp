@@ -12,4 +12,9 @@ class HidAppletResource final : public ServiceObject { public: HidAppletResource
 
 constexpr size_t HID_SHARED_MEMORY_SIZE = 0x40000;
 
+class ActiveVibrationDeviceList final : public ServiceObject {
+public:
+    ActiveVibrationDeviceList();
+};
+
 } // namespace NeXo2::HLE

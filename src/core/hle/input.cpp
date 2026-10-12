@@ -103,4 +103,39 @@ void InputState::Update(std::vector<u8>& shm, Core::Memory& memory, u64 mapped_a
     }
 }
 
+void InputState::UpdateTouch(std::vector<u8>& shm, Core::Memory& memory, u64 mapped_address,
+                             const std::vector<TouchPoint>& touches) {
+    if (shm.size() < SIZE) return;
+    const size_t lifo = TOUCH;
+    const u64 tail  = (Get<u64>(shm, lifo + 0x10) + 1) % LIFO_ENTRIES;
+    const u64 count = std::min<u64>(Get<u64>(shm, lifo + 0x18) + 1, LIFO_ENTRIES);
+    const size_t e = lifo + LIFO_STORAGE + tail * TOUCH_ENTRY;
+    std::memset(shm.data() + e, 0, TOUCH_ENTRY);
+    const size_t n = std::min<size_t>(touches.size(), 16);
+    Put<u64>(shm, e + 0x00, m_touchSampling);
+    Put<u64>(shm, e + 0x08, m_touchSampling);
+    Put<s32>(shm, e + 0x10, s32(n));
+    std::vector<u32> ids;
+    for (size_t i = 0; i < n; ++i) {
+        const auto& t = touches[i];
+        const size_t q = e + 0x18 + i * 0x28;
+        const bool started = std::find(m_prevTouches.begin(), m_prevTouches.end(), t.id) == m_prevTouches.end();
+        Put<u64>(shm, q + 0x00, 0);                  // delta_time
+        Put<u32>(shm, q + 0x08, started ? 1u : 0u);  // atributo: Start (dedo nuevo)
+        Put<u32>(shm, q + 0x0C, t.id);
+        Put<u32>(shm, q + 0x10, std::min<u32>(t.x, 1279));
+        Put<u32>(shm, q + 0x14, std::min<u32>(t.y, 719));
+        Put<u32>(shm, q + 0x18, 15);                 // diametro
+        Put<u32>(shm, q + 0x1C, 15);
+        Put<u32>(shm, q + 0x20, 0);                  // giro
+        ids.push_back(t.id);
+    }
+    m_prevTouches = std::move(ids);
+    Put<u64>(shm, lifo + 0x08, LIFO_ENTRIES);
+    Put<u64>(shm, lifo + 0x10, tail);
+    Put<u64>(shm, lifo + 0x18, count);
+    ++m_touchSampling;
+    if (mapped_address != 0) memory.WriteBytes(mapped_address + lifo, shm.data() + lifo, TOUCH_LIFO_SIZE);
+}
+
 } // namespace NeXo2::HLE

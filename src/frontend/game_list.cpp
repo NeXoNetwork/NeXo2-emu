@@ -132,7 +132,21 @@ bool ReadGameFolderMetadata(const fs::path& dir, GameEntry& out) {
     return true;
 }
 
-std::vector<GameEntry> ScanGames(const std::vector<fs::path>& dirs) {
+bool ReadPackageMetadata(const fs::path& file, const Loader::KeySet* keys, GameEntry& out) {
+    std::error_code ec;
+    out.path = PathToUtf8(file);
+    out.file_name = PathToUtf8(file.filename());
+    out.title = PathToUtf8(file.stem());
+    out.size = fs::file_size(file, ec);
+    out.is_folder = true;   // se carga con System::LoadGame
+    if (!keys) return true;
+    auto pkg = Loader::OpenGamePackage(file, *keys, false);
+    if (pkg.nacp.size() >= 0x4000) ParseNacp(pkg.nacp.data(), out);
+    if (!pkg.icon.empty() && pkg.icon.size() < (4u << 20)) DecodeIcon(pkg.icon, out);
+    return true;
+}
+
+std::vector<GameEntry> ScanGames(const std::vector<fs::path>& dirs, const Loader::KeySet* keys) {
     std::vector<GameEntry> games;
     std::set<fs::path> seen;
     for (const auto& dir : dirs) {
@@ -159,11 +173,11 @@ std::vector<GameEntry> ScanGames(const std::vector<fs::path>& dirs) {
             if (!it->is_regular_file(ec2)) continue;
             auto ext = PathToUtf8(p.extension());
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-            if (ext != ".nro") continue;
+            if (ext != ".nro" && ext != ".nsp" && ext != ".xci") continue;
             const fs::path canon = fs::weakly_canonical(p, ec2);
             if (!seen.insert(ec2 ? p : canon).second) continue;
             GameEntry g;
-            if (ReadNroMetadata(p, g)) games.push_back(std::move(g));
+            if (ext == ".nro" ? ReadNroMetadata(p, g) : ReadPackageMetadata(p, keys, g)) games.push_back(std::move(g));
         }
     }
     std::sort(games.begin(), games.end(), [](const GameEntry& a, const GameEntry& b) {

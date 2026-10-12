@@ -101,3 +101,28 @@ TEST(Input_ReachesProgramMemory) {
     sys.GetMemory().ReadBytes(handheld + HidLayout::HANDHELD_LIFO, lifo.data(), lifo.size());
     CHECK_EQ(Latest(lifo.data()).buttons, NpadButton::A | NpadButton::Plus);
 }
+
+TEST(Input_TouchScreenLifo) {
+    // Formato de libnx (HidTouchScreenLifo en 0x400): cabecera de 0x20 y 17 entradas de 0x298
+    HLE::InputState in;
+    std::vector<u8> shm;
+    in.InitSharedMemory(shm);
+    Core::Memory mem;
+    in.UpdateTouch(shm, mem, 0, {{640, 360, 7}});
+    in.UpdateTouch(shm, mem, 0, {{650, 370, 7}, {10, 20, 8}});
+    auto get32 = [&](size_t o) { u32 v; std::memcpy(&v, &shm[o], 4); return v; };
+    auto get64 = [&](size_t o) { u64 v; std::memcpy(&v, &shm[o], 8); return v; };
+    const u64 tail = get64(0x400 + 0x10);
+    CHECK_EQ(get64(0x400 + 0x18), 2ULL);                 // dos estados
+    const size_t e = 0x400 + 0x20 + size_t(tail) * 0x298;
+    CHECK_EQ(get32(e + 0x10), 2u);                       // dos dedos
+    CHECK_EQ(get32(e + 0x18 + 0x10), 650u);              // x del primero
+    CHECK_EQ(get32(e + 0x18 + 0x14), 370u);
+    CHECK_EQ(get32(e + 0x18 + 0x08), 0u);                // el 7 ya estaba: sin "Start"
+    CHECK_EQ(get32(e + 0x18 + 0x28 + 0x08), 1u);         // el 8 es nuevo: "Start"
+    CHECK_EQ(get32(e + 0x18 + 0x28 + 0x0C), 8u);
+    in.UpdateTouch(shm, mem, 0, {});
+    const size_t e2 = 0x400 + 0x20 + size_t(get64(0x400 + 0x10)) * 0x298;
+    CHECK_EQ(get32(e2 + 0x10), 0u);                      // sin dedos
+    CHECK(get64(e2) > get64(e));                         // numero de muestra creciente
+}

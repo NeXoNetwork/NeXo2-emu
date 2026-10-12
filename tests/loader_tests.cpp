@@ -244,7 +244,7 @@ TEST(Game_LoadsExtractedExefs) {
     auto& k = sys.GetKernel();
     CHECK(k.IsApplication());
     CHECK_EQ(k.ProgramId(), 0x0100ABCD00000000ULL);
-    CHECK(k.GetRomfsFile() == dir / "romfs.bin");
+    CHECK(k.GetRomfs() && k.GetRomfs()->Size() == 0x1234);
     CHECK(k.GetSaveRoot().filename() == "0100ABCD00000000");
     const auto& st = sys.GetCpu().GetState();
     CHECK_EQ(st.pc, HLE::Layout::CODE_BASE);

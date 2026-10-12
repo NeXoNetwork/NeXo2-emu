@@ -9,6 +9,7 @@
 #include "services/hid.hpp"
 #include "services/misc.hpp"
 #include "services/audio.hpp"
+#include "services/audren.hpp"
 #include "services/bsd.hpp"
 #include "services/ssl.hpp"
 #include "services/nvdrv.hpp"
@@ -102,7 +103,7 @@ void Kernel::Reset() {
     m_mainStackSize = Layout::MAIN_STACK_SIZE;
     m_isApplication = false;
     m_programId = 0x0100000000001000ULL;
-    m_romfsFile.clear();
+    m_romfs.reset();
     m_exited = false;
     m_debugOutput.clear();
     m_handles.Clear();
@@ -791,6 +792,11 @@ u32 Kernel::GetHidSharedMemoryHandle() {
 void Kernel::SetPadInput(const PadInput& pad) {
     if (!m_hidMemory) return;   // el programa aun no ha pedido la memoria de hid
     m_input.Update(m_hidMemory->data, m_memory, m_hidMemory->mapped_address, pad);
+}
+
+void Kernel::SetTouchInput(const std::vector<TouchPoint>& touches) {
+    if (!m_hidMemory) return;
+    m_input.UpdateTouch(m_hidMemory->data, m_memory, m_hidMemory->mapped_address, touches);
 }
 
 // svcClearEvent / svcResetSignal(handle = W0)

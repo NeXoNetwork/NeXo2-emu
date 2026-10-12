@@ -81,14 +81,13 @@ FileSystemProxy::FileSystemProxy() : ServiceObject("fsp-srv") {
     });
     // RomFS del juego
     RegisterCommand(200, "OpenDataStorageByCurrentProcess", [](IpcContext& ctx) {
-        const fs::path& file = ctx.GetKernel().GetRomfsFile();
-        auto storage = file.empty() ? nullptr : std::make_shared<FileStorage>(file);
-        if (!storage || !storage->IsOpen()) {
-            Logger::Log(Logger::Level::Warning, "[fs] El juego pide su RomFS y no hay romfs.bin");
+        const auto& file = ctx.GetKernel().GetRomfs();
+        if (!file) {
+            Logger::Log(Logger::Level::Warning, "[fs] El juego pide su RomFS y no la tiene");
             ctx.SetResult(RESULT_PATH_NOT_FOUND);
             return;
         }
-        ctx.PushInterface(storage);
+        ctx.PushInterface(std::make_shared<FileStorage>(file));
         ctx.SetResult(Result::Success);
     });
     RegisterCommand(202, "OpenDataStorageByDataId", [](IpcContext& ctx) { ctx.SetResult(RESULT_PATH_NOT_FOUND); });
@@ -102,25 +101,19 @@ FileSystemProxy::FileSystemProxy() : ServiceObject("fsp-srv") {
 //  IStorage (romfs.bin)
 // ============================================================================
 
-FileStorage::FileStorage(const fs::path& path) : ServiceObject("IStorage (romfs)"), m_file(path, std::ios::binary) {
-    std::error_code ec;
-    m_size = m_file.is_open() ? fs::file_size(path, ec) : 0;
+FileStorage::FileStorage(Loader::VFilePtr file) : ServiceObject("IStorage (romfs)"), m_file(std::move(file)) {
     RegisterCommand(0, "Read", [this](IpcContext& ctx) {
         const s64 offset = ctx.Pop<s64>();
         const u64 size = std::min<u64>(ctx.Pop<u64>(), ctx.GetWriteBufferSize(0));
         if (offset < 0) { ctx.SetResult(RESULT_INVALID_OFFSET); return; }
         std::vector<u8> data(size_t(size), 0);
-        if (u64(offset) < m_size) {
-            m_file.clear();
-            m_file.seekg(offset);
-            m_file.read(reinterpret_cast<char*>(data.data()), std::streamsize(std::min<u64>(size, m_size - u64(offset))));
-        }
+        m_file->Read(u64(offset), data.data(), data.size());
         if (!data.empty()) ctx.WriteBuffer(data.data(), data.size(), 0);
         ctx.SetResult(Result::Success);
     });
     RegisterCommand(1, "Write", [](IpcContext& ctx) { ctx.SetResult(RESULT_NOT_PERMITTED); });
     RegisterCommand(2, "Flush", [](IpcContext& ctx) { ctx.SetResult(Result::Success); });
-    RegisterCommand(4, "GetSize", [this](IpcContext& ctx) { ctx.Push<s64>(s64(m_size)); ctx.SetResult(Result::Success); });
+    RegisterCommand(4, "GetSize", [this](IpcContext& ctx) { ctx.Push<s64>(s64(m_file->Size())); ctx.SetResult(Result::Success); });
 }
 
 // ============================================================================

@@ -5,6 +5,7 @@
 
 #include "system.hpp"
 #include "common/logger.hpp"
+#include "frontend/crash_report.hpp"
 #include "frontend/game_list.hpp"
 #include "frontend/settings.hpp"
 #include "frontend/theme.hpp"
@@ -692,9 +693,15 @@ void OpenFolderInExplorer(const std::filesystem::path& dir) {
 
 int main(int argc, char** argv) {
     // Registro en nexo2.log, junto al ejecutable (se rehace en cada arranque)
+    // El de la vez anterior se guarda como nexo2-anterior.log (si NeXo se cerro de golpe, ahi esta
+    // lo que paso: ver crash_report.hpp)
+    std::string logPath = "nexo2.log";
+    if (const char* base = SDL_GetBasePath()) logPath = std::string(base) + "nexo2.log";
     {
-        std::string logPath = "nexo2.log";
-        if (const char* base = SDL_GetBasePath()) logPath = std::string(base) + "nexo2.log";
+        std::error_code ec;
+        const auto p = std::filesystem::path(std::u8string(logPath.begin(), logPath.end()));
+        if (std::filesystem::exists(p, ec))
+            std::filesystem::rename(p, p.parent_path() / "nexo2-anterior.log", ec);
         static std::string keep = logPath;   // EnableFile guarda el puntero solo durante la llamada
         NeXo2::Common::Logger::EnableFile(keep.c_str());
     }
@@ -734,6 +741,20 @@ int main(int argc, char** argv) {
 
     // --- La "consola" emulada ---
     System sys;
+    // Si NeXo revienta: que juego era y por donde iba cada nucleo emulado (en nexo2.log)
+    NeXo2::Frontend::InstallCrashReport(logPath, [&sys] {
+        std::string s = "[CRASH] Programa: " + sys.GetProgramName();
+        auto& k = sys.GetKernel();
+        for (int c = 0; c < 6; ++c) {
+            auto* cpu = k.CoreCpu(c);
+            if (!cpu) continue;
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "\n[CRASH] Nucleo %d: PC 0x%llX LR 0x%llX", c,
+                          (unsigned long long)cpu->GetState().pc, (unsigned long long)cpu->GetState().x[30]);
+            s += buf;
+        }
+        return s;
+    });
     // Ajustes de la CPU y la GPU. Las variables de entorno (NEXO2_MULTICORE=0, NEXO2_GPU_ASYNC=0)
     // siguen mandando, para depurar.
     auto envOff = [](const char* name) { const char* e = std::getenv(name); return e && e[0] == '0'; };
@@ -757,9 +778,8 @@ int main(int argc, char** argv) {
     };
     applyEmuSettings();
 
-    // Sonido: audout manda PCM de 16 bits estereo a 48 kHz y aqui va a la tarjeta del PC.
-    // Si se acumula mas de 1/4 de segundo (la emulacion fue a rafagas) se tira lo viejo,
-    // para que el sonido no se quede cada vez mas atrasado. NEXO2_AUDIO=0 lo apaga.
+    // Sonido: audout y audren mandan PCM de 16 bits estereo a 48 kHz y aqui va a la tarjeta del
+    // PC. NEXO2_AUDIO=0 lo apaga.
     static std::atomic<int> s_volume{100};
     static std::atomic<bool> s_audioOn{true};
     s_volume = settings.volume;
@@ -772,8 +792,15 @@ int main(int argc, char** argv) {
             SDL_ResumeAudioStreamDevice(audioStream);
             sys.GetKernel().SetAudioSink([audioStream](const s16* samples, size_t frames) {
                 if (!s_audioOn) return;
-                constexpr int MAX_QUEUED = 48000 / 4 * 4;   // 0,25 s en bytes (2 canales x 2 bytes)
-                if (SDL_GetAudioStreamQueued(audioStream) > MAX_QUEUED) SDL_ClearAudioStream(audioStream);
+                // Latencia objetivo: ~60 ms en cola. Si la emulacion va un poco rapida o lenta, el
+                // sonido se acelera o frena hasta un 2 % (no se nota) en vez de cortarse; solo si se
+                // acumula mas de medio segundo (pausa, carga) se tira lo viejo.
+                constexpr int BYTES_PER_SEC = 48000 * 4;
+                constexpr int TARGET = BYTES_PER_SEC * 60 / 1000;
+                const int queued = SDL_GetAudioStreamQueued(audioStream);
+                if (queued > BYTES_PER_SEC / 2) SDL_ClearAudioStream(audioStream);
+                const float ratio = std::clamp(1.0f + (float(queued) / float(TARGET) - 1.0f) * 0.02f, 0.98f, 1.02f);
+                SDL_SetAudioStreamFrequencyRatio(audioStream, ratio);
                 const int vol = s_volume;
                 if (vol >= 100) { SDL_PutAudioStreamData(audioStream, samples, int(frames * 4)); return; }
                 std::vector<s16> scaled(samples, samples + frames * 2);
@@ -797,6 +824,7 @@ int main(int argc, char** argv) {
         std::error_code ec;
         std::filesystem::create_directories(sdSwitch, ec);
         std::filesystem::create_directories(gamesDir, ec);
+        std::filesystem::create_directories(Utf8ToPath(baseDir + "keys"), ec);   // prod.keys de la consola del usuario
     }
 
     // Pantalla de la consola: textura que se actualiza con cada imagen nueva
@@ -843,7 +871,11 @@ int main(int argc, char** argv) {
     };
     auto rescan = [&] {
         FreeIcons(games);
-        games = ScanGames(gameDirs());
+        // Claves de la consola del usuario (para el nombre e icono de los .nsp / .xci)
+        NeXo2::Loader::KeySet keys;
+        std::string keys_dir;
+        const bool have_keys = NeXo2::Loader::LoadKeys(sys.KeyDirs(), keys, keys_dir);
+        games = ScanGames(gameDirs(), have_keys ? &keys : nullptr);
         orderDirty = true;
         selected = -1;
         LogUi("Biblioteca: " + std::to_string(games.size()) + " juegos");
@@ -904,9 +936,10 @@ int main(int argc, char** argv) {
     };
     auto showOpenFile = [&] {
         static const SDL_DialogFileFilter filters[] = {{"Homebrew de Switch (*.nro)", "nro"},
+                                                       {"Juego de Switch (*.nsp, *.xci)", "nsp;xci"},
                                                        {"Juego extraido (main.npdm del ExeFS)", "npdm"},
                                                        {"Todos los archivos", "*"}};
-        SDL_ShowOpenFileDialog(OnOpenFile, nullptr, window, filters, 3, PathToUtf8(sdSwitch).c_str(), false);
+        SDL_ShowOpenFileDialog(OnOpenFile, nullptr, window, filters, 4, PathToUtf8(sdSwitch).c_str(), false);
     };
     auto showAddFolder = [&] { SDL_ShowOpenFolderDialog(OnAddFolder, nullptr, window, nullptr, false); };
 
@@ -1199,6 +1232,16 @@ int main(int argc, char** argv) {
             if (h > avail.y) { h = avail.y; w = h * 16.0f / 9.0f; }
             const ImVec2 origin = ImGui::GetCursorScreenPos();
             const ImVec2 p0(origin.x + (avail.x - w) * 0.5f, origin.y + (avail.y - h) * 0.5f);
+            // Pantalla tactil: el clic izquierdo (o el dedo, en un PC tactil) sobre la imagen del
+            // juego, en coordenadas de la pantalla de la consola (1280 x 720)
+            if (g_emuRunning) {
+                std::vector<NeXo2::HLE::TouchPoint> touches;
+                const ImVec2 m = ImGui::GetIO().MousePos;
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && ImGui::IsWindowHovered() && w > 1 && h > 1 &&
+                    m.x >= p0.x && m.y >= p0.y && m.x < p0.x + w && m.y < p0.y + h)
+                    touches.push_back({u32((m.x - p0.x) / w * 1280.0f), u32((m.y - p0.y) / h * 720.0f), 0});
+                kernel.SetTouchInput(touches);
+            }
             if (frameCount > 0 && screenTexture && w > 1 && h > 1) {
                 ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)screenTexture, p0, ImVec2(p0.x + w, p0.y + h));
             } else {

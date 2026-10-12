@@ -163,6 +163,17 @@ void AudioRenderer::Update(Core::Memory& mem, State& st, const std::vector<u8>& 
         Put<u32>(out, o_mempool + i * 0x10, now);
     }
     // --- Canales de voz (volumen hacia cada buffer de mezcla) ---
+    static const bool chdebug = std::getenv("NEXO2_AUDREN_DEBUG") != nullptr;
+    static u64 chcount = 0;
+    if (chdebug && chcount++ % 200 == 0) {
+        std::string l = "[audren] canales: ";
+        for (size_t i = 0; i < n_channels; ++i)
+            for (size_t w = 0; w < CHANNEL_IN / 4; ++w) {
+                const u32 v = Get<u32>(in, p + i * CHANNEL_IN + w * 4);
+                if (v && w) l += std::to_string(i) + "+" + std::to_string(w * 4) + "=" + std::to_string(v) + " ";
+            }
+        Logger::Log(Logger::Level::Info, l.substr(0, 1500));
+    }
     for (size_t i = 0; i < n_channels; ++i, p += CHANNEL_IN) {
         const u32 id = Get<u32>(in, p);
         const size_t slot = id < n_channels ? id : i;
@@ -219,7 +230,38 @@ void AudioRenderer::Update(Core::Memory& mem, State& st, const std::vector<u8>& 
         Put<u64>(out, o_voice + slot * 0x10, v.played);
         Put<u32>(out, o_voice + slot * 0x10 + 8, v.consumed);
     }
-    p += effects_sz;     // efectos: aun no (el sonido pasa tal cual)
+    if (chdebug && (chcount - 1) % 200 == 0) {
+        std::string l = "[audren] efectos:";
+        for (size_t i = 0; i < n_effects; ++i) {
+            const size_t q = p + i * EFFECT_IN;
+            const u8 type = Get<u8>(in, q);
+            if (!type) continue;
+            l += " #" + std::to_string(i) + " tipo " + std::to_string(type) + " on " + std::to_string(Get<u8>(in, q + 2)) +
+                 " mezcla " + std::to_string(Get<u32>(in, q + 4)) + " orden " + std::to_string(Get<s32>(in, q + 0x18)) + " param:";
+            for (size_t b = 0; b < 0x40; ++b) { char h[4]; std::snprintf(h, sizeof(h), "%02x", Get<u8>(in, q + 0x20 + b)); l += h; }
+            l += ";";
+        }
+        Logger::Log(Logger::Level::Info, l);
+    }
+    // --- Efectos (ver State::Effect). Salida: estado 0x10 bytes por efecto (0 = activo) ---
+    if (st.effects.size() < n_effects) st.effects.resize(n_effects);
+    for (size_t i = 0; i < n_effects; ++i) {
+        const size_t q = p + i * EFFECT_IN;
+        auto& e = st.effects[i];
+        e.type = Get<u8>(in, q);
+        e.enabled = Get<u8>(in, q + 2) != 0;
+        e.mix_id = Get<u32>(in, q + 4);
+        e.order = Get<s32>(in, q + 0x18);
+        if (e.type == 1) {   // BufferMixer: entradas (24), salidas (24), volumenes (24), cuantos
+            for (int k = 0; k < 24; ++k) {
+                e.input[k] = s8(Get<u8>(in, q + 0x20 + size_t(k)));
+                e.output[k] = s8(Get<u8>(in, q + 0x38 + size_t(k)));
+                e.volume[k] = Get<float>(in, q + 0x50 + 4 * size_t(k));
+            }
+            e.count = std::min<u32>(Get<u32>(in, q + 0xB0), 24);
+        }
+    }
+    p += effects_sz;
     p += splitter_sz;    // splitters: se mezcla directo a la mezcla final
     // --- Mezclas ---
     for (size_t i = 0; i < n_mixes; ++i, p += MIX_IN) {
@@ -256,25 +298,45 @@ void AudioRenderer::Update(Core::Memory& mem, State& st, const std::vector<u8>& 
     (void)perf_sz;
     // NEXO2_AUDREN_DEBUG=1: resumen de cada RequestUpdate en el registro (para depurar juegos)
     static const bool debug = std::getenv("NEXO2_AUDREN_DEBUG") != nullptr;
-    if (debug) {
+    static u64 debug_count = 0;
+    if (debug && debug_count++ % 50 == 0) {   // uno de cada 50 (cada ~0,25 s)
         std::string line = "[audren] update REV" + std::string(1, char(rev >> 24)) + " tamanos: mempools " + std::to_string(mempools_sz) +
                            " canales " + std::to_string(channels_sz) + " voces " + std::to_string(voices_sz) + " efectos " +
                            std::to_string(effects_sz) + " mezclas " + std::to_string(mixes_sz) + " sinks " + std::to_string(sinks_sz) +
                            " splitter " + std::to_string(splitter_sz) + " total " + std::to_string(in.size()) + ": ";
-        int shown = 0;
-        for (size_t i = 0; i < st.voices.size() && shown < 6; ++i) {
+        // Las voces que hacen algo (con buffers o que ya han sonado); si no hay, las 6 primeras
+        int shown = 0, idle = 0;
+        for (size_t i = 0; i < st.voices.size() && shown < 24; ++i) {
             const auto& v = st.voices[i];
             if (!v.used) continue;
-            ++shown;
             int valid = 0;
             for (const auto& w : v.wb) valid += w.valid;
+            if (!valid && !v.played && ++idle > 6) continue;
+            ++shown;
+            line += "[tocadas " + std::to_string(v.played) + ", terminados " + std::to_string(v.consumed) + "] ";
             line += "voz " + std::to_string(i) + " (estado " + std::to_string(v.state) + ", formato " + std::to_string(v.format) +
                     ", " + std::to_string(v.sample_rate) + " Hz, " + std::to_string(v.channels) + " ch, vol " +
                     std::to_string(v.volume) + ", mezcla " + std::to_string(v.dest_mix) + ", buffers " + std::to_string(valid) +
-                    ", canal0 " + std::to_string(v.channel_ids[0]) + ") ";
+                    ", canal0 " + std::to_string(v.channel_ids[0]);
+            if (v.channel_ids[0] < st.channels.size()) {
+                line += " vols";
+                for (int k = 0; k < 24; ++k)
+                    if (st.channels[v.channel_ids[0]][size_t(k)] != 0.0f)
+                        line += " [" + std::to_string(k) + "]=" + std::to_string(st.channels[v.channel_ids[0]][size_t(k)]).substr(0, 5);
+                line += st.channel_used[v.channel_ids[0]] ? " usado" : " NO usado";
+            }
+            // Pico de las muestras del primer buffer valido (PCM16)
+            for (const auto& w : v.wb)
+                if (w.valid && v.format == 2 && w.size >= 2) {
+                    int peak = 0;
+                    for (u64 o = 0; o + 2 <= std::min<u64>(w.size, 8192); o += 2) peak = std::max(peak, std::abs(int(s16(mem.Read<u16>(w.address + o)))));
+                    line += " pico " + std::to_string(peak) + " (inicio " + std::to_string(w.start) + " fin " + std::to_string(w.end) + " bytes " + std::to_string(w.size) + ")";
+                    break;
+                }
+            line += ") ";
         }
         for (const auto& m : st.mixes) if (m.used) line += "| mezcla " + std::to_string(m.id) + " x" + std::to_string(m.buffers) + " vol " + std::to_string(m.volume) + " ";
-        for (const auto& k : st.sinks) if (k.used) line += "| sink tipo " + std::to_string(k.type) + " entradas " + std::to_string(k.input_count) + " ";
+        for (const auto& k : st.sinks) if (k.used) { line += "| sink tipo " + std::to_string(k.type) + " entradas"; for (u32 j = 0; j < k.input_count; ++j) line += " " + std::to_string(k.inputs[j]); line += " "; }
         Logger::Log(Logger::Level::Info, line);
     }
 }
@@ -343,7 +405,25 @@ void AudioRenderer::RenderFrame(Kernel& kernel, Core::Memory& mem, State& st, st
         order.push_back({depth, &m});
     }
     std::sort(order.begin(), order.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    // Efectos de una mezcla, por su orden (los indices de buffer son de esa mezcla)
+    auto apply_effects = [&](const State::Mix& m) {
+        std::vector<const State::Effect*> list;
+        for (const auto& e : st.effects)
+            if (e.enabled && e.type == 1 && e.mix_id == m.id) list.push_back(&e);
+        std::stable_sort(list.begin(), list.end(), [](auto* a, auto* b) { return a->order < b->order; });
+        for (const auto* e : list)
+            for (u32 k = 0; k < e->count; ++k) {
+                const s32 si = e->input[k], di = e->output[k];
+                if (si < 0 || di < 0 || u32(si) >= m.buffers || u32(di) >= m.buffers) continue;
+                if (m.offset + u32(si) >= nbuf || m.offset + u32(di) >= nbuf) continue;
+                const float* src = &buf[size_t(m.offset + u32(si)) * N];
+                float* dst = &buf[size_t(m.offset + u32(di)) * N];
+                const float k2 = e->volume[k];
+                for (u32 i = 0; i < N; ++i) dst[i] += src[i] * k2;
+            }
+    };
     for (auto& [depth, m] : order) {
+        apply_effects(*m);
         const State::Mix* dest = find_mix(m->dest);
         if (!dest) continue;
         for (u32 s = 0; s < m->buffers; ++s)
@@ -355,6 +435,7 @@ void AudioRenderer::RenderFrame(Kernel& kernel, Core::Memory& mem, State& st, st
                 for (u32 i = 0; i < N; ++i) dst[i] += src[i] * k;
             }
     }
+    if (final_mix) apply_effects(*final_mix);
     if (final_mix && final_mix->volume != 1.0f)
         for (u32 b = 0; b < final_mix->buffers && b < nbuf; ++b)
             for (u32 i = 0; i < N; ++i) buf[size_t(b) * N + i] *= final_mix->volume;

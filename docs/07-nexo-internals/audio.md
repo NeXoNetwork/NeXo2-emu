@@ -85,7 +85,12 @@ Mixes and output:
 - **Device sink:** 1, 2 or 6 inputs. 6 inputs are downmixed to stereo (front + 0.707 × centre + 0.707 × rear).
 - **Circular-buffer sink:** PCM16 is written into the program's ring.
 - 32 kHz is upsampled to 48 kHz. Then the result goes to `Kernel::PushAudio`, like `audout`.
-- Effects (reverb, delay, aux…) are not done yet: the sound passes through without them.
+- Effects: only **BufferMixer** (type 1) is done. It adds mix buffers into other buffers of the
+  same mix (inputs, outputs and volumes from its parameter: 24 + 24 bytes, 24 floats, a count at
+  +0x90), run in the effect's processing order before the mix goes on. Games use it to move the
+  sound to the buffers the sink reads (Excitebike: voices on buffers 0-3, mixers into 4/5, sink
+  reads 4/5); without it they are silent. Reverb, delay, aux... are still skipped (dry sound).
+- `NEXO2_AUDREN_DEBUG=1` also logs the voice channels' volumes, the effects and the sink inputs.
 
 Timing:
 

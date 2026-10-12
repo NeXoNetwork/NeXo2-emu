@@ -82,6 +82,9 @@ games/
 | `aoc:u` | no DLC |
 | `fatal:u` | stops emulation with the error code `2XXX-YYYY` |
 | AM | the applet message queue starts with "focus changed" (15) and its event signaled; `PopLaunchParameter` kind 2 returns the preselected user (`IStorage`, magic 0xC79497CA); kind 1 is empty (0x480) |
+| Library applets | `CreateLibraryApplet` "opens" the applet and it finishes at once: the controller applet (0x0E) answers "1 player, controller 1", the user selector (0x10) answers the user "NeXo", others return nothing |
+| `nifm` requests | `CreateRequest` → `IRequest` that says "no connection" (0x8AE6E): games go on offline instead of contacting Nintendo's servers. The general state still says "connected" for homebrew |
+| `bsd:u` | `RegisterClient` answers errno 0 (the game SDK aborts otherwise) |
 
 Several of these are `LenientService`s ([ipc-and-services.md](ipc-and-services.md)).
 

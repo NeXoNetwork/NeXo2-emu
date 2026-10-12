@@ -54,6 +54,10 @@ What the SDK of commercial games needs (libnx does not):
   interval. The presented image is cropped (a game draws 1280x720 inside a 1920x1080 buffer)
   and flipped (transform bit 0 horizontal, bit 1 vertical; NVN draws upside down and asks for
   a vertical flip). Swap interval 2 = 30 frames per second.
+- **Two buffers in one nvmap block.** NVN puts both display buffers in one block; the second
+  has an offset. NVN also maps the block at several GPU addresses: with Vulkan, NeXo looks for
+  the drawn image at every mapping (`GpuMemoryManager::ReverseTranslateAll`) plus the offset.
+  Missing either made every other frame black (flicker).
 - **GetDisplayVsyncEvent** (5202): one event per vi session, signaled at every vertical sync
   (60 Hz, emulated clock). Games wait on it, clear it and wait again.
 

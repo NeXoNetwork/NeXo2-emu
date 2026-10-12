@@ -683,26 +683,7 @@ bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format,
                               u64(im->surf.width) * im->surf.height > u64(img->surf.width) * img->surf.height))
             img = im.get();
     }
-    if (!img || img->mem_dirty) {   // no esta en la GPU, o la memoria es mas nueva: presentar desde ella
-        // En el registro cada situacion distinta (como mucho 6), para ver donde dibuja el juego
-        static std::string last;
-        static int told = 0;
-        {
-            std::string list;
-            const u64 span = ((u64(width) * 4 + 63) & ~63ull) * ((u64(height) + 127) & ~127ull);
-            for (auto& im : m_images)
-                if (im->lo < va + span && im->hi > va)
-                    list += " [+" + std::to_string(s64(im->surf.address) - s64(va)) + "] " + std::to_string(im->surf.width) + "x" + std::to_string(im->surf.height) + " fmt " +
-                            std::to_string(int(im->format)) + (im->depth ? " prof" : "") + (im->mem_dirty ? " mem" : "");
-            char where[32];
-            std::snprintf(where, sizeof(where), "0x%llX", (unsigned long long)va);
-            const std::string msg = "[Vulkan] Presentar " + std::to_string(width) + "x" + std::to_string(height) +
-                " de " + where + " desde memoria (imagenes en esa direccion:" + (list.empty() ? " ninguna" : list) +
-                "; imagenes en total " + std::to_string(m_images.size()) + ")";
-            if (msg != last && told < 6) { last = msg; ++told; Common::Logger::Log(Common::Logger::Level::Info, msg); }
-        }
-        return false;
-    }
+    if (!img || img->mem_dirty) return false;   // no esta en la GPU, o la memoria es mas nueva: presentar desde ella
     Timer t(m_stats.ns_present);
     const u32 cw = std::min(width, img->surf.width), ch = std::min(height, img->surf.height);
     const VkDeviceSize bytes = VkDeviceSize(cw) * ch * 4;
@@ -722,6 +703,17 @@ bool VulkanRasterizer::ReadForPresent(u64 va, u32 width, u32 height, u32 format,
     for (u32 y = 0; y < ch; ++y) std::memcpy(&rgba[size_t(y) * width], src + size_t(y) * cw, size_t(cw) * 4);
     ++m_stats.presents;
     return true;
+}
+
+std::string VulkanRasterizer::DescribeImages() const {
+    std::string list;
+    char b[96];
+    for (auto& im : m_images) {
+        std::snprintf(b, sizeof(b), " 0x%llX %ux%u fmt %d%s%s;", (unsigned long long)im->surf.address, im->surf.width,
+                      im->surf.height, int(im->format), im->depth ? " prof" : "", im->mem_dirty ? " mem" : "");
+        list += b;
+    }
+    return list.empty() ? " ninguna" : list;
 }
 
 void VulkanRasterizer::FlushRegion(u64 va, u64 size) {

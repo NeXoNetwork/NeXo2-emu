@@ -4,6 +4,8 @@
 #include "common/logger.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace NeXo2::HLE {
@@ -385,9 +387,10 @@ std::vector<u8> HosBinderDriver::Transact(IpcContext& ctx, BufferQueue& q, u32 c
                     const auto t0 = std::chrono::steady_clock::now();
                     // Dibujado con Vulkan: directamente de la imagen de la GPU (sin pasar por memoria)
                     bool ok = false;
-                    if (address && info.offset == 0 && info.layout == 3) {
+                    // (NVN pone los dos buffers en un solo bloque nvmap: el segundo va desplazado)
+                    if (address && info.layout == 3) {
                         std::vector<u32> rgba;
-                        if (gpu.ReadForPresent(address, info.width, info.height, info.format, rgba)) {
+                        if (gpu.ReadForPresent(address + info.offset, info.width, info.height, info.format, rgba)) {
                             display.PresentRgba(info.width, info.height, std::move(rgba));
                             ok = true;
                         }

@@ -66,6 +66,18 @@ struct AudioRendererState {
         u32 buffers = 0, id = 0, dest = 0x7FFFFFFF, offset = 0;
         std::vector<float> matrix;   // [origen][destino] 24 x 24
     };
+    // Efecto. Solo se aplica BufferMixer (tipo 1: suma buffers de su mezcla en otros; muchos
+    // juegos lo usan para llevar el sonido a los buffers que lee la salida). Los demas
+    // (reverb, delay, aux...) se saltan: el sonido pasa sin ellos.
+    struct Effect {
+        u8 type = 0;
+        bool enabled = false;
+        u32 mix_id = 0;
+        s32 order = 0;
+        s8 input[24] = {}, output[24] = {};
+        float volume[24] = {};
+        u32 count = 0;
+    };
     struct Sink {
         bool used = false;
         u32 type = 0;                // 1 dispositivo, 2 buffer circular
@@ -84,6 +96,7 @@ struct AudioRendererState {
     std::vector<bool> channel_used;
     std::vector<Mix> mixes;
     std::vector<Sink> sinks;
+    std::vector<Effect> effects;
     std::vector<u32> mempool_states;
     std::shared_ptr<KEvent> event;
     u64 frames_rendered = 0;

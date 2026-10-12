@@ -478,6 +478,16 @@ bool Gpu::ReadForPresent(u64 cpu_address, u32 width, u32 height, u32 format, std
     // (block linear: el buffer ocupa algo mas que ancho x alto x 4)
     const u64 bytes = ((u64(width) * 4 + 63) & ~63ull) * ((u64(height) + 127) & ~127ull);
     for (u64 va : vas) m_hw->FlushRegion(va, bytes);
+    // En el registro (como mucho 5 veces): que habia, para ver donde dibuja el juego
+    static int told = 0;
+    if (format == 1 && told < 5) {
+        ++told;
+        std::string list;
+        char b[32];
+        for (u64 v : vas) { std::snprintf(b, sizeof(b), " 0x%llX", (unsigned long long)v); list += b; }
+        Common::Logger::Log(Common::Logger::Level::Info, "[Vulkan] Imagen " + std::to_string(width) + "x" + std::to_string(height) +
+            " presentada desde memoria (direcciones:" + list + "; imagenes:" + m_hw->DescribeImages() + ")");
+    }
     return false;
 #else
     (void)cpu_address; (void)width; (void)height; (void)format; (void)rgba;

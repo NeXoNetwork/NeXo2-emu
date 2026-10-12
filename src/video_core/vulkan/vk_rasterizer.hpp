@@ -56,6 +56,7 @@ public:
 
     // Imagen para presentar leida directamente del render target (ver Gpu::ReadForPresent)
     bool ReadForPresent(u64 va, u32 width, u32 height, u32 format, std::vector<u32>& rgba);
+    std::string DescribeImages() const;   // imagenes de la GPU (para el registro)
     // Termina el trabajo pendiente y escribe en memoria las imagenes cambiadas (las de
     // profundidad solo si 'depth')
     void Flush(bool depth = true);

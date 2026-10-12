@@ -135,10 +135,11 @@ long Blocking(IpcContext& ctx, GuestSocket& s, bool dontwait, short events, int 
 } // namespace
 
 BsdService::BsdService(std::string name) : ServiceObject(std::move(name)) {
-    // RegisterClient(config, pid, tamano de la memoria de transferencia, handle) -> u64 pid
+    // RegisterClient(config, pid, tamano de la memoria de transferencia, handle) -> errno (s32).
+    // Tiene que ser 0: el SDK de los juegos aborta si no (libnx no lo mira)
     RegisterCommand(0, "RegisterClient", [](IpcContext& ctx) {
         ctx.GetKernel().Network();
-        ctx.Push<u64>(1);
+        ctx.Push<u64>(0);
         ctx.SetResult(Result::Success);
     });
     RegisterStub(1, "StartMonitoring");
@@ -563,7 +564,40 @@ NifmService::NifmService(std::string name) : ServiceObject(std::move(name)) {
     RegisterCommand(5, "CreateGeneralService", create);
 }
 
+// IRequest: una peticion de conexion de un juego. Se contesta "sin conexion" (los juegos siguen
+// sin red: rankings y demas no hacen falta, y asi no intentan hablar con los servidores de
+// Nintendo). Los homebrew no la usan: miran el estado general, que sigue diciendo "conectada".
+namespace {
+class NifmRequest final : public LenientService {
+public:
+    NifmRequest() : LenientService("nifm:IRequest") {
+        static constexpr u32 STATE_NOT_SUBMITTED = 1;
+        static constexpr u32 RESULT_NETWORK_DISABLED = 110 | (1111u << 9);   // nifm: comunicacion desactivada
+        RegisterCommand(0, "GetRequestState", [](IpcContext& ctx) { ctx.Push<u32>(STATE_NOT_SUBMITTED); ctx.SetResult(Result::Success); });
+        RegisterCommand(1, "GetResult", [](IpcContext& ctx) { ctx.SetResult(RESULT_NETWORK_DISABLED); });
+        RegisterCommand(2, "GetSystemEventReadableHandles", [](IpcContext& ctx) {
+            ctx.PushCopyHandle(ctx.GetKernel().CreateEvent("nifm: peticion", true));
+            ctx.PushCopyHandle(ctx.GetKernel().CreateEvent("nifm: peticion 2", true));
+            ctx.SetResult(Result::Success);
+        });
+        RegisterStub(3, "Cancel");
+        RegisterStub(4, "Submit");
+        // GetAppletInfo: el applet que habria que abrir para arreglar la conexion. Ninguno (id 0)
+        RegisterCommand(21, "GetAppletInfo", [](IpcContext& ctx) {
+            const std::vector<u8> zeros(size_t(std::min<u64>(ctx.GetWriteBufferSize(0), 0x1000)), 0);
+            if (!zeros.empty()) ctx.WriteBuffer(zeros.data(), zeros.size(), 0);
+            ctx.Push<u32>(0); ctx.Push<u32>(0); ctx.Push<u32>(0);
+            ctx.SetResult(Result::Success);
+        });
+    }
+};
+} // namespace
+
 NifmGeneralService::NifmGeneralService() : ServiceObject("IGeneralService") {
+    RegisterCommand(4, "CreateRequest", [](IpcContext& ctx) {
+        ctx.PushInterface(std::make_shared<NifmRequest>());
+        ctx.SetResult(Result::Success);
+    });
     // GetClientId -> buffer con el id
     RegisterCommand(1, "GetClientId", [](IpcContext& ctx) {
         const u32 id = 1;

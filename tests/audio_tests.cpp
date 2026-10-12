@@ -23,12 +23,15 @@ struct VoiceDesc {
 };
 
 // Entrada de RequestUpdate con 1 mempool, 1 canal, 1 voz, mezcla final de 2 buffers y un sink
-Bytes Input(const VoiceDesc& vd) {
+// with_mixer: la mezcla final tiene 4 buffers, la voz va a 0/1, un efecto BufferMixer los suma
+// en 2/3 y la salida lee 2/3 (como hacen juegos de verdad)
+Bytes Input(const VoiceDesc& vd, bool with_mixer = false) {
     const u32 behavior = 0x10, mempools = 0x20, channels = 0x70, voices = 0x170, mixes = 0x930, sinks = 0x140, perf = 0x10;
-    Bytes in(0x40 + behavior + mempools + channels + voices + mixes + sinks + perf, 0);
+    const u32 effects = with_mixer ? 0xC0 : 0;
+    Bytes in(0x40 + behavior + mempools + channels + voices + effects + mixes + sinks + perf, 0);
     Put<u32>(in, 0, 0x36564552);   // REV6
     Put<u32>(in, 4, behavior); Put<u32>(in, 8, mempools); Put<u32>(in, 0xC, voices); Put<u32>(in, 0x10, channels);
-    Put<u32>(in, 0x18, mixes); Put<u32>(in, 0x1C, sinks); Put<u32>(in, 0x20, perf); Put<u32>(in, 0x3C, u32(in.size()));
+    Put<u32>(in, 0x14, effects); Put<u32>(in, 0x18, mixes); Put<u32>(in, 0x1C, sinks); Put<u32>(in, 0x20, perf); Put<u32>(in, 0x3C, u32(in.size()));
     size_t p = 0x40 + behavior;
     Put<u64>(in, p, PCM); Put<u64>(in, p + 8, 0x10000); Put<u32>(in, p + 0x10, 4);   // RequestAttach
     p += mempools;
@@ -48,10 +51,17 @@ Bytes Input(const VoiceDesc& vd) {
     }
     Put<u32>(in, p + 0x140, 0);           // canal 0
     p += voices;
-    Put<float>(in, p, 1.0f); Put<u32>(in, p + 8, 2); in[p + 0xC] = 1; Put<u32>(in, p + 0x10, 0);
+    if (with_mixer) {                     // BufferMixer: 0 -> 2, 1 -> 3
+        in[p] = 1; in[p + 1] = 1; in[p + 2] = 1; Put<u32>(in, p + 4, 0);
+        in[p + 0x20] = 0; in[p + 0x21] = 1; in[p + 0x38] = 2; in[p + 0x39] = 3;
+        Put<float>(in, p + 0x50, 1.0f); Put<float>(in, p + 0x54, 1.0f); Put<u32>(in, p + 0xB0, 2);
+        p += effects;
+    }
+    Put<float>(in, p, 1.0f); Put<u32>(in, p + 8, with_mixer ? 4 : 2); in[p + 0xC] = 1; Put<u32>(in, p + 0x10, 0);
     Put<u32>(in, p + 0x924, 0x7FFFFFFF);
     p += mixes;
-    in[p] = 1; in[p + 1] = 1; Put<u32>(in, p + 0x120, 2); in[p + 0x124] = 0; in[p + 0x125] = 1;
+    in[p] = 1; in[p + 1] = 1; Put<u32>(in, p + 0x120, 2);
+    in[p + 0x124] = with_mixer ? 2 : 0; in[p + 0x125] = with_mixer ? 3 : 1;
     return in;
 }
 } // namespace
@@ -131,4 +141,22 @@ TEST(Audren_AdpcmAndPitch) {
     pcm.clear();
     HLE::AudioRenderer::RenderFrame(sys.GetKernel(), mem, st2, &pcm);
     CHECK(pcm[0] == 0 && pcm[2] == 50 && pcm[4] == 100 && pcm[6] == 150);
+}
+
+TEST(Audren_BufferMixerEffect) {
+    // Sin el efecto la salida (buffers 2/3) estaria en silencio
+    Core::System sys;
+    auto& mem = sys.GetMemory();
+    for (u32 i = 0; i < 240; ++i) mem.Write<u16>(PCM + 2 * i, u16(s16(i * 10)));
+    HLE::AudioRendererState st;
+    st.sample_rate = 48000; st.sample_count = 240; st.mix_buffer_count = 4;
+    Bytes out;
+    VoiceDesc vd;
+    vd.bufs = {{PCM, 240}};
+    HLE::AudioRenderer::Update(mem, st, Input(vd, true), out);
+    std::vector<s16> pcm;
+    HLE::AudioRenderer::RenderFrame(sys.GetKernel(), mem, st, &pcm);
+    CHECK_EQ(pcm.size(), size_t(480));
+    CHECK_EQ(int(pcm[100 * 2]), 1000);    // L: volumen 1
+    CHECK_EQ(int(pcm[100 * 2 + 1]), 500); // R: volumen 0,5
 }

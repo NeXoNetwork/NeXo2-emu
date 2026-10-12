@@ -1,7 +1,9 @@
 #include "applet.hpp"
 #include "hle/kernel.hpp"
 #include "hle/kernel_objects.hpp"
+#include "common/logger.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include "game.hpp"
@@ -71,9 +73,62 @@ public:
     }
 };
 
+// Applet de biblioteca (selector de mandos, teclado, errores...). No hay applets de verdad:
+// "se abre" y termina en el acto. El de mandos devuelve "1 jugador, mando 1"; el de usuario,
+// el usuario "NeXo"; el resto, nada.
+class LibraryAppletAccessor final : public LenientService {
+public:
+    explicit LibraryAppletAccessor(u32 applet_id) : LenientService("ILibraryAppletAccessor") {
+        auto out = std::make_shared<std::deque<std::vector<u8>>>();
+        if (applet_id == APPLET_CONTROLLER) {
+            std::vector<u8> r(0xC, 0);
+            r[0] = 1;                                   // jugadores
+            const u32 npad_id = 0;                      // mando 1 (No1)
+            std::memcpy(&r[4], &npad_id, 4);
+            out->push_back(std::move(r));               // result (u32 a +8) = 0: correcto
+        } else if (applet_id == APPLET_PLAYER_SELECT) {
+            // Selector de usuario: resultado 0 (correcto) + el UID del usuario "NeXo"
+            std::vector<u8> r(0x18, 0);
+            std::memcpy(&r[8], &USER_ID_LO, 8);
+            std::memcpy(&r[0x10], &USER_ID_HI, 8);
+            out->push_back(std::move(r));
+        }
+        auto done = std::make_shared<KEvent>("applet terminado", true);
+        RegisterCommand(0, "GetAppletStateChangedEvent", [done](IpcContext& ctx) {
+            ctx.PushCopyHandle(ctx.GetKernel().Handles().Create(done)); ctx.SetResult(Result::Success); });
+        RegisterCommand(1, "IsCompleted", Reply<u8>(1));
+        RegisterStub(10, "Start");
+        RegisterStub(20, "RequestExit");
+        RegisterStub(25, "Terminate");
+        RegisterStub(30, "GetResult");
+        RegisterStub(100, "PushInData");
+        RegisterCommand(101, "PopOutData", [out](IpcContext& ctx) {
+            if (out->empty()) { ctx.SetResult(RESULT_NO_DATA_IN_CHANNEL); return; }
+            ctx.PushInterface(std::make_shared<Storage>(std::move(out->front())));
+            out->pop_front();
+            ctx.SetResult(Result::Success);
+        });
+        RegisterStub(103, "PushInteractiveInData");
+        RegisterCommand(104, "PopInteractiveOutData", [](IpcContext& ctx) { ctx.SetResult(RESULT_NO_DATA_IN_CHANNEL); });
+        RegisterCommand(105, "GetPopOutDataEvent", [done](IpcContext& ctx) {
+            ctx.PushCopyHandle(ctx.GetKernel().Handles().Create(done)); ctx.SetResult(Result::Success); });
+        RegisterCommand(106, "GetPopInteractiveOutDataEvent", NewEvent("applet: datos interactivos"));
+    }
+    static constexpr u32 APPLET_CONTROLLER = 0x0E, APPLET_PLAYER_SELECT = 0x10;
+};
+
 class LibraryAppletCreator final : public LenientService {
 public:
     LibraryAppletCreator() : LenientService("ILibraryAppletCreator") {
+        // CreateLibraryApplet(id del applet, modo) -> ILibraryAppletAccessor
+        RegisterCommand(0, "CreateLibraryApplet", [](IpcContext& ctx) {
+            const u32 id = ctx.Pop<u32>();
+            char b[64];
+            std::snprintf(b, sizeof(b), "[am] El juego abre el applet 0x%X (se da por terminado)", id);
+            Common::Logger::Log(Common::Logger::Level::Info, b);
+            ctx.PushInterface(std::make_shared<LibraryAppletAccessor>(id));
+            ctx.SetResult(Result::Success);
+        });
         RegisterCommand(10, "CreateStorage", [](IpcContext& ctx) {
             const s64 size = ctx.Pop<s64>();
             ctx.PushInterface(std::make_shared<Storage>(std::vector<u8>(size_t(std::max<s64>(size, 0)))));

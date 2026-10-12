@@ -2,6 +2,8 @@
 #include <array>
 #include <map>
 #include <memory>
+#include <functional>
+#include <memory>
 #include <vector>
 #include "hle/display.hpp"
 #include "hle/service.hpp"
@@ -27,6 +29,7 @@ struct BufferQueue {
         bool configured = false;
         bool dequeued = false;
         GraphicBufferInfo info;
+        std::vector<u8> flat;      // el GraphicBuffer tal cual lo mando el programa (RequestBuffer)
         u64  present_ticket = 0;   // tarea de la GPU que lo presenta (hay que esperarla al reusarlo)
     };
     std::array<Slot, 64> slots;
@@ -35,9 +38,13 @@ struct BufferQueue {
 };
 
 // Estado compartido por todas las interfaces de una sesion de vi
+struct KEvent;
 struct ViState {
     std::map<u32, BufferQueue> queues;   // id del binder -> cola
     u64 next_layer_id = 1;
+    // Evento de sincronizacion vertical: se activa 60 veces por segundo (reloj emulado)
+    std::shared_ptr<KEvent> vsync;
+    std::shared_ptr<std::function<void(u64)>> vsync_tick;
 };
 
 class ViRoot final : public ServiceObject {

@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <algorithm>
 #include <mutex>
 #include <vector>
 #include "common/types.hpp"
@@ -92,6 +93,33 @@ public:
         m_frame.height = height;
         m_frame.rgba = std::move(rgba);
         ++m_frame.count;
+    }
+
+    // Recorte y giro que pide QueueBuffer (el juego dibuja en parte del buffer, o al reves).
+    // Rectangulo vacio = todo; transform: bit 0 espejo horizontal, bit 1 vertical (3 = 180 grados)
+    void CropAndTransformFrame(s32 left, s32 top, s32 right, s32 bottom, u32 transform) {
+        std::lock_guard lock(m_frameMutex);
+        DisplayFrame& f = m_frame;
+        const s32 w = s32(f.width), h = s32(f.height);
+        if (w <= 0 || h <= 0 || f.rgba.size() < size_t(w) * size_t(h)) return;
+        left = std::clamp(left, 0, w); right = std::clamp(right, 0, w);
+        top = std::clamp(top, 0, h); bottom = std::clamp(bottom, 0, h);
+        const bool crop = right > left && bottom > top && (left > 0 || top > 0 || right < w || bottom < h);
+        const bool flip_h = transform & 1, flip_v = (transform & 2) != 0;
+        if (!crop && !flip_h && !flip_v) return;
+        if (!crop) { left = 0; top = 0; right = w; bottom = h; }
+        const u32 cw = u32(right - left), ch = u32(bottom - top);
+        std::vector<u32> out(size_t(cw) * ch);
+        for (u32 y = 0; y < ch; ++y) {
+            const u32 sy = u32(top) + (flip_v ? ch - 1 - y : y);
+            for (u32 x = 0; x < cw; ++x) {
+                const u32 sx = u32(left) + (flip_h ? cw - 1 - x : x);
+                out[size_t(y) * cw + x] = f.rgba[size_t(sy) * u32(w) + sx];
+            }
+        }
+        f.width = cw;
+        f.height = ch;
+        f.rgba = std::move(out);
     }
 
     void Reset() { m_nvmap.Clear(); std::lock_guard lock(m_frameMutex); m_frame = DisplayFrame{}; }

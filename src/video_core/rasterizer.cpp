@@ -846,7 +846,8 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
 
     // --- Programas: vertices (etapa 1, "VertexB") y pixeles (etapa 5) ---
     const u64 region = Iova(regs[PROGRAM_REGION], regs[PROGRAM_REGION + 1]);
-    auto stage_enabled = [&](u32 s) { return regs[PIPELINE + 0x10 * s] & 1; };
+    // VertexB (etapa 1) esta siempre activa en el hardware: NVN no escribe su bit
+    auto stage_enabled = [&](u32 s) { return s == 1 || (regs[PIPELINE + 0x10 * s] & 1); };
     for (u32 s : {0u, 4u})   // (el teselado, etapas 2 y 3, lo hace RunVertexStage)
         if (stage_enabled(s)) {
             m_gpu.Warn("stage" + std::to_string(s), "dibujo con geometria/VertexA: no soportado todavia");
@@ -854,7 +855,10 @@ void SoftwareRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const D
             return;
         }
     if (!stage_enabled(1) || !stage_enabled(5)) {
-        m_gpu.Warn("nostage", "dibujo sin shader de vertices o de pixeles");
+        char cfg[160];
+        std::snprintf(cfg, sizeof(cfg), " (etapas: %x %x %x %x %x %x)", regs[PIPELINE], regs[PIPELINE + 0x10], regs[PIPELINE + 0x20],
+                      regs[PIPELINE + 0x30], regs[PIPELINE + 0x40], regs[PIPELINE + 0x50]);
+        m_gpu.Warn("nostage", std::string("dibujo sin shader de vertices o de pixeles") + cfg);
         ++stats.draws_skipped;
         return;
     }

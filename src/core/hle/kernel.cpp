@@ -10,6 +10,7 @@
 #include "services/misc.hpp"
 #include "services/audio.hpp"
 #include "services/audren.hpp"
+#include "services/game.hpp"
 #include "services/bsd.hpp"
 #include "services/ssl.hpp"
 #include "services/nvdrv.hpp"
@@ -87,6 +88,18 @@ void Kernel::RegisterDefaultServices() {
     m_services.Register("nvdrv",    [] { return std::make_shared<NvDrv>("nvdrv"); });
     m_services.Register("nvdrv:a",  [] { return std::make_shared<NvDrv>("nvdrv:a"); });
     m_services.Register("nvdrv:s",  [] { return std::make_shared<NvDrv>("nvdrv:s"); });
+    // Juegos comerciales (game.hpp)
+    m_services.Register("lm",       [] { return std::make_shared<LmService>(); });
+    m_services.Register("fatal:u",  [] { return std::make_shared<FatalService>(); });
+    m_services.Register("aoc:u",    [] { return std::make_shared<AocService>(); });
+    for (const char* n : {"acc:u0", "acc:u1"})
+        m_services.Register(n, [n] { return std::make_shared<AccountService>(n); });
+    for (const char* n : {"pctl", "pctl:a", "pctl:s", "pctl:r"})
+        m_services.Register(n, [n] { return std::make_shared<PctlService>(n); });
+    for (const char* n : {"friends:u", "friends:v", "friends:a", "friends:m", "friends:s"})
+        m_services.Register(n, [n] { return std::make_shared<FriendsService>(n); });
+    for (const char* n : {"prepo:u", "prepo:a", "prepo:a2", "prepo:s", "prepo:m"})
+        m_services.Register(n, [n] { return std::make_shared<PrepoService>(n); });
 }
 
 void Kernel::Reset() {
@@ -342,6 +355,8 @@ void Kernel::HandleSvcImpl(u32 imm, CPUState& s) {
         case 0x1B: SvcArbitrateUnlock(s);   return;
         case 0x1C: SvcWaitProcessWideKeyAtomic(s); return;
         case 0x1D: SvcSignalProcessWideKey(s); return;
+        case 0x34: SvcWaitForAddress(s);    return;
+        case 0x35: SvcSignalToAddress(s);   return;
         case 0x1E: SvcGetSystemTick(s);     return;
         case 0x26: SvcBreak(s);             return;
         case 0x27: SvcOutputDebugString(s); return;

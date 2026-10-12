@@ -83,7 +83,7 @@ struct KSharedMemory final : KObject {
 struct KThread final : KObject {
     enum class State { Created, Ready, Waiting, Terminated };
     // Que esta esperando (cuando State::Waiting)
-    enum class Wait { None, Sync, Sleep, Mutex, CondVar };
+    enum class Wait { None, Sync, Sleep, Mutex, CondVar, Arbiter };
 
     u64  id = 0;                 // svcGetThreadId
     u32  handle = 0;             // su handle principal (el que guarda el mutex como "dueno")
@@ -102,6 +102,7 @@ struct KThread final : KObject {
     u64  mutex_addr = 0;         // Wait::Mutex / CondVar
     u32  mutex_tag = 0;          // valor a escribir en el mutex al conseguirlo
     u64  cv_key = 0;             // Wait::CondVar
+    u64  arbiter_addr = 0;       // Wait::Arbiter (svcWaitForAddress)
     u32  pending_result = 0;     // resultado a devolver al conseguir el mutex tras un CondVar
     bool cancel_pending = false; // svcCancelSynchronization antes de esperar
 

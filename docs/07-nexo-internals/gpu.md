@@ -124,7 +124,8 @@ deko3d uploads small programs to the 3D engine and calls them through methods 0x
 (an even method starts a call with its first parameter, the odd one adds parameters; the
 macro runs at the end of the command). The interpreter (`MacroInterpreter`) has the 8
 registers (r0 = 0), the ALU (add/sub with carry, logic), bitfield extract/insert, register
-reads, branches with a delay slot (unless "annulled") and the exit bit (also with a delay
+reads (the two "extract and shift" operations take the value from register B and the
+position or shift from register A, as the hardware does; NVN's macros depend on it), branches with a delay slot (unless "annulled") and the exit bit (also with a delay
 slot; ignored inside a delay slot and on taken branches). Results can be sent as method
 writes with an auto-incrementing method address.
 

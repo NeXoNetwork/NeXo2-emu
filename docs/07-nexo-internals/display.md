@@ -44,6 +44,19 @@ in `vi.cpp` handle this. Supported transaction codes: REQUEST_BUFFER, SET_BUFFER
 DEQUEUE_BUFFER, DETACH_BUFFER, QUEUE_BUFFER, CANCEL_BUFFER, QUERY, CONNECT, DISCONNECT,
 SET_PREALLOCATED_BUFFER. Anything else stops the CPU with a clear message.
 
+What the SDK of commercial games needs (libnx does not):
+
+- **Objects table.** Parcels carry a 4-byte objects table (one entry, offset 0). The SDK reads
+  the native window of `OpenLayer` as an Android "binder" from there; without it the game aborts.
+- **REQUEST_BUFFER** returns the GraphicBuffer of the slot exactly as SET_PREALLOCATED_BUFFER
+  gave it (without it the SDK keeps an empty buffer and later jumps to address 0).
+- **QUEUE_BUFFER** input: crop rectangle (left, top, right, bottom), transform and swap
+  interval. The presented image is cropped (a game draws 1280x720 inside a 1920x1080 buffer)
+  and flipped (transform bit 0 horizontal, bit 1 vertical; NVN draws upside down and asks for
+  a vertical flip). Swap interval 2 = 30 frames per second.
+- **GetDisplayVsyncEvent** (5202): one event per vi session, signaled at every vertical sync
+  (60 Hz, emulated clock). Games wait on it, clear it and wait again.
+
 ## GraphicBuffer layout (as libnx serializes it)
 
 `ParseGraphicBuffer` reads the flattened buffer as 32-bit words:
@@ -86,7 +99,7 @@ The UI ignores alpha (`SDL_BLENDMODE_NONE`), like the real screen.
 
 ## Limitations (next steps)
 
-- No vsync: DEQUEUE_BUFFER never waits, so a program draws as fast as the interpreter runs.
+- Vsync: QUEUE_BUFFER makes the program wait for the next vertical sync (60 Hz).
 - GPU work (`/dev/nvhost-gpu`, `nvhost-as-gpu`...) goes to the emulated GPU: clears, copies and
   blits into swapchain images show up here. Drawing with shaders is the next phase: see [gpu.md](gpu.md).
 - One display (1280x720, handheld). Docked 1920x1080 is not reported yet.

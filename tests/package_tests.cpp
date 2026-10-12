@@ -215,7 +215,9 @@ TEST(Package_NspLoadsAndRuns) {
     const Bytes romfs = Romfs({{"a.bin", Bytes(100, 7)}, {"hello.txt", Bytes(text.begin(), text.end())}});
     Bytes nacp(0x4000, 0);
     std::memcpy(nacp.data(), "Juego NSP de prueba", 19);
-    const Bytes prog = Nca(0, 0x0100123400000000ULL, {{1, exefs}, {0, romfs}});
+    // Como en los juegos de verdad: ExeFS (0), RomFS (1) y el logo, otro PFS0 (2)
+    const Bytes logo = Pfs0({{"NintendoLogo.png", Bytes(64, 1)}, {"StartupMovie.gif", Bytes(64, 2)}});
+    const Bytes prog = Nca(0, 0x0100123400000000ULL, {{1, exefs}, {0, romfs}, {1, logo}});
     const Bytes ctrl = Nca(2, 0x0100123400000000ULL, {{0, Romfs({{"control.nacp", nacp}})}});
     WriteFile(dir / "juego.nsp", Pfs0({{"0123.nca", prog}, {"4567.nca", ctrl}}));
 

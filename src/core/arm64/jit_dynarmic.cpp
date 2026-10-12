@@ -16,6 +16,7 @@
 #include "fp_ops.hpp"
 #include "common/logger.hpp"
 #include <cstdio>
+#include <cstdlib>
 
 #ifdef NEXO2_HAS_JIT
 #include <array>

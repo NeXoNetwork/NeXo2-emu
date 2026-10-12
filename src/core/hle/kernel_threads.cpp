@@ -257,6 +257,9 @@ void Kernel::UpdateWaits() {
             case KThread::Wait::CondVar:
                 if (t.deadline <= now) AcquireMutexAfterWait(t, Result::TimedOut);
                 break;
+            case KThread::Wait::Arbiter:
+                if (t.deadline <= now) { t.arbiter_addr = 0; Wake(t, Result::TimedOut); }
+                break;
             default:
                 break;   // Mutex: solo lo despierta ArbitrateUnlock
         }
@@ -581,6 +584,86 @@ void Kernel::SvcSignalProcessWideKey(CPUState& s) {
     const size_t n = (count <= 0) ? waiters.size() : std::min<size_t>(size_t(count), waiters.size());
     for (size_t i = 0; i < n; ++i) AcquireMutexAfterWait(*waiters[i], Result::Success);
     if (n == waiters.size()) m_memory.Write<u32>(key, 0);    // ya no queda nadie esperando
+}
+
+// ============================================================================
+//  Arbitro de direcciones (svcWaitForAddress / svcSignalToAddress)
+// ============================================================================
+// Lo usan los juegos (nn::os: semaforos, eventos ligeros, barreras): un hilo espera
+// mientras una palabra de memoria cumpla una condicion, y otro lo despierta.
+
+namespace {
+enum : u32 { ARB_WAIT_IF_LESS = 0, ARB_DECREMENT_AND_WAIT_IF_LESS = 1, ARB_WAIT_IF_EQUAL = 2, ARB_WAIT_IF_EQUAL64 = 3 };
+enum : u32 { ARB_SIGNAL = 0, ARB_SIGNAL_AND_INCREMENT_IF_EQUAL = 1, ARB_SIGNAL_AND_MODIFY_BY_COUNT = 2 };
+} // namespace
+
+// svcWaitForAddress(direccion = X0, tipo = W1, valor = X2, timeout_ns = X3)
+void Kernel::SvcWaitForAddress(CPUState& s) {
+    const u64 addr = s.x[0];
+    const u32 type = static_cast<u32>(s.x[1]);
+    const s32 value = static_cast<s32>(s.x[2]);
+    const s64 timeout = static_cast<s64>(s.x[3]);
+    if (addr & (type == ARB_WAIT_IF_EQUAL64 ? 7 : 3)) { SetResult(s, Result::InvalidAddress); return; }
+    switch (type) {
+        case ARB_WAIT_IF_LESS:
+            if (s32(m_memory.Read<u32>(addr)) >= value) { SetResult(s, Result::InvalidState); return; }
+            break;
+        case ARB_DECREMENT_AND_WAIT_IF_LESS: {
+            u32 cur = m_memory.Read<u32>(addr);
+            for (;;) {
+                if (s32(cur) >= value) { SetResult(s, Result::InvalidState); return; }
+                if (m_memory.CompareExchange<u32>(addr, cur, cur - 1)) break;
+            }
+            break;
+        }
+        case ARB_WAIT_IF_EQUAL:
+            if (s32(m_memory.Read<u32>(addr)) != value) { SetResult(s, Result::InvalidState); return; }
+            break;
+        case ARB_WAIT_IF_EQUAL64:
+            if (m_memory.Read<u64>(addr) != s.x[2]) { SetResult(s, Result::InvalidState); return; }
+            break;
+        default:
+            SetResult(s, Result::InvalidEnumValue);
+            return;
+    }
+    if (timeout == 0) { SetResult(s, Result::TimedOut); return; }
+    if (!Cur()) { HaltWithMessage("svcWaitForAddress: espera sin fin en un programa sin hilos"); return; }
+    KThread& t = *Cur();
+    t.arbiter_addr = addr;
+    ++m_stats.condvar_waits;
+    Block(t, KThread::Wait::Arbiter, timeout);
+}
+
+// svcSignalToAddress(direccion = X0, tipo = W1, valor = W2, cuantos = W3; <= 0 = todos)
+void Kernel::SvcSignalToAddress(CPUState& s) {
+    const u64 addr = s.x[0];
+    const u32 type = static_cast<u32>(s.x[1]);
+    const s32 value = static_cast<s32>(s.x[2]);
+    const s32 count = static_cast<s32>(s.x[3]);
+    if (addr & 3) { SetResult(s, Result::InvalidAddress); return; }
+    if (type > ARB_SIGNAL_AND_MODIFY_BY_COUNT) { SetResult(s, Result::InvalidEnumValue); return; }
+
+    std::vector<KThread*> waiters;
+    for (auto& t : m_threads)
+        if (t->state == KThread::State::Waiting && t->wait == KThread::Wait::Arbiter && t->arbiter_addr == addr)
+            waiters.push_back(t.get());
+    std::sort(waiters.begin(), waiters.end(), [](const KThread* a, const KThread* b) {
+        return a->priority != b->priority ? a->priority < b->priority : a->wait_order < b->wait_order;
+    });
+
+    if (type != ARB_SIGNAL) {
+        s32 new_value = value + 1;
+        if (type == ARB_SIGNAL_AND_MODIFY_BY_COUNT && !waiters.empty()) {
+            if (count <= 0) new_value = value - 2;
+            else if (waiters.size() <= size_t(count)) new_value = value - 1;
+            else new_value = value;
+        }
+        u32 expected = u32(value);
+        if (!m_memory.CompareExchange<u32>(addr, expected, u32(new_value))) { SetResult(s, Result::InvalidState); return; }
+    }
+    const size_t n = (count <= 0) ? waiters.size() : std::min<size_t>(size_t(count), waiters.size());
+    for (size_t i = 0; i < n; ++i) { waiters[i]->arbiter_addr = 0; Wake(*waiters[i], Result::Success); }
+    SetResult(s, Result::Success);
 }
 
 // ============================================================================

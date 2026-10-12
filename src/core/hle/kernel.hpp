@@ -37,10 +37,10 @@ namespace Layout {
     constexpr u64 ASLR_REGION_BASE = 0x0000'0000'0800'0000;
     constexpr u64 ASLR_REGION_SIZE = 0x0000'0002'F800'0000; // hasta 0x3'0000'0000 (12 GB)
     constexpr u64 HEAP_REGION_BASE = 0x0000'0000'8000'0000;
-    constexpr u64 HEAP_REGION_SIZE = 0x0000'0000'4000'0000; // 1 GB
-    constexpr u64 ALIAS_REGION_BASE = 0x0000'0000'C000'0000;
+    constexpr u64 HEAP_REGION_SIZE = 0x0000'0001'0000'0000; // 4 GB (hasta 0x1'8000'0000)
+    constexpr u64 ALIAS_REGION_BASE = 0x0000'0001'8000'0000;
     constexpr u64 ALIAS_REGION_SIZE = 0x0000'0000'4000'0000;
-    constexpr u64 STACK_REGION_BASE = 0x0000'0001'0000'0000;
+    constexpr u64 STACK_REGION_BASE = 0x0000'0001'C000'0000;
     constexpr u64 STACK_REGION_SIZE = 0x0000'0000'1000'0000;
     constexpr u64 MAIN_STACK_SIZE   = 0x0000'0000'0010'0000; // 1 MB
     constexpr u64 LOADER_PAGE       = 0x0000'0001'FFFE'0000; // stub de salida + config del loader
@@ -52,7 +52,10 @@ namespace Layout {
     // TLS de los demas hilos: paginas hacia abajo desde TLS_PAGE (8 hilos por pagina)
     constexpr u64 TLS_SLOT_SIZE     = 0x200;
     constexpr u64 TLS_MAX_PAGES     = 15;
-    constexpr u64 TOTAL_MEMORY      = HEAP_REGION_SIZE;      // lo que "tiene" el proceso
+    // Memoria del proceso: la de un juego en la consola (3285 MB). Los juegos reparten el
+    // heap con esto (malloc, memoria de la GPU...): con 1 GB algunos se quedaban sin memoria.
+    // Las paginas del PC solo se reservan al usarlas.
+    constexpr u64 TOTAL_MEMORY      = 0x0000'0000'CD50'0000;
 }
 
 // Codigos de resultado del kernel (modulo 1). Formato: (descripcion << 9) | modulo.
@@ -289,6 +292,8 @@ private:
     void SvcArbitrateUnlock(Core::CPUState& s);
     void SvcWaitProcessWideKeyAtomic(Core::CPUState& s);
     void SvcSignalProcessWideKey(Core::CPUState& s);
+    void SvcWaitForAddress(Core::CPUState& s);
+    void SvcSignalToAddress(Core::CPUState& s);
 
     std::shared_ptr<KThread> CreateMainThread(u64 tls);
     std::shared_ptr<KThread> ThreadFromHandle(u32 handle);   // acepta 0xFFFF8000 (hilo actual)

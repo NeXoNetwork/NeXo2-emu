@@ -23,6 +23,7 @@ Put your `prod.keys`, and `title.keys` if you have one, in `keys/` next to the e
   - If there is a rights id: title key (ticket or title.keys) decrypted with `titlekek_XX`.
   - If not: key area (0x300) decrypted with `key_area_key_{application,ocean,system}_XX`; key 2 is the CTR key.
   - Sections: start/end at 0x240 + 0x10·i, in 0x200 units. FS header at 0x400 + 0x200·i: type (0 RomFS, 1 PFS0) at +2, encryption at +4 (1 none, 3 CTR).
+  - A program NCA has two PFS0 sections: the ExeFS and the logo (`NintendoLogo.png`, `StartupMovie.gif`). The ExeFS is the one with `main`.
   - CTR counter: the 8 bytes at +0x140 reversed, then the absolute offset / 16 (big endian). Sections are decrypted on read (`CtrFile`).
   - PFS0 is at hash data +0x38 (FS header 0x40). The RomFS is IVFC level 6 (FS header 0x90).
 - The program NCA (type 0) gives the ExeFS and the RomFS. The control NCA (type 2) gives `control.nacp` and the icon from its RomFS (the library shows them).
@@ -69,11 +70,25 @@ games/
 5. **Save data:** `fsp-srv` command 51 `OpenSaveDataFileSystem` opens `save/<program id>/` next to the `sdmc` folder.
    It is created the first time.
 
+## Services that games use at boot (`services/game.*`, `services/applet.*`)
+
+| Service | What NeXo answers |
+| :--- | :--- |
+| `lm` | the game's log messages go to `nexo2.log` as `[Juego] ...` |
+| `acc:u0` / `acc:u1` | one user, "NeXo" (UID "NeXoUser"), with a generated avatar |
+| `pctl*` | no parental restrictions |
+| `friends:*` | no friends, offline |
+| `prepo:*` | play reports are accepted and dropped |
+| `aoc:u` | no DLC |
+| `fatal:u` | stops emulation with the error code `2XXX-YYYY` |
+| AM | the applet message queue starts with "focus changed" (15) and its event signaled; `PopLaunchParameter` kind 2 returns the preselected user (`IStorage`, magic 0xC79497CA); kind 1 is empty (0x480) |
+
+Several of these are `LenientService`s ([ipc-and-services.md](ipc-and-services.md)).
+
 ## What is still missing
 
-- Many services that commercial games use and homebrew does not:
-  - `acc:u0` (user accounts), `pctl`, `friends`, `ns`, `aoc` (DLC), `prepo`, `mm:u`, `hwopus`…
-  - each is added as games ask for it. The log names any service that does not exist yet.
+- More services that games ask for (`ns`, `mm:u`, `hwopus`...): each is added as games ask for
+  it. The log names any service or command that does not exist yet.
 - Updates (patch RomFS) and DLC.
 
 ## Tests

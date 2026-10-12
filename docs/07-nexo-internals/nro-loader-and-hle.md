@@ -26,11 +26,15 @@ Interpreter::Run()
 | Address | Size | What |
 | :--- | :--- | :--- |
 | `0x0008000000` | image | NRO: `.text` (R-X), `.rodata` (R--), `.data`+`.bss` (RW-) |
-| `0x0080000000` | up to 1 GB | Heap (`svcSetHeapSize`) |
-| `0x00C0000000` | 1 GB | Alias region (reserved) |
-| `0x0100000000` | 1 MB | Main thread stack (SP starts at the top) |
+| `0x0080000000` | up to 4 GB | Heap (`svcSetHeapSize`) |
+| `0x0180000000` | 1 GB | Alias region (reserved) |
+| `0x01C0000000` | 1 MB | Main thread stack (SP starts at the top) |
 | `0x01FFFE0000` | 4 KB | HLE loader page: exit stub, argv, config entries |
 | `0x01FFFF0000` | 4 KB | TLS of the main thread (`TPIDRRO_EL0`) |
+
+The process "has" 3285 MB (`svcGetInfo` TotalMemorySize), like a game on the console. Games
+size their heap from that (malloc, GPU memory...); with 1 GB some ran out of memory.
+Host memory is only used for pages the program touches.
 
 All of it fits in the 12 GB that `Core::Memory` supports. The values are in
 `HLE::Layout` (kernel.hpp) and are reported to programs through `svcGetInfo`.

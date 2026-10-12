@@ -22,7 +22,8 @@ Register numbers are method offset / 4, with names from NVIDIA's public class he
 ## Pipeline
 
 1. **Programs.** `SetProgramRegion` (0x582) + `SetProgram[stage].Offset` (0x801 + 0x10*stage).
-   Stage 1 (VertexB) and 5 (Fragment) are supported. Draws with tessellation, geometry or
+   Stage 1 (VertexB) and 5 (Fragment) are supported. VertexB is always on, as in the
+   hardware: NVN never writes its enable bit (only deko3d does). Draws with tessellation, geometry or
    VertexA shaders are skipped with a warning.
 2. **Constant buffers.** `ConstbufSelector` (0x8E0..0x8E2) chooses an address and
    `Bind[stage].Constbuf` (0x904 + 8*stage) puts it in slot `c[index]`. The rasterizer copies

@@ -5,6 +5,8 @@
 #endif
 #include "common/logger.hpp"
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -96,7 +98,7 @@ void InlineToMemory::CallMethod(u32 method, u32 arg, bool) {
 //
 //  Instruccion de 32 bits:
 //    0..2  operacion: 0 ALU, 1 sumar inmediato, 2 insertar campo de bits,
-//          3 extraer y desplazar (inmediato), 4 extraer y desplazar (registro),
+//          3 extraer de B desde el bit A, 4 extraer de B y desplazar A bits,
 //          5 leer registro del motor, 7 salto
 //    4..6  que hacer con el resultado (ver abajo); en saltos: bit 4 = saltar si != 0,
 //          bit 5 = sin hueco de retardo
@@ -174,8 +176,10 @@ void MacroInterpreter::Execute(const std::vector<u32>& code, u32 start, const st
                     result = (reg[ra] & ~(mask << bf_dst)) | (field << bf_dst);
                     break;
                 }
-                case 3: result = ((reg[ra] >> (reg[rb] & 0x1F)) & mask) << bf_dst; break;   // desplazamiento en B
-                case 4: result = ((reg[ra] >> bf_src) & mask) << (reg[rb] & 0x1F); break;   // desplazamiento final en B
+                // Extraer de B: en 3 el campo empieza en el bit que dice A y va al bit fijo bf_dst;
+                // en 4 empieza en el bit fijo bf_src y se desplaza a la izquierda lo que diga A
+                case 3: result = ((reg[rb] >> (reg[ra] & 0x1F)) & mask) << bf_dst; break;
+                case 4: result = ((reg[rb] >> bf_src) & mask) << (reg[ra] & 0x1F); break;
                 case 5: result = read(reg[ra] + u32(imm)); break;
                 default: last_error = "operacion de macro desconocida"; return false;
             }
@@ -228,15 +232,31 @@ void Maxwell3D::RunMacro() {
     const u32 index = u32(m_macroPending) & 0x7F;
     m_macroPending = -1;
     ++m_gpu.GetStats().macros;
+    m_inMacro = true;
     m_mme.Execute(m_macroCode, m_macroStart[index], m_macroParams,
                   [this](u32 m, u32 v) { WriteReg(m, v); },
                   [this](u32 m) { return m < NUM_REGS ? m_shadow[m] : 0u; });   // el MME lee la shadow RAM
+    m_inMacro = false;
     if (!m_mme.last_error.empty()) m_gpu.Warn("mme:" + m_mme.last_error, "macro " + std::to_string(index) + ": " + m_mme.last_error);
     m_macroParams.clear();
 }
 
 void Maxwell3D::WriteReg(u32 method, u32 arg) {
     if (method >= NUM_REGS) { CallMethod(method, arg, true); return; }
+    // NEXO2_REG_TRACE=inicio-fin (hex): escrituras en esos registros del 3D (las 400 primeras)
+    static const std::pair<u32, u32> trace = [] {
+        const char* e = std::getenv("NEXO2_REG_TRACE");
+        if (!e) return std::pair<u32, u32>{1, 0};
+        const char* dash = std::strchr(e, '-');
+        const u32 lo = u32(std::strtoul(e, nullptr, 16));
+        return std::pair<u32, u32>{lo, dash ? u32(std::strtoul(dash + 1, nullptr, 16)) : lo};
+    }();
+    static std::atomic<int> traced{0};
+    if (method >= trace.first && method <= trace.second && traced++ < 400) {
+        char b[96];
+        std::snprintf(b, sizeof(b), "[GPU] 3D reg 0x%03X = 0x%08X%s", method, arg, m_inMacro ? " (macro)" : "");
+        Common::Logger::Log(Common::Logger::Level::Info, b);
+    }
     if (method == 0x049) m_shadowMode = arg & 3;                 // MmeShadowRamControl
     else if (m_shadowMode == 3) arg = m_shadow[method];          // replay: valor guardado
     else if (m_shadowMode != 2) m_shadow[method] = arg;          // track: guardar

@@ -22,16 +22,17 @@ constexpr u64 APPLET_RESOURCE_USER_ID = 0x0000000000000101ULL;
 
 class AppletOE final : public ServiceObject { public: AppletOE(); };
 class ApplicationProxy final : public ServiceObject { public: ApplicationProxy(); };
-class CommonStateGetter final : public ServiceObject { public: CommonStateGetter(); };
-class SelfController final : public ServiceObject { public: SelfController(); };
-class WindowController final : public ServiceObject { public: WindowController(); };
-class ApplicationFunctions final : public ServiceObject { public: ApplicationFunctions(); };
+class CommonStateGetter final : public LenientService { public: CommonStateGetter(); };
+class SelfController final : public LenientService { public: SelfController(); };
+class WindowController final : public LenientService { public: WindowController(); };
+class ApplicationFunctions final : public LenientService { public: ApplicationFunctions(); };
 
 // Interfaces que de momento no tienen ningun comando: si el programa usa
 // alguno, la CPU se para diciendo cual.
-class EmptyInterface final : public ServiceObject {
+// Interfaz sin comandos propios (audio, pantalla, applets, depuracion): todo "OK"
+class EmptyInterface final : public LenientService {
 public:
-    explicit EmptyInterface(std::string name) : ServiceObject(std::move(name)) {}
+    explicit EmptyInterface(std::string name) : LenientService(std::move(name)) {}
 };
 
 } // namespace NeXo2::HLE

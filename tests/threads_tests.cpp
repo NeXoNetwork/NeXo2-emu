@@ -93,3 +93,34 @@ TEST(Threads_DeadlockIsReported) {
     CHECK(sys.GetCpu().IsHalted());
     CHECK(sys.GetCpu().GetHaltReason().find("Bloqueo") != std::string::npos);
 }
+
+TEST(Threads_AddressArbiter) {
+    // svcWaitForAddress / svcSignalToAddress (los usan nn::os en los juegos) con un hilo:
+    // condiciones que no se cumplen, un plazo que vence y los "signal ... if equal"
+    Core::System sys;
+    CHECK(sys.LoadNro(LoadTestNro("hello.nro"), "hello.nro"));
+    const u32 program[] = {
+        0xd10083ffu, 0x910003f3u, 0x528000a9u, 0xb9000269u,               // x19 = sp - 32; [x19] = 5
+        0xaa1303e0u, 0x52800041u, 0xd28000e2u, 0x92800003u, 0xd4000681u,  // WaitIfEqual(7)
+        0xb9000660u,
+        0xaa1303e0u, 0x52800021u, 0xd2800142u, 0xd2807d03u, 0xd4000681u,  // DecrementAndWaitIfLess(10), 1000 ns
+        0xb9000a60u,
+        0xaa1303e0u, 0x52800021u, 0x52800082u, 0x52800023u, 0xd40006a1u,  // SignalAndIncrementIfEqual(4)
+        0xb9000e60u,
+        0xaa1303e0u, 0x52800021u, 0x52800122u, 0x52800023u, 0xd40006a1u,  // SignalAndIncrementIfEqual(9)
+        0xb9001260u,
+        0xd4200000u,                                                       // brk #0
+    };
+    const u64 entry = sys.GetCpu().GetState().pc;
+    const u64 data = sys.GetCpu().GetState().sp - 32;
+    for (u32 i = 0; i < std::size(program); ++i) sys.GetMemory().Write<u32>(entry + i * 4, program[i]);
+    Common::Logger::SetMuted(true);
+    sys.Run(1'000'000);
+    Common::Logger::SetMuted(false);
+    auto& mem = sys.GetMemory();
+    CHECK_EQ(mem.Read<u32>(data + 4), 0xFA01u);    // InvalidState: el valor no era 7
+    CHECK_EQ(mem.Read<u32>(data + 8), 0xEA01u);    // TimedOut tras decrementar
+    CHECK_EQ(mem.Read<u32>(data + 12), 0u);        // Success
+    CHECK_EQ(mem.Read<u32>(data + 16), 0xFA01u);   // InvalidState: el valor no era 9
+    CHECK_EQ(mem.Read<u32>(data), 5u);             // 5 -> 4 (decremento) -> 5 (incremento)
+}

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace NeXo2::HLE {
@@ -100,6 +101,15 @@ void NvDrv::Ioctl(IpcContext& ctx, int version) {
     }
     if (!ctx.IsHandled()) return;
 
+    // NEXO2_NV_TRACE=1: cada ioctl con su resultado y el principio de lo que devuelve
+    static const bool trace = [] { const char* e = std::getenv("NEXO2_NV_TRACE"); return e && e[0] == '1'; }();
+    if (trace) {
+        std::string line = "[nvdrv] fd " + std::to_string(fd) + " ioctl" + std::to_string(version) + " " + Hex(request) +
+                           " -> " + std::to_string(error) + " :";
+        char b[4];
+        for (size_t i = 0; i < std::min<size_t>(data.size(), 48); ++i) { std::snprintf(b, sizeof(b), " %02x", data[i]); line += b; }
+        Logger::Log(Logger::Level::Info, line);
+    }
     ctx.WriteBuffer(data.data(), data.size(), 0);
     ctx.Push<u32>(error);
     ctx.SetResult(Result::Success);

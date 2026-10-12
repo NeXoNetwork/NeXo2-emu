@@ -301,7 +301,7 @@ bool RunTessellation(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, Textur
                      const std::vector<s64>& slots, SoftwareRasterizer::VertexStage& out,
                      std::vector<std::array<u32, 2>>& lines) {
     GpuMemoryManager& mm = gpu.MemoryManager();
-    auto stage_on = [&](u32 s) { return regs[PIPELINE + 0x10 * s] & 1; };
+    auto stage_on = [&](u32 s) { return s == 1 || (regs[PIPELINE + 0x10 * s] & 1); };   // VertexB: siempre
     if (!stage_on(3)) return true;   // sin shader de evaluacion no sale nada
     const bool has_tcs = stage_on(2);
     const u32 P = std::max<u32>(regs[PATCH_SIZE], 1);

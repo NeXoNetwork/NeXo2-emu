@@ -1233,7 +1233,8 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     Timer timer(m_stats.ns_draw);
     auto& mm = m_gpu.MemoryManager();
     auto& stats = m_gpu.GetStats();
-    auto stage_enabled = [&](u32 s) { return regs[PIPELINE + 0x10 * s] & 1; };
+    // VertexB (etapa 1) esta siempre activa en el hardware: NVN no escribe su bit
+    auto stage_enabled = [&](u32 s) { return s == 1 || (regs[PIPELINE + 0x10 * s] & 1); };
     for (u32 s : {0u, 4u})
         if (stage_enabled(s)) return Fallback("geometria o VertexA");
     if (!stage_enabled(1) || !stage_enabled(5)) return false;

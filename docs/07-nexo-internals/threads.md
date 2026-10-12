@@ -75,6 +75,8 @@ When every thread has finished, the process ends.
 | 0x1A / 0x1B | ArbitrateLock / ArbitrateUnlock | mutex protocol below |
 | 0x1C / 0x1D | WaitProcessWideKeyAtomic / SignalProcessWideKey | condition variables |
 | 0x25 | GetThreadId | |
+| 0x34 | WaitForAddress | address arbiter, see below |
+| 0x35 | SignalToAddress | address arbiter, see below |
 
 ## Mutex and condition variable protocol (as libnx uses it)
 
@@ -93,6 +95,23 @@ The mutex word is `0` (free) or the owner's thread handle, plus bit `0x40000000`
   in ArbitrateLock, and returns the condition result (0 or 0xEA01) when it gets it.
 - **Signal**: `svcSignalProcessWideKey(key, count)` wakes `count` waiters (<= 0 = all) by
   priority; `key` goes back to 0 when nobody is left.
+
+## Address arbiter (games)
+
+The SDK of commercial games (`nn::os`: semaphores, light events, barriers) waits on a memory
+word instead of a mutex. Thread state `Wait::Arbiter`, address in `KThread::arbiter_addr`.
+
+- `svcWaitForAddress(addr, type, value, timeout)`: type 0 waits if `*addr < value`; type 1
+  does the same but first decrements the word (atomically); type 2 waits if `*addr == value`;
+  type 3 is the 64-bit "equal". If the condition is false it returns 0xFA01 (InvalidState) at
+  once; timeout 0 returns 0xEA01.
+- `svcSignalToAddress(addr, type, value, count)`: wakes `count` waiters (<= 0 = all) by
+  priority. Type 1 first changes the word from `value` to `value + 1`; type 2 changes it by
+  the number of waiters (`value - 2`, `value - 1` or `value`). If the word is not `value`:
+  0xFA01 and nobody wakes up.
+
+`Threads_AddressArbiter` checks the results (InvalidState, TimedOut after decrementing,
+Success) and the final value of the word.
 
 ## Time
 

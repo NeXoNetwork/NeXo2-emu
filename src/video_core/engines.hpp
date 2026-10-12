@@ -96,6 +96,7 @@ private:
     s32 m_macroPending = -1;                                      // macro que espera parametros
     std::vector<u32> m_macroParams;
     MacroInterpreter m_mme;
+    bool m_inMacro = false;                                       // (para NEXO2_REG_TRACE)
     // Dibujo
     ConstbufTable m_constbufs{};   // constbufs enlazados a cada etapa (BindGroup)
     SoftwareRasterizer m_raster;

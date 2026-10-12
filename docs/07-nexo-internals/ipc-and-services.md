@@ -80,6 +80,15 @@ Servicio 'fsp-srv': comando 1 no implementado
 The same happens with an unknown command of an existing service. That message,
 in the console and in `nexo2.log`, is the to-do list.
 
+Exceptions: the interfaces games open in bulk (`ICommonStateGetter`, `ISelfController`,
+`IWindowController`, `IApplicationFunctions`, `pctl`, `friends`, `prepo`, `aoc:u`, the AM
+`IStorage`...) are `LenientService`: an unknown command answers OK with no data and is logged
+once (`comando N desconocido; se contesta OK sin datos`).
+
+Every command that returns an error to the program is logged once per (command, error):
+`[IPC] IApplicationFunctions -> PopLaunchParameter devuelve el error 0x480`. When a game
+stops right after a call, that line usually says why.
+
 ## Adding a service
 
 1. Create `src/core/hle/services/<name>.hpp/.cpp` with a class deriving from `ServiceObject`.

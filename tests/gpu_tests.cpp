@@ -374,8 +374,8 @@ TEST(Gpu_MacroAluAndBitfields) {
     const std::vector<u32> macro = {
         alu(0, 2, 0, 0, 0),                  // r2 = parametro 2 (5)
         bf(2, 1, 3, 0, 1, 8, 8, 4),          // r3 = insertar ((r1 >> 8) & 0xFF) en el bit 4 de r0
-        bf(3, 1, 4, 1, 2, 0, 4, 8),          // r4 = ((r1 >> r2) & 0xF) << 8
-        bf(4, 1, 5, 1, 2, 4, 8, 0),          // r5 = ((r1 >> 4) & 0xFF) << r2
+        bf(3, 1, 4, 2, 1, 0, 4, 8),          // r4 = ((r1 >> r2) & 0xF) << 8   (valor en B, posicion en A)
+        bf(4, 1, 5, 2, 1, 4, 8, 0),          // r5 = ((r1 >> 4) & 0xFF) << r2  (valor en B, desplazamiento en A)
         addi(2, 0, 0, 0x360 | (1 << 12)),    // metodo = 0x360, +1 cada vez
         alu(4, 0, 3, 0, 0),                  // enviar r3
         alu(4, 0, 4, 0, 0),                  // enviar r4

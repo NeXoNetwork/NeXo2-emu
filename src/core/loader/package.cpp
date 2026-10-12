@@ -335,9 +335,14 @@ Nca OpenNca(VFilePtr file, const KeySet& keys, const std::map<std::string, std::
         else if (enc == 3) section = std::make_shared<CtrFile>(file, start, end - start, ctr_key, ctr_hi);
         else continue;   // XTS o BKTR (actualizaciones): todavia no
         if (fs_type == 1) {          // PFS0 (ExeFS)
-            nca.exefs = MakeSubFile(section, Get<u64>(fsh + 0x40), Get<u64>(fsh + 0x48));
+            // Una NCA de programa trae dos PFS0: el ExeFS (seccion 0) y el logo (seccion 2).
+            // El bueno es el que tiene "main".
+            auto pfs = MakeSubFile(section, Get<u64>(fsh + 0x40), Get<u64>(fsh + 0x48));
+            std::map<std::string, VFilePtr> files;
+            if (!nca.exefs && ParsePartition(pfs, files) && (files.count("main") || files.count("main.npdm")))
+                nca.exefs = pfs;
         } else if (fs_type == 0) {   // RomFS (IVFC: el nivel 6 son los datos)
-            nca.romfs = MakeSubFile(section, Get<u64>(fsh + 0x90), Get<u64>(fsh + 0x98));
+            if (!nca.romfs) nca.romfs = MakeSubFile(section, Get<u64>(fsh + 0x90), Get<u64>(fsh + 0x98));
         }
     }
     nca.ok = true;
@@ -387,7 +392,8 @@ GamePackage OpenGamePackage(const fs::path& path, const KeySet& keys, bool need_
         if (low.size() < 4 || low.substr(low.size() - 4) != ".nca" || low.find(".cnmt.") != std::string::npos) continue;
         Nca nca = OpenNca(f, keys, ticket_keys);
         if (!nca.ok) { last_error = name + ": " + nca.error; continue; }
-        if (nca.content_type == 0 && nca.exefs && g.exefs.empty() && need_program) {
+        if (nca.content_type == 0 && g.exefs.empty() && need_program) {
+            if (!nca.exefs) { last_error = name + ": no se encontro el ExeFS (claves incorrectas?)"; continue; }
             std::map<std::string, VFilePtr> exefs;
             if (ParsePartition(nca.exefs, exefs) && exefs.count("main")) {
                 g.exefs = std::move(exefs);

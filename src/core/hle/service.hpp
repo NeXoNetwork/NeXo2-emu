@@ -37,6 +37,7 @@ public:
 
     // Nombre de un comando registrado ("" si no existe)
     std::string CommandName(u32 id) const;
+    bool HasCommand(u32 id) const { return m_commands.count(id) != 0; }
 
     using Handler = std::function<void(IpcContext&)>;
 
@@ -51,6 +52,15 @@ private:
     struct Command { std::string name; Handler handler; bool logged = false; };
     std::string m_name;
     std::map<u32, Command> m_commands;
+};
+
+// Interfaz "permisiva": un comando que no conocemos contesta OK sin datos (y se apunta una
+// vez en el registro) en vez de parar el juego. Para servicios secundarios (control parental,
+// amigos, informes...) donde un "todo bien" es la respuesta de una consola normal.
+class LenientService : public ServiceObject {
+public:
+    explicit LenientService(std::string name) : ServiceObject(std::move(name)) {}
+    void Dispatch(IpcContext& ctx) override;
 };
 
 // Servicio que todavia no existe en NeXo: cualquier comando para la CPU.

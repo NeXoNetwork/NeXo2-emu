@@ -79,3 +79,6 @@ keys/
 *.nsp
 *.xci
 *.nca
+
+# Qt descargado por build.bat (aqtinstall): pesa cientos de MB, no se sube
+externals/qt/

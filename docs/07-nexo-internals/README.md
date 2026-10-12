@@ -20,6 +20,7 @@ How NeXo 2 itself is built (our code, not the console).
 | [gpu-compute-tessellation.md](gpu-compute-tessellation.md) | Compute dispatches (QMD, workgroups, barriers, shared memory, atomics), tessellation (TCS, tessellator, TES), points, wide lines and polygon mode |
 | [gpu-textures.md](gpu-textures.md) | Textures: TIC/TSC descriptors, formats (incl. BC1-5), block linear and mipmaps, TEX/TEXS/TLDS/TXD/TXQ, filtering |
 | [display.md](display.md) | vi + nvdrv: binder buffer queue, GraphicBuffer layout, block-linear deswizzle, the "Pantalla" window |
+| [frontend-qt.md](frontend-qt.md) | NeXo2-Qt.exe: the Qt 6 interface (library, settings, game view), installing Qt, code map |
 
 ## Test suite
 

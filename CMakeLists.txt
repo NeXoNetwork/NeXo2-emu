@@ -9,6 +9,7 @@ set(EXT_DIR "${CMAKE_SOURCE_DIR}/externals")
 set(IMGUI_DIR "${EXT_DIR}/imgui")
 
 option(NEXO2_BUILD_APP "Compilar la aplicacion (necesita SDL3 e ImGui)" ON)
+option(NEXO2_BUILD_QT "Compilar NeXo2-Qt.exe, la interfaz con Qt 6 (si se encuentra Qt)" ON)
 option(NEXO2_BUILD_TESTS "Compilar los tests de la CPU (nexo2_tests)" ON)
 option(NEXO2_ENABLE_JIT "JIT dynarmic (ARM64 -> x86-64). Necesita externals/dynarmic y externals/ext-boost" ON)
 option(NEXO2_ENABLE_VULKAN "GPU por Vulkan (fase 3). Necesita externals/Vulkan-Headers y externals/volk" ON)
@@ -227,6 +228,55 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/assets"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:${PROJECT_NAME}>/assets"
     )
+endif()
+# 5b. NeXo2-Qt.exe: la interfaz con Qt 6 (biblioteca, ajustes, juego). Solo si se encuentra Qt
+#     (CMAKE_PREFIX_PATH o Qt6_DIR apuntando a la instalacion, ver docs/07-nexo-internals/frontend-qt.md)
+if(NEXO2_BUILD_QT)
+    find_package(Qt6 QUIET COMPONENTS Widgets)
+    if(Qt6_FOUND)
+        message(STATUS "Qt ${Qt6_VERSION}: se compila NeXo2-Qt")
+        set(CMAKE_AUTOMOC ON)
+        set(QT_SOURCES
+            "${SRC_DIR}/qt/main_qt.cpp"
+            "${SRC_DIR}/qt/emu_host.cpp"   "${SRC_DIR}/qt/emu_host.hpp"
+            "${SRC_DIR}/qt/theme.cpp"      "${SRC_DIR}/qt/theme.hpp"
+            "${SRC_DIR}/qt/widgets.cpp"    "${SRC_DIR}/qt/widgets.hpp"
+            "${SRC_DIR}/qt/library_page.cpp" "${SRC_DIR}/qt/library_page.hpp"
+            "${SRC_DIR}/qt/game_view.cpp"  "${SRC_DIR}/qt/game_view.hpp"
+            "${SRC_DIR}/qt/settings_page.cpp" "${SRC_DIR}/qt/settings_page.hpp"
+            "${SRC_DIR}/qt/main_window.cpp" "${SRC_DIR}/qt/main_window.hpp"
+            "${SRC_DIR}/frontend/settings.cpp"
+            "${SRC_DIR}/frontend/game_list.cpp"
+            "${SRC_DIR}/frontend/crash_report.cpp"
+        )
+        if(WIN32)
+            list(APPEND QT_SOURCES "${SRC_DIR}/resource.rc")
+        endif()
+        add_executable(NeXo2-Qt WIN32 ${QT_SOURCES})
+        set_target_properties(NeXo2-Qt PROPERTIES AUTOMOC ON)
+        target_include_directories(NeXo2-Qt PRIVATE "${SRC_DIR}" "${SRC_DIR}/core" "${SRC_DIR}/core/arm64"
+                                   "${SRC_DIR}/core/memory" "${EXT_DIR}/SDL/include" "${EXT_DIR}/stb")
+        target_link_libraries(NeXo2-Qt PRIVATE nexo2_core SDL3-shared Qt6::Widgets)
+        target_compile_definitions(NeXo2-Qt PRIVATE NEXO2_VERSION="${NEXO2_VERSION}")
+        if(WIN32)
+            target_link_libraries(NeXo2-Qt PRIVATE dwmapi)
+        endif()
+        if(MSVC)
+            target_compile_options(NeXo2-Qt PRIVATE /utf-8 $<$<CONFIG:Release>:/Zi>)
+            target_link_options(NeXo2-Qt PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+        endif()
+        if(WIN32)
+            # SDL3.dll y las DLL de Qt junto al .exe (windeployqt viene con Qt)
+            set(_qtbin "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}")
+            add_custom_command(TARGET NeXo2-Qt POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:SDL3-shared>" "$<TARGET_FILE_DIR:NeXo2-Qt>"
+                COMMAND "${_qtbin}/windeployqt.exe" --no-translations --no-system-d3d-compiler --no-opengl-sw
+                        "$<TARGET_FILE:NeXo2-Qt>"
+            )
+        endif()
+    else()
+        message(STATUS "Qt 6 no encontrado: no se compila NeXo2-Qt (ver docs/07-nexo-internals/frontend-qt.md)")
+    endif()
 endif()
 endif() # NEXO2_BUILD_APP
 

@@ -12,6 +12,12 @@
 #include <cmath>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // sin las macros min/max de windows.h (chocan con std::min)
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <dwmapi.h>
 #endif

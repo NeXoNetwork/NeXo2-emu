@@ -257,7 +257,7 @@ if(NEXO2_BUILD_QT)
         target_include_directories(NeXo2-Qt PRIVATE "${SRC_DIR}" "${SRC_DIR}/core" "${SRC_DIR}/core/arm64"
                                    "${SRC_DIR}/core/memory" "${EXT_DIR}/SDL/include" "${EXT_DIR}/stb")
         target_link_libraries(NeXo2-Qt PRIVATE nexo2_core SDL3-shared Qt6::Widgets)
-        target_compile_definitions(NeXo2-Qt PRIVATE NEXO2_VERSION="${NEXO2_VERSION}")
+        target_compile_definitions(NeXo2-Qt PRIVATE NEXO2_VERSION="${NEXO2_VERSION}" NOMINMAX)
         if(WIN32)
             target_link_libraries(NeXo2-Qt PRIVATE dwmapi)
         endif()

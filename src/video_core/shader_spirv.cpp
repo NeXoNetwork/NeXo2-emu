@@ -5,6 +5,7 @@
 #include "shader_spirv.hpp"
 #include "spirv_builder.hpp"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -30,6 +31,7 @@ public:
         SpirvResult res;
         if (!Discover()) { res.error = m_error; return res; }
         if (Frag() && !ScanFragment()) { res.error = m_error; return res; }
+        if (Vert() && !ScanVertex()) { res.error = m_error; return res; }
         Setup();
         EmitMain();
         if (!m_error.empty()) { res.error = m_error; return res; }
@@ -41,6 +43,10 @@ public:
         res.varyings = m_varyings;
         res.textures = m_textures;
         res.writes_depth = m_fragDepth != 0;
+        for (u32 i = 0; i < 18; ++i)
+            if (m_cbufMask & (1u << i)) res.cbuf_bytes[i] = (m_cbufDynamic & (1u << i)) ? 0x10000u : std::min(m_cbufEnd[i], 0x10000u);
+        res.vs_attr_mask = m_vsAttrMask;
+        res.vs_vertex_id = m_vsVertexId;
         return res;
     }
 
@@ -115,6 +121,32 @@ private:
     }
 
     bool Frag() const { return m_opt.stage == SpirvOptions::Stage::Fragment; }
+    bool Vert() const { return m_opt.stage == SpirvOptions::Stage::Vertex; }
+
+    // Shader de vertices: que atributos lee y escribe (solo con direcciones fijas)
+    bool ScanVertex() {
+        for (const auto& [pc, in] : m_instrs) {
+            switch (in.op) {
+                case ShOp::Ald: case ShOp::Ast: {
+                    if (in.ra != 0xFF) return Fail("ALD/AST con direccion en un registro (vertices en la GPU)");
+                    if (in.Bit(31) || (in.op == ShOp::Ald && in.Bit(32))) return Fail("ALD de parche o de salida en el shader de vertices");
+                    if (in.op == ShOp::Ast) break;
+                    const u32 count = in.Bits(47, 2) + 1, base = in.Bits(20, 10);
+                    for (u32 i = 0; i < count; ++i) {
+                        const u32 a = base + 4 * i;
+                        if (a >= 0x80 && a < 0x280) m_vsAttrMask |= 1u << ((a - 0x80) / 16);
+                        else if (a == 0x2FC) m_vsVertexId = true;
+                    }
+                    break;
+                }
+                case ShOp::Ipa:
+                    return Fail("IPA en el shader de vertices");
+                default:
+                    break;
+            }
+        }
+        return true;
+    }
 
     // Forma de la textura que pide una instruccion: dimensiones y si es un array
     bool TexShape(const ShaderInstr& in, u8& dim, bool& array) {
@@ -222,6 +254,36 @@ private:
             m_attrOut = StorageArray(SpirvBinding::ATTR_OUT, "attr_out", false);
         }
         if (Frag()) SetupFragment();
+        if (Vert()) SetupVertex();
+    }
+
+    // Entradas y salidas del shader de vertices
+    void SetupVertex() {
+        b.Capability(32);   // ClipDistance
+        tV4F = b.TypeVector(tF32, 4);
+        tV4U = b.TypeVector(tU32, 4);
+        auto io = [&](u32 type, u32 storage, const std::string& name) {
+            const u32 var = b.GlobalVariable(b.TypePointer(storage, type), storage);
+            b.Name(var, name);
+            m_interface.push_back(var);
+            return var;
+        };
+        m_vertexIndex = io(tS32, Input, "vertex_index");
+        b.Decorate(m_vertexIndex, DecBuiltIn, {42 /* VertexIndex */});
+        m_posOut = io(tV4F, Output, "position");
+        b.Decorate(m_posOut, DecBuiltIn, {BuiltInPosition});
+        m_clipOut = io(b.TypeArray(tF32, CU(2)), Output, "clip_distance");
+        b.Decorate(m_clipOut, DecBuiltIn, {3 /* ClipDistance */});
+        for (size_t i = 0; i < m_opt.vs_outputs.size(); ++i) {
+            const bool flat = m_opt.vs_outputs[i].kind == SpirvVarying::Flat;
+            const u32 var = io(flat ? tV4U : tV4F, Output, "out" + std::to_string(i));
+            b.Decorate(var, DecLocation, {u32(i)});
+            if (flat) b.Decorate(var, DecFlat);
+            else if (m_opt.vs_outputs[i].kind == SpirvVarying::Linear) b.Decorate(var, DecNoPerspective);
+            m_varVars.push_back(var);
+        }
+        m_vsAttr = StorageArray(SpirvBinding::VS_ATTR, "vs_attr", true);
+        m_vsInfo = StorageArray(SpirvBinding::VS_INFO, "vs_info", true);
     }
 
     // Entradas, salidas y texturas del shader de pixeles
@@ -291,7 +353,7 @@ private:
     u32 Cbuf(u32 index) {
         auto it = m_cbufs.find(index);
         if (it != m_cbufs.end()) return it->second;
-        const u32 var = StorageArray(index, ("c" + std::to_string(index)).c_str(), true);
+        const u32 var = StorageArray(index + (Vert() ? SpirvBinding::VS_CBUF0 : 0), ("c" + std::to_string(index)).c_str(), true);
         m_cbufs[index] = var;
         m_cbufMask |= 1u << index;
         return var;
@@ -413,7 +475,8 @@ private:
 
     // c[index][offset] con offset fijo
     u32 ConstStatic(u32 index, u32 offset) {
-        if (Frag()) return ConstDynamic(index, CU(offset));   // fuera del constbuf = 0 (como el interprete)
+        if (index < 18) m_cbufEnd[index] = std::max(m_cbufEnd[index], (offset & ~3u) + 4);
+        if (Frag() || Vert()) return ConstDynamic(index, CU(offset));   // fuera del constbuf = 0 (como el interprete)
         const u32 var = Cbuf(index);
         const u32 ptr = Val(OpAccessChain, b.TypePointer(StorageBuffer, tU32), {var, CU(0), CU(offset / 4)});
         return Load(tU32, ptr);
@@ -495,6 +558,7 @@ private:
         E(OpBranchConditional, {run, header, merge});
         Label(merge);
         if (Frag()) EmitFragmentOutputs();
+        if (Vert()) EmitVertexOutputs();
         E(OpReturn, {});
 
         // Cabecera de la funcion: tipo, etiqueta de entrada, variables y sus valores iniciales
@@ -503,6 +567,13 @@ private:
         Builder::Emit(head, OpLabel, {entry});
         head.insert(head.end(), m_vars.begin(), m_vars.end());
         for (const auto& [var, init] : m_inits) Builder::Emit(head, OpStore, {var, init});
+        if (m_vertexBaseInit) {   // primera palabra del vertice en VS_ATTR
+            const u32 vi = b.Id(), vu = b.Id(), base = b.Id();
+            Builder::Emit(head, OpLoad, {tS32, vi, m_vertexIndex});
+            Builder::Emit(head, OpBitcast, {tU32, vu, vi});
+            Builder::Emit(head, OpIMul, {tU32, base, vu, CU(VsRecordWords(m_vsAttrMask, m_vsVertexId))});
+            Builder::Emit(head, OpStore, {m_vertexBase, base});
+        }
         b.functions.insert(b.functions.end(), head.begin(), head.end());
         b.functions.insert(b.functions.end(), m_code.begin(), m_code.end());
         Builder::Emit(b.functions, OpFunctionEnd, {});
@@ -520,8 +591,9 @@ private:
             Builder::Emit(b.exec_modes, OpExecutionMode, {fn, 7 /* OriginUpperLeft */});
             if (m_fragDepth) Builder::Emit(b.exec_modes, OpExecutionMode, {fn, 12 /* DepthReplacing */});
         } else {
-            Fail("el shader de vertices se ejecuta en la CPU (BuildPassthroughVertexShader)");
-            return;
+            ep = {0 /* Vertex */, fn};
+            Builder::PushString(ep, "main");
+            ep.insert(ep.end(), m_interface.begin(), m_interface.end());
         }
         Builder::Emit(b.entry_points, OpEntryPoint, ep);
     }
@@ -1200,6 +1272,10 @@ private:
             case ShOp::Ald: {
                 const u32 count = in.Bits(47, 2) + 1;
                 const u32 addr = Add(CU(in.Bits(20, 10)), R(in.ra));
+                if (Vert()) {   // direccion fija (ScanVertex)
+                    for (u32 i = 0; i < count; ++i) W(in.rd + i, VertexInput(in.Bits(20, 10) + 4 * i));
+                    return;
+                }
                 for (u32 i = 0; i < count; ++i) {
                     const u32 a = Add(addr, CU(4 * i));
                     W(in.rd + i, Frag() ? FragAttributeBits(a) : ReadAttribute(a));
@@ -1209,6 +1285,13 @@ private:
             case ShOp::Ast: {
                 if (Frag()) return;   // el shader de pixeles no tiene atributos de salida
                 const u32 count = in.Bits(47, 2) + 1;
+                if (Vert()) {
+                    for (u32 i = 0; i < count; ++i) {
+                        const u32 a = in.Bits(20, 10) + 4 * i;
+                        if (a < 0x400) Store(OutWord(a / 4), R(in.rd + i));
+                    }
+                    return;
+                }
                 const u32 addr = Add(CU(in.Bits(20, 10)), R(in.ra));
                 for (u32 i = 0; i < count; ++i) WriteAttribute(Add(addr, CU(4 * i)), R(in.rd + i));
                 return;
@@ -1228,6 +1311,11 @@ private:
                 const u32 idx = in.Bits(36, 5);
                 const u32 addr = Add(CU(u32(s32(s16(u16(in.Bits(20, 16)))))), R(in.ra));
                 const u32 words = size == 5 ? 2 : size == 6 ? 4 : 1;
+                if (idx < 18) {
+                    const s32 off = s32(s16(u16(in.Bits(20, 16))));
+                    if (in.ra == 0xFF && off >= 0) m_cbufEnd[idx] = std::max(m_cbufEnd[idx], (u32(off) & ~3u) + 4 * words);
+                    else m_cbufDynamic |= 1u << idx;
+                }
                 for (u32 i = 0; i < words; ++i) {
                     u32 v = ConstDynamic(idx, Add(And(addr, CU(~3u)), CU(4 * i)));
                     if (size < 4) {
@@ -1285,6 +1373,66 @@ private:
         const u32 word = And(Shr(addr, CU(2)), CU(0xFF));
         const u32 ptr = Val(OpAccessChain, b.TypePointer(StorageBuffer, tU32), {m_attrOut, CU(0), word});
         Store(ptr, v);
+    }
+
+    // ---- Shader de vertices ----
+    u32 StorageWord(u32 var, u32 index) {
+        return Load(tU32, Val(OpAccessChain, b.TypePointer(StorageBuffer, tU32), {var, CU(0), index}));
+    }
+    // a[addr] de entrada: atributo del vertice (de VS_ATTR), su id o el de la instancia
+    u32 VertexInput(u32 addr) {
+        if (addr >= 0x80 && addr < 0x280) {
+            const u32 loc = (addr - 0x80) / 16;
+            const u32 rank = u32(std::popcount(m_vsAttrMask & ((1u << loc) - 1)));
+            return StorageWord(m_vsAttr, Add(VertexBase(), CU(4 * rank + (addr / 4) % 4)));
+        }
+        if (addr == 0x2FC) return StorageWord(m_vsAttr, Add(VertexBase(), CU(4 * u32(std::popcount(m_vsAttrMask)))));
+        if (addr == 0x2F8) return StorageWord(m_vsInfo, CU(9));
+        return CU(0);
+    }
+    u32 VertexBase() {
+        if (!m_vertexBase) {
+            // Se calcula en el bloque de entrada (antes del bucle) y se guarda en una variable
+            m_vertexBase = FnVar(tPtrFnU32, 0);
+            m_vertexBaseInit = true;
+        }
+        return Load(tU32, m_vertexBase);
+    }
+    // Palabra 'word' de las salidas (a[word * 4]); sin escribir: 0 (w de la posicion: 1)
+    u32 OutWord(u32 word) {
+        auto it = m_outWords.find(word);
+        if (it != m_outWords.end()) return it->second;
+        const u32 v = FnVar(tPtrFnU32, CU(word == 0x7C / 4 ? 0x3F800000u : 0u));
+        m_outWords[word] = v;
+        return v;
+    }
+    u32 OutValue(u32 word) {
+        auto it = m_outWords.find(word);
+        if (it != m_outWords.end()) return Load(tU32, it->second);
+        return CU(word == 0x7C / 4 ? 0x3F800000u : 0u);
+    }
+    // Al terminar: posicion con el viewport (como el dibujo con Vulkan en la CPU), planos y varyings
+    void EmitVertexOutputs() {
+        const u32 x = AsF(OutValue(0x70 / 4)), y = AsF(OutValue(0x74 / 4)), z = AsF(OutValue(0x78 / 4)), w = AsF(OutValue(0x7C / 4));
+        auto info = [&](u32 i) { return AsF(StorageWord(m_vsInfo, CU(i))); };
+        const u32 sx = info(0), sy = info(1), sz = info(2), ox = info(3), oy = info(4), oz = info(5), fw = info(6), fh = info(7);
+        const u32 zero_to_one = Ne(StorageWord(m_vsInfo, CU(8)), CU(0));
+        auto fdiv = [&](u32 a, u32 c) { return Val(OpFDiv, tF32, {a, c}); };
+        auto fsub = [&](u32 a, u32 c) { return Val(OpFSub, tF32, {a, c}); };
+        const u32 px = fsub(fdiv(FMul(CF(2.0f), FAdd(FMul(sx, x), FMul(ox, w))), fw), w);
+        const u32 py = fsub(fdiv(FMul(CF(2.0f), FAdd(FMul(sy, y), FMul(oy, w))), fh), w);
+        const u32 pz = FAdd(FMul(sz, z), FMul(oz, w));
+        Store(m_posOut, Val(OpCompositeConstruct, tV4F, {px, py, pz, w}));
+        const u32 tPtrOutF = b.TypePointer(Output, tF32);
+        Store(Val(OpAccessChain, tPtrOutF, {m_clipOut, CU(0)}), Sel(zero_to_one, z, FAdd(z, w), tF32));
+        Store(Val(OpAccessChain, tPtrOutF, {m_clipOut, CU(1)}), fsub(w, z));
+        for (size_t i = 0; i < m_opt.vs_outputs.size(); ++i) {
+            const u32 slot = m_opt.vs_outputs[i].slot;
+            u32 c[4];
+            for (u32 k = 0; k < 4; ++k) c[k] = OutValue(slot * 4 + k);
+            if (m_opt.vs_outputs[i].kind == SpirvVarying::Flat) Store(m_varVars[i], Val(OpCompositeConstruct, tV4U, {c[0], c[1], c[2], c[3]}));
+            else Store(m_varVars[i], Val(OpCompositeConstruct, tV4F, {AsF(c[0]), AsF(c[1]), AsF(c[2]), AsF(c[3])}));
+        }
     }
 
     // ---- Shader de pixeles ----
@@ -1500,7 +1648,15 @@ private:
     std::vector<u32> m_interface;
     std::map<u32, u32> m_regs, m_preds, m_cbufs;
     u32 m_cc[4] = {};
-    u32 m_cbufMask = 0;
+    u32 m_cbufMask = 0, m_cbufDynamic = 0;
+    std::array<u32, 18> m_cbufEnd{};
+    // Shader de vertices
+    u32 m_vsAttrMask = 0;
+    bool m_vsVertexId = false;
+    u32 m_vertexIndex = 0, m_posOut = 0, m_clipOut = 0, m_vsAttr = 0, m_vsInfo = 0;
+    u32 m_vertexBase = 0;
+    bool m_vertexBaseInit = false;
+    std::map<u32, u32> m_outWords;
     bool m_arrayStrideDone = false;
 
     u32 m_glsl = 0;

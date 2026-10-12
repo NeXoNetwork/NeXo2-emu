@@ -1,9 +1,11 @@
 // Dibujo por software (ver rasterizer.hpp y docs/07-nexo-internals/gpu-rasterizer.md).
 #include "rasterizer.hpp"
+#include "shader_spirv.hpp"
 #include "tessellation.hpp"
 #include "texture.hpp"
 #include "common/logger.hpp"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <condition_variable>
@@ -703,6 +705,129 @@ bool SoftwareRasterizer::RunVertexStage(Gpu& gpu, const u32* regs, const Constbu
     }
     ApplyPolygonMode(regs, out, wide);
     return !out.tris.empty();
+}
+
+bool SoftwareRasterizer::FetchVertexInputs(Gpu& gpu, const u32* regs, const DrawCall& dc, u32 attr_mask, bool vertex_id,
+                                           VertexInputs& out) {
+    if (!IsTriangleTopology(dc.topology)) return false;
+    GpuMemoryManager& mm = gpu.MemoryManager();
+    // Indices (como RunVertexStage): -1 = reinicio de primitiva
+    const bool restart = regs[PRIM_RESTART] & 1;
+    const u32 restart_index = regs[PRIM_RESTART_INDEX];
+    const u32 index_size = 1u << std::min<u32>(regs[INDEX_FORMAT] & 3, 2);
+    const u64 index_addr = Iova(regs[INDEX_ADDR], regs[INDEX_ADDR + 1]);
+    std::vector<s64> indices(dc.count);
+    if (dc.indexed) {
+        std::vector<u8> index_bytes;
+        if (!dc.inline_indices) {
+            index_bytes.resize(size_t(dc.count) * index_size);
+            mm.ReadBlock(index_addr + u64(dc.first) * index_size, index_bytes.data(), index_bytes.size());
+        }
+        for (u32 i = 0; i < dc.count; ++i) {
+            u32 idx = 0;
+            if (dc.inline_indices) idx = i < dc.inline_indices->size() ? (*dc.inline_indices)[i] : 0;
+            else std::memcpy(&idx, &index_bytes[size_t(i) * index_size], index_size);
+            indices[i] = restart && idx == restart_index ? -1 : (s64(s32(idx) + dc.vertex_offset) & 0xFFFFFFFF);
+        }
+    } else {
+        for (u32 i = 0; i < dc.count; ++i) indices[i] = s64(dc.first) + i;
+    }
+    StreamWindows win;
+    bool first = true;
+    for (s64 idx : indices) {
+        if (idx < 0) continue;
+        if (first) { win.min_index = win.max_index = u32(idx); first = false; }
+        win.min_index = std::min(win.min_index, u32(idx));
+        win.max_index = std::max(win.max_index, u32(idx));
+    }
+    if (first) return true;   // sin vertices
+
+    // Cada indice distinto una vez: tabla directa si el rango es pequeno, si no un mapa
+    const u32 words = VsRecordWords(attr_mask, vertex_id);
+    const u64 range = u64(win.max_index) - win.min_index + 1;
+    std::vector<s32> table;
+    std::unordered_map<u32, u32> map;
+    const bool use_table = range <= u64(indices.size()) * 4 + 4096;
+    if (use_table) table.assign(size_t(range), -1);
+    const std::function<u32(u32, u32)> no_const = [](u32, u32) -> u32 { return 0; };
+    Vertex dummy;
+    std::vector<s64> slots(indices.size());
+    out.records.clear();
+    out.records.reserve(size_t(std::min<u64>(range, indices.size())) * words);
+    for (size_t i = 0; i < indices.size(); ++i) {
+        const s64 idx = indices[i];
+        if (idx < 0) { slots[i] = -1; continue; }
+        s32* entry = nullptr;
+        if (use_table) {
+            entry = &table[size_t(u32(idx) - win.min_index)];
+            if (*entry >= 0) { slots[i] = *entry; continue; }
+        } else {
+            auto it = map.find(u32(idx));
+            if (it != map.end()) { slots[i] = it->second; continue; }
+        }
+        const u32 slot = out.count++;
+        if (entry) *entry = s32(slot); else map[u32(idx)] = slot;
+        slots[i] = slot;
+        const u32 vid = dc.indexed ? u32(idx) : u32(idx - dc.first) + dc.vertex_id_base;
+        VertexEnv env(regs, mm, dc, u32(idx), vid, no_const, dummy, &win);
+        for (u32 m = attr_mask; m; m &= m - 1) {
+            const u32 loc = u32(std::countr_zero(m));
+            for (u32 c = 0; c < 4; ++c) out.records.push_back(env.ReadAttribute(0x80 + loc * 16 + c * 4));
+        }
+        if (vertex_id) out.records.push_back(vid);
+        if (!attr_mask && !vertex_id) out.records.push_back(0);
+    }
+
+    // Triangulos (como RunVertexStage)
+    const bool last = regs[PROVOKING_LAST] & 1;
+    auto tri = [&](s64 a, s64 b, s64 c, s64 prov) {
+        if (a < 0 || b < 0 || c < 0) return;
+        out.tris.push_back({u32(a), u32(b), u32(c), u32(prov)});
+    };
+    size_t start = 0;
+    while (start < slots.size()) {
+        size_t end = start;
+        while (end < slots.size() && slots[end] >= 0) ++end;
+        const s64* s = slots.data() + start;
+        const size_t n = end - start;
+        switch (dc.topology) {
+            case 4:
+                for (size_t i = 0; i + 2 < n; i += 3) tri(s[i], s[i + 1], s[i + 2], last ? s[i + 2] : s[i]);
+                break;
+            case 5:
+                for (size_t i = 0; i + 2 < n; ++i) {
+                    if (i & 1) tri(s[i + 1], s[i], s[i + 2], last ? s[i + 2] : s[i]);
+                    else tri(s[i], s[i + 1], s[i + 2], last ? s[i + 2] : s[i]);
+                }
+                break;
+            case 6: case 9:
+                for (size_t i = 1; i + 1 < n; ++i) tri(s[0], s[i], s[i + 1], dc.topology == 9 ? s[0] : (last ? s[i + 1] : s[0]));
+                break;
+            case 7:
+                for (size_t i = 0; i + 3 < n; i += 4) {
+                    tri(s[i], s[i + 1], s[i + 2], last ? s[i + 3] : s[i]);
+                    tri(s[i], s[i + 2], s[i + 3], last ? s[i + 3] : s[i]);
+                }
+                break;
+            case 8:
+                for (size_t i = 0; i + 3 < n; i += 2) {
+                    tri(s[i], s[i + 1], s[i + 3], last ? s[i + 3] : s[i]);
+                    tri(s[i], s[i + 3], s[i + 2], last ? s[i + 3] : s[i]);
+                }
+                break;
+            case 12:
+                for (size_t i = 0; i + 5 < n; i += 6) tri(s[i], s[i + 2], s[i + 4], last ? s[i + 4] : s[i]);
+                break;
+            case 13:
+                for (size_t i = 0; i + 5 < n; i += 2) {
+                    if ((i / 2) & 1) tri(s[i + 2], s[i], s[i + 4], last ? s[i + 4] : s[i]);
+                    else tri(s[i], s[i + 2], s[i + 4], last ? s[i + 4] : s[i]);
+                }
+                break;
+        }
+        start = end + 1;
+    }
+    return true;
 }
 
 // ============================================================================

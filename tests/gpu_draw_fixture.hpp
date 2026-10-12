@@ -20,7 +20,7 @@ using NeXo2::Tests::ShaderBin;
 // true: los tests de dibujo usan Vulkan en vez del dibujo por software (lo activa el test
 // Vulkan_DrawAndTextureTests, que vuelve a ejecutar los Draw_* y Texture_* asi)
 inline bool g_vulkanDraw = false;
-inline unsigned long long g_drawsTotal = 0, g_drawsHw = 0;   // contados al destruir cada DrawFixture
+inline unsigned long long g_drawsTotal = 0, g_drawsHw = 0, g_drawsGpuVs = 0;   // contados al destruir cada DrawFixture
 
 namespace {
 constexpr u64 CPU_BASE = 0x2000'0000;
@@ -65,6 +65,7 @@ struct DrawFixture {
     ~DrawFixture() {
         g_drawsTotal += gpu.GetStats().draws;
         g_drawsHw += gpu.GetStats().draws_hw;
+        g_drawsGpuVs += gpu.GetStats().draws_gpu_vs;
     }
     void Run(const Push& p) {
         gpu.MemoryManager().WriteBlock(PB, p.w.data(), p.w.size() * 4);

@@ -82,7 +82,8 @@ public:
         u64 ns_present = 0;   // texturas leidas directamente de un render target
         // Tiempo (ns) de cada parte, en el hilo de la GPU: para ver donde se va
         u64 ns_draw = 0;       // Draw entero
-        u64 ns_vertex = 0;     // shader de vertices en la CPU
+        u64 ns_vertex = 0;     // shader de vertices en la CPU (o leer sus entradas, si va en la GPU)
+        u64 draws_gpu_vs = 0;  // dibujos con el shader de vertices en la GPU
         u64 ns_texture = 0;    // preparar texturas (decodificar y subir)
         u64 ns_tex_rt = 0, ns_tex_native = 0, ns_tex_decoded = 0;   // ...de ello: render targets, nativas, decodificadas
         u64 tex_rt = 0, tex_native = 0, tex_decoded = 0;            // cuantas veces cada tipo
@@ -214,6 +215,7 @@ private:
     bool m_busy = false;               // dentro de una subida/bajada: no volver a entrar
     Stats m_stats;
     std::string m_lastFallback;
+    bool m_gpuVs = false;              // el shader de vertices se puede traducir y ejecutar en la GPU
 };
 
 } // namespace NeXo2::GPU

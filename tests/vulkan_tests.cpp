@@ -151,7 +151,7 @@ TEST(Vulkan_DrawAndTextureTests) {
         }
     }
     g_vulkanDraw = true;
-    g_drawsTotal = g_drawsHw = 0;
+    g_drawsTotal = g_drawsHw = g_drawsGpuVs = 0;
     for (const auto& t : NeXo2::Tests::Registry()) {
         const std::string name = t.name;
         if (name.rfind("Draw_", 0) != 0 && name.rfind("Texture_", 0) != 0) continue;
@@ -161,8 +161,9 @@ TEST(Vulkan_DrawAndTextureTests) {
         std::printf("    %s %s\n", NeXo2::Tests::g_failures == before ? "ok   " : "FALLO", t.name);
     }
     g_vulkanDraw = false;
-    std::printf("    draws con Vulkan: %llu de %llu\n", g_drawsHw, g_drawsTotal);
+    std::printf("    draws con Vulkan: %llu de %llu (shader de vertices en la GPU: %llu)\n", g_drawsHw, g_drawsTotal, g_drawsGpuVs);
     CHECK(g_drawsHw > 0);
+    CHECK(g_drawsGpuVs > 0);
 }
 
 // Profundidad borrada en la GPU en un envio y usada en el siguiente: la memoria (vieja) no

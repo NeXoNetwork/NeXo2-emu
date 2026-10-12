@@ -78,6 +78,19 @@ public:
     static bool RunVertexStage(Gpu& gpu, const u32* regs, const ConstbufTable& cbs, const DrawCall& dc,
                                TextureSampler* tex, u32 tex_cb, VertexStage& out, ShaderProgram* program = nullptr);
 
+    // Para el shader de vertices en la GPU: solo las entradas de cada vertice distinto (sin
+    // ejecutar el shader) y los triangulos. 'records': VsRecordWords(attr_mask, vertex_id)
+    // palabras por vertice (4 por atributo de attr_mask, en orden, y el id del vertice).
+    // Solo primitivas de triangulos (4..9, 12, 13); false con otras.
+    struct VertexInputs {
+        std::vector<u32> records;
+        u32 count = 0;
+        std::vector<std::array<u32, 4>> tris;   // como VertexStage::tris
+    };
+    static bool FetchVertexInputs(Gpu& gpu, const u32* regs, const DrawCall& dc, u32 attr_mask, bool vertex_id,
+                                  VertexInputs& out);
+    static bool IsTriangleTopology(u32 topology) { return (topology >= 4 && topology <= 9) || topology == 12 || topology == 13; }
+
 private:
     struct ScreenVertex {
         const Vertex* v;

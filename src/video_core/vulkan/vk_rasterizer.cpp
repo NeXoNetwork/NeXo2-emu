@@ -269,6 +269,7 @@ struct PipelineDesc {
     VkCompareOp depth_op = VK_COMPARE_OP_ALWAYS;
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     VkFrontFace front = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    VkShaderModule vs = VK_NULL_HANDLE;   // shader de vertices traducido (sin el: el "de paso")
 };
 
 // ============================================================================
@@ -316,13 +317,20 @@ bool VulkanRasterizer::Init(std::string& error) {
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     vkCreateFence(m_vk, &fci, nullptr, &m_fence);
 
-    // Enlaces: 0..17 constbufs, 18 informacion del draw, 32.. texturas (todo en el shader de pixeles)
+    // Enlaces: 0..17 constbufs, 18 informacion del draw, 32.. texturas (shader de pixeles);
+    // 38 informacion, 39 entradas y 40..57 constbufs del shader de vertices (si va en la GPU)
+    const auto& lim = m_dev.Limits();
+    m_gpuVs = !std::getenv("NEXO2_VK_CPU_VS") && lim.maxPerStageDescriptorStorageBuffers >= 20 &&
+              lim.maxDescriptorSetStorageBuffers >= 19 + 20;
     std::vector<VkDescriptorSetLayoutBinding> binds;
     for (u32 i = 0; i <= SpirvBinding::DRAW_INFO; ++i)
         binds.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (u32 i = 0; i < MAX_TEXTURES; ++i)
         binds.push_back({SpirvBinding::TEXTURE0 + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    if (m_gpuVs)
+        for (u32 i = SpirvBinding::VS_INFO; i < SpirvBinding::VS_CBUF0 + 18; ++i)
+            binds.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr});
     VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dl.bindingCount = u32(binds.size());
     dl.pBindings = binds.data();
@@ -332,7 +340,7 @@ bool VulkanRasterizer::Init(std::string& error) {
     pl.pSetLayouts = &m_setLayout;
     if (vkCreatePipelineLayout(m_vk, &pl, nullptr, &m_pipeLayout) != VK_SUCCESS) { error = "vkCreatePipelineLayout"; return false; }
     const VkDescriptorPoolSize sizes[2] = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (SpirvBinding::DRAW_INFO + 1) * SETS_PER_POOL},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (SpirvBinding::DRAW_INFO + 1 + 20) * SETS_PER_POOL},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_TEXTURES * SETS_PER_POOL},
     };
     VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -342,7 +350,7 @@ bool VulkanRasterizer::Init(std::string& error) {
     if (vkCreateDescriptorPool(m_vk, &dp, nullptr, &m_descPool) != VK_SUCCESS) { error = "vkCreateDescriptorPool"; return false; }
     m_setsLeft = SETS_PER_POOL;
 
-    if (!EnsureBuffer(m_upload, UPLOAD_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+    if (!EnsureBuffer(m_upload, UPLOAD_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
         error = "sin memoria para el buffer de subida";
         return false;
@@ -440,7 +448,7 @@ VulkanRasterizer::Alloc VulkanRasterizer::Allocate(VkDeviceSize size, VkDeviceSi
         Submit();   // lo grabado usa el buffer: ejecutarlo antes de reutilizarlo
         off = 0;
         if (size > m_upload.size)
-            EnsureBuffer(m_upload, AlignUp(size, 1 << 20), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+            EnsureBuffer(m_upload, AlignUp(size, 1 << 20), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
     m_uploadOffset = off + size;
@@ -1127,8 +1135,9 @@ bool VulkanRasterizer::NativeTextureFormat(const TextureInfo& info, VkFormat& fm
 // ============================================================================
 
 VulkanRasterizer::FragShader* VulkanRasterizer::GetFragShader(u64 address, const SpirvOptions& opt) {
-    std::vector<u32> key{opt.color_outputs, u32(opt.mrt), u32(opt.int64)};
+    std::vector<u32> key{u32(opt.stage), opt.color_outputs, u32(opt.mrt), u32(opt.int64)};
     for (u8 k : opt.color_int) key.push_back(k);
+    for (const auto& v : opt.vs_outputs) key.push_back(u32(v.slot) | (u32(v.kind) << 8));
     auto& mm = m_gpu.MemoryManager();
     auto& list = m_fragShaders[address];
     for (auto& fs : list) {
@@ -1183,7 +1192,7 @@ VkPipeline VulkanRasterizer::GetPipeline(const std::vector<u32>& key, const Frag
     auto it = m_pipelines.find(key);
     if (it != m_pipelines.end()) return it->second;
 
-    const VkShaderModule vs = GetVertexShader(d.varyings);
+    const VkShaderModule vs = d.vs ? d.vs : GetVertexShader(d.varyings);
     VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                  {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1203,10 +1212,12 @@ VkPipeline VulkanRasterizer::GetPipeline(const std::vector<u32>& key, const Frag
         attrs.push_back({i + 2, 0, d.varyings[i].kind == SpirvVarying::Flat ? VK_FORMAT_R32G32B32A32_UINT
                                                                             : VK_FORMAT_R32G32B32A32_SFLOAT, 16 * (i + 2)});
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &vb;
-    vi.vertexAttributeDescriptionCount = u32(attrs.size());
-    vi.pVertexAttributeDescriptions = attrs.data();
+    if (!d.vs) {   // el shader traducido lee sus entradas de un storage buffer
+        vi.vertexBindingDescriptionCount = 1;
+        vi.pVertexBindingDescriptions = &vb;
+        vi.vertexAttributeDescriptionCount = u32(attrs.size());
+        vi.pVertexAttributeDescriptions = attrs.data();
+    }
     VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
@@ -1402,11 +1413,33 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
         return Fallback("demasiadas entradas en el shader de pixeles");
     if (fs->result.textures.size() > MAX_TEXTURES) return Fallback("demasiadas texturas");
 
-    // --- Vertices (shader de vertices en la CPU) ---
+    // --- Vertices: el shader de vertices traducido en la GPU (solo se leen sus entradas) o,
+    //     si no se puede, ejecutado en la CPU ---
     const u64 tic_pool = Iova(regs[TIC_POOL], regs[TIC_POOL + 1]), tsc_pool = Iova(regs[TSC_POOL], regs[TSC_POOL + 1]);
     const u32 tex_cb = std::min<u32>(regs[BINDLESS_TEXTURE] & 0x1F, 17);
     SoftwareRasterizer::VertexStage vstage;
+    SoftwareRasterizer::VertexInputs vin;
+    FragShader* vsh = nullptr;
     {
+        constexpr u32 POLY_FRONT = 0x36B, POLY_BACK = 0x36C, FILL = 0x1B02;
+        const bool fill = (regs[POLY_FRONT] == FILL || regs[POLY_FRONT] == 0) && (regs[POLY_BACK] == FILL || regs[POLY_BACK] == 0);
+        if (m_gpuVs && fill && SoftwareRasterizer::IsTriangleTopology(dc.topology)) {
+            SpirvOptions vopt;
+            vopt.stage = SpirvOptions::Stage::Vertex;
+            vopt.int64 = m_dev.Features().shaderInt64;
+            vopt.vs_outputs = varyings;
+            vsh = GetFragShader(region + regs[PIPELINE + 0x10 * 1 + 1], vopt);
+            if (!vsh->result.ok) {
+                m_gpu.Warn("gpuvs:" + vsh->result.error, "Vulkan: shader de vertices en la CPU (" + vsh->result.error + ")");
+                vsh = nullptr;
+            }
+        }
+    }
+    if (vsh) {
+        Timer t(m_stats.ns_vertex);
+        SoftwareRasterizer::FetchVertexInputs(m_gpu, regs, dc, vsh->result.vs_attr_mask, vsh->result.vs_vertex_id, vin);
+        if (vin.tris.empty()) return true;
+    } else {
         Timer t(m_stats.ns_vertex);
         TextureSampler vs_tex(m_gpu, tic_pool, regs[TIC_MAX], tsc_pool, regs[TSC_MAX], &m_gpu.Textures());
         const u64 vs_addr = region + regs[PIPELINE + 0x10 * 1 + 1];
@@ -1417,12 +1450,13 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
         }
         SoftwareRasterizer::RunVertexStage(m_gpu, regs, cbs, dc, &vs_tex, tex_cb, vstage, prog.get());
     }
-    if (vstage.failed) {
+    if (!vsh && vstage.failed) {
         m_gpu.Warn("vs:" + vstage.error, vstage.error);
         ++stats.shader_errors;
         return true;
     }
-    if (vstage.tris.empty()) return true;
+    if (!vsh && vstage.tris.empty()) return true;
+    const size_t ntris = vsh ? vin.tris.size() : vstage.tris.size();
 
     // --- Constbufs del shader de pixeles (copiados ahora: el programa puede cambiarlos despues) ---
     std::array<std::vector<u8>, 18> cbdata;
@@ -1430,11 +1464,23 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
         if (!(fs->result.cbuf_mask & (1u << i))) continue;
         const ConstbufBinding& b = cbs[fs_group][i];
         if (b.valid && b.size) {
-            cbdata[i].resize((std::min<u32>(b.size, 0x10000) + 3) & ~3u);
+            cbdata[i].resize((std::min<u32>({b.size, 0x10000u, fs->result.cbuf_bytes[i]}) + 3) & ~3u);
             mm.ReadBlock(b.address, cbdata[i].data(), cbdata[i].size());
         }
         if (cbdata[i].empty()) cbdata[i].assign(16, 0);
     }
+    // ...y los del shader de vertices, si va en la GPU
+    std::array<std::vector<u8>, 18> vcbdata;
+    if (vsh)
+        for (u32 i = 0; i < 18; ++i) {
+            if (!(vsh->result.cbuf_mask & (1u << i))) continue;
+            const ConstbufBinding& b = cbs[vs_group][i];
+            if (b.valid && b.size) {
+                vcbdata[i].resize((std::min<u32>({b.size, 0x10000u, vsh->result.cbuf_bytes[i]}) + 3) & ~3u);
+                mm.ReadBlock(b.address, vcbdata[i].data(), vcbdata[i].size());
+            }
+            if (vcbdata[i].empty()) vcbdata[i].assign(16, 0);
+        }
 
     // --- Texturas ---
     std::vector<BoundTexture> bound(fs->result.textures.size());
@@ -1470,8 +1516,8 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     const float oy = xform ? F(regs[VIEWPORT_XFORM + 4]) : 0.0f, oz = xform ? F(regs[VIEWPORT_XFORM + 5]) : 0.0f;
     const u32 words = 4 * (2 + u32(varyings.size()));
     const bool zero_to_one = regs[DEPTH_MODE] & 1;
-    const u32 nverts = u32(vstage.tris.size()) * 3;
-    if (static const bool dbg = std::getenv("NEXO2_VK_DRAW_DEBUG") != nullptr; dbg) {
+    const u32 nverts = u32(ntris) * 3;
+    if (static const bool dbg = std::getenv("NEXO2_VK_DRAW_DEBUG") != nullptr; dbg && !vsh) {
         float zmin = 1e30f, zmax = -1e30f, wmin = 1e30f, wmax = -1e30f;
         u32 near_out = 0, far_out = 0;
         for (const auto& v : vstage.verts) {
@@ -1485,8 +1531,22 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
             int(xform), sx, sy, sz, ox, oy, oz, regs[DEPTH_MODE], int(depth_enabled), int(depth_test), int(depth_write), regs[DEPTH_FUNC], zformat,
             (unsigned long long)fs_addr, fs->result.textures.size(), varyings.size());
     }
-    std::vector<u32> vdata(size_t(nverts) * words);
-    {
+    std::vector<u32> vdata(vsh ? 0 : size_t(nverts) * words);
+    std::vector<u32> idata;   // shader de vertices en la GPU: indices de los vertices de vin
+    u32 vsinfo[12] = {};
+    if (vsh) {
+        idata.reserve(nverts);
+        for (const auto& t : vin.tris) {
+            // El vertice que manda (valores "flat") va primero: Vulkan usa el primero
+            if (t[3] == t[1]) idata.insert(idata.end(), {t[1], t[2], t[0]});
+            else if (t[3] == t[2]) idata.insert(idata.end(), {t[2], t[0], t[1]});
+            else idata.insert(idata.end(), {t[0], t[1], t[2]});
+        }
+        const float vals[8] = {sx, sy, sz, ox, oy, oz, float(fw), float(fh)};
+        for (u32 i = 0; i < 8; ++i) vsinfo[i] = U(vals[i]);
+        vsinfo[8] = zero_to_one ? 1 : 0;
+        vsinfo[9] = dc.instance;
+    } else {
         u32* o = vdata.data();
         for (const auto& t : vstage.tris) {
             // El vertice que manda (valores "flat") va primero: Vulkan usa el primero
@@ -1517,11 +1577,15 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
 
     // --- Espacio en el buffer de subida y descriptores (todo o nada: puede ejecutar lo pendiente) ---
     const VkDeviceSize salign = std::max<VkDeviceSize>(lim.minStorageBufferOffsetAlignment, 16);
-    VkDeviceSize need = vdata.size() * 4 + 256 + salign * 20;
+    VkDeviceSize need = vdata.size() * 4 + 256 + salign * 40;
     for (const auto& c : cbdata) need += c.size();
+    if (vsh) {
+        need += vin.records.size() * 4 + idata.size() * 4 + sizeof(vsinfo) + 16;
+        for (const auto& c : vcbdata) need += c.size();
+    }
     if (m_setsLeft == 0 || AlignUp(m_uploadOffset, 256) + need > m_upload.size) Submit();
     if (need > m_upload.size)
-        EnsureBuffer(m_upload, AlignUp(need, 1 << 20), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+        EnsureBuffer(m_upload, AlignUp(need, 1 << 20), VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     VkDescriptorSet set = VK_NULL_HANDLE;
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
@@ -1530,11 +1594,17 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     dai.pSetLayouts = &m_setLayout;
     if (vkAllocateDescriptorSets(m_vk, &dai, &set) != VK_SUCCESS) return Fallback("sin descriptores");
     --m_setsLeft;
-    const Alloc va = Allocate(vdata.size() * 4, 16);
-    std::memcpy(va.ptr, vdata.data(), vdata.size() * 4);
+    Alloc va{0, nullptr};
+    if (vsh) {
+        va = Allocate(idata.size() * 4, 16);
+        std::memcpy(va.ptr, idata.data(), idata.size() * 4);
+    } else {
+        va = Allocate(vdata.size() * 4, 16);
+        std::memcpy(va.ptr, vdata.data(), vdata.size() * 4);
+    }
     std::vector<VkDescriptorBufferInfo> binfo;
     std::vector<VkDescriptorImageInfo> iinfo;
-    binfo.reserve(20);
+    binfo.reserve(40);
     iinfo.reserve(MAX_TEXTURES);
     std::vector<VkWriteDescriptorSet> writes;
     auto write_buffer = [&](u32 binding, const void* data, size_t size) {
@@ -1551,6 +1621,12 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     };
     for (u32 i = 0; i < 18; ++i)
         if (!cbdata[i].empty()) write_buffer(i, cbdata[i].data(), cbdata[i].size());
+    if (vsh) {
+        for (u32 i = 0; i < 18; ++i)
+            if (!vcbdata[i].empty()) write_buffer(SpirvBinding::VS_CBUF0 + i, vcbdata[i].data(), vcbdata[i].size());
+        write_buffer(SpirvBinding::VS_ATTR, vin.records.data(), vin.records.size() * 4);
+        write_buffer(SpirvBinding::VS_INFO, vsinfo, sizeof(vsinfo));
+    }
     u32 info[4 + 2 * MAX_TEXTURES] = {};
     info[0] = U((regs[WINDOW_ORIGIN] & 1) ? -1.0f : 1.0f);   // SR_Y_DIRECTION
     for (size_t k = 0; k < bound.size(); ++k) { info[4 + 2 * k] = U(bound[k].scale[0]); info[5 + 2 * k] = U(bound[k].scale[1]); }
@@ -1571,7 +1647,8 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     PipelineDesc d;
     d.varyings = varyings;
     d.ncolor = u32(targets.size());
-    std::vector<u32> key{u32(fs->id), u32(fs->id >> 32), d.ncolor};
+    d.vs = vsh ? vsh->module : VK_NULL_HANDLE;
+    std::vector<u32> key{u32(fs->id), u32(fs->id >> 32), d.ncolor, vsh ? u32(vsh->id) : 0u, vsh ? u32(vsh->id >> 32) : 0u};
     for (const auto& v : varyings) key.push_back(u32(v.slot) | (u32(v.kind) << 8));
     for (u32 k = 0; k < d.ncolor; ++k) {
         const TargetRegs& t = targets[k];
@@ -1598,7 +1675,7 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
         d.depth_op = CompareOpVk(regs[DEPTH_FUNC]);
         d.depth_write = depth_write;
     }
-    if ((regs[CULL_ENABLE] & 1) && !vstage.no_cull && !std::getenv("NEXO2_NOCULL")) {
+    if ((regs[CULL_ENABLE] & 1) && (vsh || !vstage.no_cull) && !std::getenv("NEXO2_NOCULL")) {
         const u32 cull = regs[CULL_FACE];
         d.cull = cull == 0x404 ? VK_CULL_MODE_FRONT_BIT : cull == 0x405 ? VK_CULL_MODE_BACK_BIT
                : cull == 0x408 ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_NONE;
@@ -1649,10 +1726,17 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     vkCmdSetScissor(cmd, 0, 1, &scissor);
     const float bc[4] = {F(regs[BLEND_CONST]), F(regs[BLEND_CONST + 1]), F(regs[BLEND_CONST + 2]), F(regs[BLEND_CONST + 3])};
     vkCmdSetBlendConstants(cmd, bc);
-    const VkDeviceSize voff = va.offset;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &m_upload.buffer, &voff);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeLayout, 0, 1, &set, 0, nullptr);
-    vkCmdDraw(cmd, nverts, 1, 0, 0);
+    if (vsh) {
+        vkCmdBindIndexBuffer(cmd, m_upload.buffer, va.offset, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(cmd, nverts, 1, 0, 0, 0);
+        ++m_stats.draws_gpu_vs;
+        ++stats.draws_gpu_vs;
+    } else {
+        const VkDeviceSize voff = va.offset;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &m_upload.buffer, &voff);
+        vkCmdDraw(cmd, nverts, 1, 0, 0);
+    }
 
     for (Image* im : color_imgs) {
         im->rendered = true;
@@ -1662,7 +1746,7 @@ bool VulkanRasterizer::Draw(const u32* regs, const ConstbufTable& cbs, const Dra
     ++m_stats.draws;
     ++stats.draws;
     ++stats.draws_hw;
-    stats.triangles += vstage.tris.size();
+    stats.triangles += ntris;
     return true;
 }
 

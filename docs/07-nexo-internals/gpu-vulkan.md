@@ -91,8 +91,28 @@ Anything not translatable returns an error, and that shader will keep using the 
 - `ComputeTest` (tests): constant buffer *i* is a storage buffer at binding *i*, attributes read
   with ALD/IPA come from binding 20 and AST writes go to binding 21.
 - `Fragment` (step 3c): see below.
+- `Vertex`: see "Vertex stage" below.
 
-Vertex shaders are not translated: they still run on the CPU (see "Draws").
+**Vertex stage.** The Maxwell vertex shader runs on the GPU when it can be translated:
+
+- ALD and AST must use fixed addresses (`ra` = RZ). The translator records which input attributes
+  are read (`vs_attr_mask`, bit *i* = `a[0x80 + 16i]`) and whether the vertex id (`a[0x2FC]`) is read.
+- Inputs come from a storage buffer (binding 39, `VS_ATTR`). Each vertex takes 4 words per attribute
+  in the mask (in order), then the vertex id (`VsRecordWords`). The record is picked with
+  `gl_VertexIndex`. The CPU still fetches and converts the attributes (`SoftwareRasterizer::FetchVertexInputs`,
+  the same code as the software renderer), so every vertex format behaves the same; it no longer runs the shader.
+- Outputs written with AST go to function variables (unwritten = 0, position w = 1). At the end,
+  the shader applies the viewport change from "Draws" step 4 (values in binding 38, `VS_INFO`),
+  writes the near/far planes to `gl_ClipDistance`, and writes one output per pixel-shader input.
+- Constant buffers of the vertex stage use bindings 40–57.
+- Not translated (the vertex shader runs on the CPU as before): textures in the vertex shader,
+  ALD/AST with an address in a register, points, lines, tessellation and polygon modes other than fill.
+  The log says why once per reason ("shader de vertices en la CPU (...)"). `NEXO2_VK_CPU_VS=1`
+  turns the GPU path off.
+
+**Constant buffer size.** The translator reports how many bytes of each constant buffer the shader
+reads (`cbuf_bytes`): the highest fixed offset, or 64 KB if an offset is computed. Only that part is
+copied per draw.
 
 **Fragment stage.** Before emitting code the translator scans the program:
 
@@ -137,10 +157,12 @@ reason goes to the log once).
    untranslatable shader, depth-compare or integer textures) → software.
 2. The pixel shader is translated (cached by address and options; the program bytes are compared
    on each use, in case the game uploaded another one at the same address).
-3. **The vertex shader runs on the CPU**, with the same code as the software renderer
-   (`SoftwareRasterizer::RunVertexStage`: indices, the interpreter, primitive assembly into a
-   triangle list). Vertices are few; pixels are what costs.
-4. Each vertex goes to the GPU as `position + one vec4 per pixel-shader input`. The position is
+3. **Vertices.** If the vertex shader can be translated (see "Vertex stage"), the CPU only reads the
+   indices, fetches the attributes of each distinct vertex and builds the triangle list; the draw is
+   `vkCmdDrawIndexed`. Otherwise the vertex shader runs on the CPU with the same code as the
+   software renderer (`SoftwareRasterizer::RunVertexStage`: indices, the interpreter, primitive assembly).
+   In GTA Chinatown Wars this took the vertex time from about 400 to 60 ms per second on lavapipe.
+4. On the CPU path, each vertex goes to the GPU as `position + one vec4 per pixel-shader input`. The position is
    rewritten so that a Vulkan viewport covering `[0, width) × [0, height)` lands on the same pixel
    as Maxwell's viewport transform: `x' = 2(sx·x + ox·w)/width − w`, same for y, `z' = sz·z + oz·w`,
    `w' = w`. It is a linear change of the clip coordinates, so Vulkan's clipping and

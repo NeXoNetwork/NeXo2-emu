@@ -535,6 +535,13 @@ AudioRendererManager::AudioRendererManager() : ServiceObject("audren:u") {
     });
 }
 
+AudioUserClient::AudioUserClient() : ServiceObject("aud:u") {
+    RegisterCommand(2, "CreateUserClientSessionByHipc", [](IpcContext& ctx) {
+        ctx.PushInterface(std::make_shared<AudioRendererManager>());
+        ctx.SetResult(Result::Success);
+    });
+}
+
 AudioRenderer::AudioRenderer(u32 sample_rate, u32 sample_count, u32 mix_buffers, u32 voices, u32 sinks, u32 submixes,
                              u32 effects, u32 revision)
     : ServiceObject("IAudioRenderer"), m_state(std::make_shared<State>()) {

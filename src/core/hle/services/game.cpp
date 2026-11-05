@@ -1,4 +1,5 @@
 #include "game.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include "avatar_jpeg.hpp"
@@ -195,6 +196,156 @@ AocService::AocService() : LenientService("aoc:u") {
     RegisterStub(12, "NotifyUnmountAddOnContent");
     RegisterCommand(100, "CreateEcPurchasedEventManager", Open<PurchaseEventManager>());
     RegisterCommand(101, "CreatePermanentEcPurchasedEventManager", Open<PurchaseEventManager>());
+}
+
+namespace {
+// Muestras (por canal, a 48 kHz) de un paquete Opus, segun su TOC (RFC 6716, 3.1)
+u32 OpusPacketSamples48k(const u8* p, size_t n) {
+    if (n == 0) return 0;
+    const u32 config = p[0] >> 3;
+    u32 frame;
+    if (config < 12) { static const u32 silk[4] = {480, 960, 1920, 2880}; frame = silk[config & 3]; }
+    else if (config < 16) frame = (config & 1) ? 960 : 480;
+    else frame = 120u << (config & 3);
+    u32 frames = 1;
+    switch (p[0] & 3) {
+        case 0: frames = 1; break;
+        case 1: case 2: frames = 2; break;
+        default: frames = n > 1 ? (p[1] & 0x3F) : 0; break;
+    }
+    return std::min<u32>(frame * frames, 5760);   // 120 ms como mucho
+}
+u32 Be32(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
+
+class HwOpusDecoder final : public LenientService {
+public:
+    HwOpusDecoder(u32 sample_rate, u32 channels)
+        : LenientService("hwopus:IHardwareOpusDecoder"), m_rate(sample_rate ? sample_rate : 48000), m_channels(channels ? channels : 1) {
+        // Todas las variantes de "decodificar" devuelven lo mismo: (bytes leidos, muestras[, tiempo])
+        RegisterCommand(0, "DecodeInterleavedOld", [this](IpcContext& ctx) { Decode(ctx, false); });
+        RegisterCommand(2, "DecodeInterleavedForMultiStreamOld", [this](IpcContext& ctx) { Decode(ctx, false); });
+        RegisterCommand(4, "DecodeInterleavedWithPerfOld", [this](IpcContext& ctx) { Decode(ctx, true); });
+        RegisterCommand(5, "DecodeInterleavedForMultiStreamWithPerfOld", [this](IpcContext& ctx) { Decode(ctx, true); });
+        RegisterCommand(6, "DecodeInterleavedWithPerfAndResetOld", [this](IpcContext& ctx) { Decode(ctx, true); });
+        RegisterCommand(7, "DecodeInterleavedForMultiStreamWithPerfAndResetOld", [this](IpcContext& ctx) { Decode(ctx, true); });
+        RegisterCommand(8, "DecodeInterleaved", [this](IpcContext& ctx) { Decode(ctx, true); });
+        RegisterCommand(9, "DecodeInterleavedForMultiStream", [this](IpcContext& ctx) { Decode(ctx, true); });
+    }
+private:
+    void Decode(IpcContext& ctx, bool perf) {
+        const std::vector<u8> in = ctx.ReadBuffer(0);
+        // Paquete de nn::codec: tamano (u32 big endian), "final range" (u32) y el paquete Opus
+        u32 consumed = 0, samples = 0;
+        if (in.size() >= 8) {
+            const u32 size = Be32(in.data());
+            if (size_t(size) + 8 <= in.size()) {
+                consumed = size + 8;
+                samples = u32(u64(OpusPacketSamples48k(in.data() + 8, size)) * m_rate / 48000);
+            }
+        }
+        const u64 bytes = std::min<u64>(u64(samples) * m_channels * 2, ctx.GetWriteBufferSize(0));
+        samples = u32(bytes / (u64(m_channels) * 2));
+        std::vector<u8> pcm(size_t(bytes), 0);   // silencio (sin libopus todavia)
+        if (!pcm.empty()) ctx.WriteBuffer(pcm.data(), pcm.size(), 0);
+        ctx.Push<u32>(consumed);
+        ctx.Push<u32>(samples);
+        if (perf) ctx.Push<u64>(0);
+        ctx.SetResult(Result::Success);
+    }
+    u32 m_rate, m_channels;
+};
+// Tamano del espacio de trabajo: el de la consola es parecido; el juego solo lo reserva
+u32 OpusWorkSize(u32 channels) { return 0x4000 + std::max<u32>(channels, 1) * 0x8000; }
+
+// Switch 2 exposes a second hwopus entry point for clients of the hardware audio
+// codec manager. Games may open it while probing the platform even when they use
+// the regular Opus decoder above for playback.
+class HwAudioCodecManagerSession final : public LenientService {
+public:
+    HwAudioCodecManagerSession() : LenientService("hwopus:hwacod:IHardwareAudioCodecManagerSession") {
+        RegisterStub(0, "OpenHardwareAudioCodec");
+        RegisterStub(1, "GetWorkBufferSize");
+        RegisterStub(10, "OpenHardwareAudioCodec");
+    }
+};
+
+class HwAudioCodecClientSession final : public LenientService {
+public:
+    HwAudioCodecClientSession() : LenientService("hwopus:hwacod:IClientSession") {
+        RegisterStub(0, "GetWorkBufferSize");
+        RegisterStub(1, "OpenHardwareAudioCodec");
+        RegisterCommand(10, "OpenHardwareAudioCodecManagerSession", [](IpcContext& ctx) {
+            ctx.PushInterface(std::make_shared<HwAudioCodecManagerSession>());
+            ctx.SetResult(Result::Success);
+        });
+    }
+};
+} // namespace
+
+HwOpusService::HwOpusService() : LenientService("hwopus") {
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        Logger::Log(Logger::Level::Warning, "[hwopus] Sin decodificador de Opus todavia: los sonidos en Opus saldran en silencio");
+    }
+    // (frecuencia, canales[, tamano de trabajo]) + memoria de trabajo -> decodificador
+    RegisterCommand(0, "OpenHardwareOpusDecoder", [](IpcContext& ctx) {
+        const u32 rate = ctx.Pop<u32>(), channels = ctx.Pop<u32>();
+        ctx.PushInterface(std::make_shared<HwOpusDecoder>(rate, channels));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(1, "GetWorkBufferSize", [](IpcContext& ctx) {
+        ctx.Pop<u32>();
+        ctx.Push<u32>(OpusWorkSize(ctx.Pop<u32>()));
+        ctx.SetResult(Result::Success);
+    });
+    // Multistream: los parametros van en un buffer (frecuencia, canales, ...)
+    auto ms_params = [](IpcContext& ctx, u32& rate, u32& channels) {
+        const std::vector<u8> p = ctx.ReadBuffer(0);
+        rate = 48000; channels = 2;
+        if (p.size() >= 8) { std::memcpy(&rate, p.data(), 4); std::memcpy(&channels, p.data() + 4, 4); }
+    };
+    RegisterCommand(2, "OpenHardwareOpusDecoderForMultiStream", [ms_params](IpcContext& ctx) {
+        u32 rate, channels; ms_params(ctx, rate, channels);
+        ctx.PushInterface(std::make_shared<HwOpusDecoder>(rate, channels));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(3, "GetWorkBufferSizeForMultiStream", [ms_params](IpcContext& ctx) {
+        u32 rate, channels; ms_params(ctx, rate, channels);
+        ctx.Push<u32>(OpusWorkSize(channels));
+        ctx.SetResult(Result::Success);
+    });
+    // Ex: parametros (frecuencia, canales, flags u32, reservado) en los datos
+    RegisterCommand(4, "OpenHardwareOpusDecoderEx", [](IpcContext& ctx) {
+        const u32 rate = ctx.Pop<u32>(), channels = ctx.Pop<u32>();
+        ctx.PushInterface(std::make_shared<HwOpusDecoder>(rate, channels));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(5, "GetWorkBufferSizeEx", [](IpcContext& ctx) {
+        ctx.Pop<u32>();
+        ctx.Push<u32>(OpusWorkSize(ctx.Pop<u32>()));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(6, "OpenHardwareOpusDecoderForMultiStreamEx", [ms_params](IpcContext& ctx) {
+        u32 rate, channels; ms_params(ctx, rate, channels);
+        ctx.PushInterface(std::make_shared<HwOpusDecoder>(rate, channels));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(7, "GetWorkBufferSizeForMultiStreamEx", [ms_params](IpcContext& ctx) {
+        u32 rate, channels; ms_params(ctx, rate, channels);
+        ctx.Push<u32>(OpusWorkSize(channels));
+        ctx.SetResult(Result::Success);
+    });
+    RegisterCommand(8, "GetWorkBufferSizeExEx", [](IpcContext& ctx) {
+        ctx.Pop<u32>();
+        ctx.Push<u32>(OpusWorkSize(ctx.Pop<u32>()));
+        ctx.SetResult(Result::Success);
+    });
+    // Switch 2 (20.1.0+): returns hwacod's IClientSession interface.
+    RegisterCommand(100, "OpenHardwareAudioCodecClientSession", [](IpcContext& ctx) {
+        ctx.PushInterface(std::make_shared<HwAudioCodecClientSession>());
+        ctx.SetResult(Result::Success);
+    });
 }
 
 ErrorContextWriter::ErrorContextWriter() : LenientService("ectx:aw") {

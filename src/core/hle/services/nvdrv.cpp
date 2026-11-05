@@ -111,6 +111,20 @@ void NvDrv::Ioctl(IpcContext& ctx, int version) {
         Logger::Log(Logger::Level::Info, line);
     }
     ctx.WriteBuffer(data.data(), data.size(), 0);
+    // Ioctl3: GET_CHARACTERISTICS y GET_TPC_MASKS dejan la estructura en el segundo buffer de
+    // salida (con Ioctl, en la direccion que pasa el programa). El SDK nuevo usa Ioctl3: sin esto
+    // veia una GPU vacia, cerraba nvhost-ctrl-gpu y NVN se quedaba sin dispositivo.
+    const u32 nr = request & 0xFF, magic = (request >> 8) & 0xFF;
+    if (file.device == Device::CtrlGpu && magic == 0x47 && (nr == 0x05 || nr == 0x06) && error == NV_SUCCESS &&
+        data.size() > 16) {
+        const size_t len = nr == 0x05 ? std::min<size_t>(0xA0, data.size() - 16) : 4;
+        if (version == 3) {
+            ctx.WriteBuffer(data.data() + 16, len, 1);
+        } else {
+            const u64 addr = Get<u64>(data, 8);
+            if (addr) ctx.GetMemory().WriteBytes(addr, data.data() + 16, len);
+        }
+    }
     ctx.Push<u32>(error);
     ctx.SetResult(Result::Success);
 }
@@ -431,6 +445,9 @@ u32 NvDrv::IoctlGpu(IpcContext& ctx, File& file, u32 request, std::vector<u8>& d
             case 0x0B: // ZCULL_BIND
             case 0x0C: // SET_ERROR_NOTIFIER
             case 0x0D: // SET_PRIORITY
+            case 0x1D: // SET_TIMESLICE (reparto de tiempo de la GPU entre canales)
+            case 0x12: // SET_PREEMPTION_MODE
+            case 0x13: // FORCE_RESET
                 return NV_SUCCESS;
             case 0x08: { // SUBMIT_GPFIFO(entradas en el mismo buffer, a partir del byte 24)
                 const u32 count = Get<u32>(d, 8);

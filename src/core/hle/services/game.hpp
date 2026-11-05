@@ -23,6 +23,9 @@ class FriendsService final : public LenientService { public: explicit FriendsSer
 class PrepoService final : public LenientService { public: explicit PrepoService(std::string name); };
 class AocService final : public LenientService { public: AocService(); };
 class FatalService final : public ServiceObject { public: FatalService(); };
+// hwopus: decodificador de Opus. Todavia sin libopus: devuelve silencio con el numero de
+// muestras correcto (sacado de la cabecera de cada paquete), para que el juego siga.
+class HwOpusService final : public LenientService { public: HwOpusService(); };
 // ectx:aw: contexto de errores (17.0.0+). CreateContextRegistrar -> objeto que acepta todo
 class ErrorContextWriter final : public LenientService { public: ErrorContextWriter(); };
 

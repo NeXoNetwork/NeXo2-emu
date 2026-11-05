@@ -124,8 +124,11 @@ static void mutexUnlock(u32* m, u32 self) {
     if (!__atomic_compare_exchange_n(m, &expected, 0, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
         svcArbitrateUnlock(m);   // habia hilos esperando: el kernel elige el siguiente
 }
+// Como libnx: si vence el plazo, el kernel devuelve 0xEA01 SIN el mutex y hay que cogerlo
 static u32 condvarWait(u32* cv, u32* m, u32 self, s64 timeout) {
-    return svcWaitProcessWideKeyAtomic(m, cv, self, timeout);
+    const u32 rc = svcWaitProcessWideKeyAtomic(m, cv, self, timeout);
+    if (rc == 0xEA01) mutexLock(m, self);
+    return rc;
 }
 
 // ---------------------------------------------------------------------------

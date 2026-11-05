@@ -26,6 +26,13 @@ public:
     AudioRendererManager();
 };
 
+// Switch 2 HIPC entry point used by newer audio SDKs. It hands out the existing
+// renderer manager through CreateUserClientSessionByHipc.
+class AudioUserClient final : public ServiceObject {
+public:
+    AudioUserClient();
+};
+
 struct KEvent;
 
 // Estado del renderizador (compartido con su temporizador)

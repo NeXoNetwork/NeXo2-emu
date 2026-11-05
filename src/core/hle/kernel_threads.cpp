@@ -256,7 +256,10 @@ void Kernel::UpdateWaits() {
                 }
                 break;
             case KThread::Wait::CondVar:
-                if (t.deadline <= now) AcquireMutexAfterWait(t, Result::TimedOut);
+                // Plazo vencido: vuelve SIN el mutex (como en la consola; libnx y nn::os lo cogen
+                // despues ellos mismos). Si se lo dabamos, el hilo intentaba cogerlo otra vez
+                // siendo ya suyo y se quedaba esperandose a si mismo (Pokemon Diamante Brillante).
+                if (t.deadline <= now) { t.cv_key = 0; Wake(t, Result::TimedOut); }
                 break;
             case KThread::Wait::Arbiter:
                 if (t.deadline <= now) { t.arbiter_addr = 0; Wake(t, Result::TimedOut); }

@@ -90,9 +90,11 @@ The mutex word is `0` (free) or the owner's thread handle, plus bit `0x40000000`
   The kernel picks the highest-priority waiter (FIFO on a tie), writes its handle into the word
   (with the waiters bit if more remain) and wakes it: it now owns the mutex.
 - **Condition wait**: `svcWaitProcessWideKeyAtomic(mutex, key, handle, timeout)` releases the
-  mutex (like unlock), writes 1 to `key` and sleeps. When signaled or timed out, the thread
-  first takes the mutex back: if it is free it gets it at once; otherwise it waits for it like
-  in ArbitrateLock, and returns the condition result (0 or 0xEA01) when it gets it.
+  mutex (like unlock), writes 1 to `key` and sleeps. When signaled, the thread first takes the
+  mutex back: if it is free it gets it at once; otherwise it waits for it like in ArbitrateLock,
+  and returns 0 when it gets it. When the timeout expires it returns 0xEA01 *without* the mutex,
+  as on the console: libnx and nn::os lock it again themselves. (Handing it over as well made
+  Pokémon Brilliant Diamond's thread wait for a mutex it already owned.)
 - **Signal**: `svcSignalProcessWideKey(key, count)` wakes `count` waiters (<= 0 = all) by
   priority; `key` goes back to 0 when nobody is left.
 

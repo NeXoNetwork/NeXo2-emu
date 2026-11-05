@@ -73,6 +73,7 @@ void Kernel::RegisterDefaultServices() {
     m_services.Register("pl:u",     [] { return std::make_shared<PlService>(); });
     m_services.Register("ssl",      [] { return std::make_shared<SslService>(); });
     m_services.Register("audren:u", [] { return std::make_shared<AudioRendererManager>(); });
+    m_services.Register("aud:u",     [] { return std::make_shared<AudioUserClient>(); });
     m_services.Register("audout:u", [] { return std::make_shared<AudioOutManager>(); });
     m_services.Register("apm",      [] { return std::make_shared<ApmManager>(); });
     m_services.Register("apm:p",    [] { return std::make_shared<ApmManager>(); });   // (postal)
@@ -82,6 +83,7 @@ void Kernel::RegisterDefaultServices() {
         m_services.Register(n, [n] { return std::make_shared<LenientService>(n); });
     // Contexto de errores (informes de error de la consola): no hace falta, OK a todo
     m_services.Register("ectx:aw", [] { return std::make_shared<ErrorContextWriter>(); });
+    m_services.Register("hwopus", [] { return std::make_shared<HwOpusService>(); });
     m_services.Register("appletOE", [] { return std::make_shared<AppletOE>(); });
     m_services.Register("hid",      [] { return std::make_shared<HidServer>(); });
     m_services.Register("time:u",   [] { return std::make_shared<TimeService>("time:u"); });
@@ -327,6 +329,27 @@ void Kernel::HandleSvcImpl(u32 imm, CPUState& s) {
             SetResult(s, (s.x[0] % Core::Memory::PAGE_SIZE || s.x[1] % Core::Memory::PAGE_SIZE)
                              ? Result::InvalidAddress : Result::Success);
             return;
+        case 0x80: { // Switch 2: SetGpuMemoryAttribute(addr, size, mask, value)
+            // Aceptamos la peticion para que el SDK de Switch 2 pueda registrar memoria
+            // para la GPU. NeXo todavia no expone los atributos GPU en QueryMemory.
+            constexpr u64 page = Core::Memory::PAGE_SIZE;
+            const u64 addr = s.x[0], size = s.x[1];
+            if (addr % page || size == 0 || size % page || addr >= Core::Memory::ADDRESS_SPACE ||
+                size > Core::Memory::ADDRESS_SPACE - addr) {
+                SetResult(s, Result::InvalidAddress);
+                return;
+            }
+            for (u64 cursor = addr; cursor < addr + size;) {
+                const Core::MemoryRegion region = m_memory.QueryRegion(cursor);
+                if (region.state == MemoryState::Free || region.End() <= cursor) {
+                    SetResult(s, Result::InvalidState);
+                    return;
+                }
+                cursor = std::min(region.End(), addr + size);
+            }
+            SetResult(s, Result::Success);
+            return;
+        }
         case 0x06: SvcQueryMemory(s);       return;
         case 0x07: SvcExitProcess(s);       return;
         case 0x08: SvcCreateThread(s);      return;
@@ -674,6 +697,7 @@ void Kernel::SvcGetInfo(CPUState& s) {
 // ============================================================================
 
 const char* Kernel::SvcName(u32 imm) {
+    if (imm == 0x80) return "SetGpuMemoryAttribute";
     static const char* const names[0x80] = {
         "?", "SetHeapSize", "SetMemoryPermission", "SetMemoryAttribute", "MapMemory", "UnmapMemory",
         "QueryMemory", "ExitProcess", "CreateThread", "StartThread", "ExitThread", "SleepThread",

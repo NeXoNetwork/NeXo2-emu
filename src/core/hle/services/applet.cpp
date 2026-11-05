@@ -144,6 +144,8 @@ constexpr u8  OPERATION_MODE_DOCKED = 1;    // conectada al dock (TV)
 AppletOE::AppletOE() : ServiceObject("appletOE") {
     // OpenApplicationProxy(pid, handle del proceso, u64 reservado) -> IApplicationProxy
     RegisterCommand(0, "OpenApplicationProxy", Open<ApplicationProxy>());
+    // Switch 2 SDKs use command 10 for the same application proxy entry point.
+    RegisterCommand(10, "OpenApplicationProxyForSwitch2", Open<ApplicationProxy>());
 }
 
 ApplicationProxy::ApplicationProxy() : ServiceObject("IApplicationProxy") {
@@ -220,6 +222,12 @@ SelfController::SelfController() : LenientService("ISelfController") {
     RegisterStub(18, "SetRequiresCaptureButtonShortPressedMessage");
     RegisterStub(19, "SetAlbumImageOrientation");
     RegisterCommand(40, "CreateManagedDisplayLayer", Reply<u64>(1)); // id de la capa
+    // La misma capa y otra para la grabacion de video (que NeXo no usa): ids 1 y 2
+    RegisterCommand(44, "CreateManagedDisplaySeparableLayer", [](IpcContext& ctx) {
+        ctx.Push<u64>(1);
+        ctx.Push<u64>(2);
+        ctx.SetResult(Result::Success);
+    });
     RegisterStub(50, "SetHandlesRequestToDisplay");
     RegisterStub(62, "SetIdleTimeDetectionExtension");
     RegisterCommand(63, "GetIdleTimeDetectionExtension", Reply<u32>(0));

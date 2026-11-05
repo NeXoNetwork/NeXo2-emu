@@ -117,7 +117,7 @@ void NvDrv::Ioctl(IpcContext& ctx, int version) {
     const u32 nr = request & 0xFF, magic = (request >> 8) & 0xFF;
     if (file.device == Device::CtrlGpu && magic == 0x47 && (nr == 0x05 || nr == 0x06) && error == NV_SUCCESS &&
         data.size() > 16) {
-        const size_t len = nr == 0x05 ? std::min<size_t>(0xA0, data.size() - 16) : 4;
+        const size_t len = nr == 0x05 ? std::min<size_t>(Get<u64>(data, 0), data.size() - 16) : 4;
         if (version == 3) {
             ctx.WriteBuffer(data.data() + 16, len, 1);
         } else {
@@ -260,7 +260,7 @@ u32 NvDrv::IoctlCtrl(IpcContext& ctx, u32 request, std::vector<u8>& d) {
 }
 
 // ----------------------------------------------------------------------------
-//  /dev/nvhost-ctrl-gpu: informacion de la GPU (la de la Switch 1: GM20B)
+//  /dev/nvhost-ctrl-gpu: caracteristicas GM20B para Switch 1 o Ampere para Switch 2
 // ----------------------------------------------------------------------------
 u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
     switch (IocNr(request)) {
@@ -275,11 +275,17 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
         case 0x03: // ZBC_SET_TABLE: valores de borrado rapido (compresion); no hace falta
         case 0x04: // ZBC_QUERY_TABLE
             return NV_SUCCESS;
-        case 0x05: { // GET_CHARACTERISTICS(tamano, direccion) -> estructura de 0xA0 bytes
-            Put<u64>(d, 0, 0xA0);
+        case 0x05: { // GET_CHARACTERISTICS: 0xA0 bytes GM20B; 0xD0 bytes en Ampere
+            const bool switch2 = (ctx.GetKernel().ProgramId() >> 48) == 0x0400;
+            constexpr size_t ampere_characteristics_size = 0xD0;
+            const size_t characteristics_size = switch2 ? ampere_characteristics_size : 0xA0;
+            // Switch 2 NvRm requests the larger Ampere characteristics structure. The
+            // outer ioctl payload starts with 16 bytes before that structure.
+            if (switch2 && d.size() < 16 + characteristics_size) d.resize(16 + characteristics_size);
+            Put<u64>(d, 0, characteristics_size);
             const size_t o = 16;
-            Put<u32>(d, o + 0, 0x120);          // arquitectura GM200
-            Put<u32>(d, o + 4, 0xB);            // GM20B
+            Put<u32>(d, o + 0, switch2 ? 0x170 : 0x120); // Ampere / GM200
+            Put<u32>(d, o + 4, switch2 ? 0x17E : 0xB);   // T239 Ampere / GM20B
             Put<u32>(d, o + 8, 0xA1);           // revision A1
             Put<u32>(d, o + 12, 1);             // GPCs
             Put<u64>(d, o + 16, 0x40000);       // cache L2
@@ -291,18 +297,18 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             Put<u32>(d, o + 48, 0x1B);
             Put<u32>(d, o + 52, 0x30000);
             Put<u32>(d, o + 56, 1);             // mascara de GPCs
-            Put<u32>(d, o + 60, 0x503);         // SM 5.3
-            Put<u32>(d, o + 64, 0x503);
+            Put<u32>(d, o + 60, switch2 ? 0x806 : 0x503); // SM 8.6 / SM 5.3
+            Put<u32>(d, o + 64, switch2 ? 0x806 : 0x503);
             Put<u32>(d, o + 68, 0x80);          // warps
             Put<u32>(d, o + 72, 0x28);          // 40 bits de direccion
             Put<u32>(d, o + 76, 0);
             Put<u64>(d, o + 80, 0x55);
             Put<u32>(d, o + 88, 0x902D);        // clases: 2D, 3D, compute, GPFIFO, inline, DMA
-            Put<u32>(d, o + 92, 0xB197);
-            Put<u32>(d, o + 96, 0xB1C0);
+            Put<u32>(d, o + 92, switch2 ? 0xC797 : 0xB197);
+            Put<u32>(d, o + 96, switch2 ? 0xC7C0 : 0xB1C0);
             Put<u32>(d, o + 100, 0xB06F);
             Put<u32>(d, o + 104, 0xA140);
-            Put<u32>(d, o + 108, 0xB0B5);
+            Put<u32>(d, o + 108, switch2 ? 0xC7B5 : 0xB0B5);
             Put<u32>(d, o + 112, 1);
             Put<u32>(d, o + 116, 0);
             Put<u32>(d, o + 120, 2);
@@ -311,8 +317,14 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             Put<u32>(d, o + 132, 1);
             Put<u32>(d, o + 136, 0x21D70);
             Put<u32>(d, o + 140, 0);
-            Put<u64>(d, o + 144, 0x6230326D67ull);   // "gm20b"
+            Put<u64>(d, o + 144, switch2 ? 0x6230316167ull : 0x6230326D67ull); // "ga10b" / "gm20b"
             Put<u64>(d, o + 152, 0);
+            if (switch2) {
+                // Newer NvRm interfaces require version 6 or later. Advertise the
+                // interface level supported by Switch 2's NVN path.
+                for (size_t offset = 0x70; offset <= 0x80; offset += 2)
+                    Put<u16>(d, o + offset, 0x40);
+            }
             return NV_SUCCESS;
         }
         case 0x06: // GET_TPC_MASKS -> mascara de TPCs (2 TPCs)

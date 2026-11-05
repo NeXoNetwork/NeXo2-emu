@@ -283,10 +283,10 @@ Channel::~Channel() = default;
 void Channel::BindSubchannel(u32 subchannel, u32 class_id) {
     Engine* e = nullptr;
     switch (class_id & 0xFFFF) {
-        case 0xB197: e = m_3d.get(); break;
-        case 0xB0B5: e = m_dma.get(); break;
+        case 0xB197: case 0xC797: e = m_3d.get(); break;
+        case 0xB0B5: case 0xC7B5: e = m_dma.get(); break;
         case 0x902D: e = m_2d.get(); break;
-        case 0xB1C0: e = m_compute.get(); break;
+        case 0xB1C0: case 0xC7C0: e = m_compute.get(); break;
         case 0xA140: e = m_inline.get(); break;
         default: {
             char buf[64];

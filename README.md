@@ -90,7 +90,5 @@ It does not include firmware, keys or games and does not help to obtain them. Us
 or software you legally own. Licensed under the GPLv3 (see [LICENSE](LICENSE)).
 
 > [!IMPORTANT]
-> **
-15
-Important note:**
+
 I am using Claude to develop this emulator and to learn from it; I don’t want forums—or the Emulation Wiki—to think that I am lying about the development process.

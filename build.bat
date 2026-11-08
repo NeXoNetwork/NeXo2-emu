@@ -131,6 +131,11 @@ if "!SDK_FOUND!"=="0" (
 rem VS2026 auto-selects the newest SDK, which may be a preview with broken UCRT paths.
 rem Prefer the stable Windows 11 SDK 10.0.26100 when it is installed.
 if exist "%ProgramFiles(x86)%\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64\ucrtd.lib" set "SDK_PLATFORM=x64,version=10.0.26100.0"
+rem Some installers (GameInput, Application Verifier) write a 64-bit KitsRoot10 that points to
+rem "Program Files\Windows Kits\10", which has no Lib folder. MSBuild then looks for the UCRT
+rem (ucrtd.lib) there and CMake reports "No CMAKE_CXX_COMPILER could be found" (LNK1104).
+rem Point MSBuild at the real SDK folder when the UCRT is there.
+if exist "%ProgramFiles(x86)%\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64\ucrtd.lib" set "UCRTContentRoot=%ProgramFiles(x86)%\Windows Kits\10\"
 if not exist "externals\SDL\CMakeLists.txt" if not exist "externals\imgui\imgui.cpp" (
     if "!GIT_OK!"=="1" (
         echo         Para inicializarlos: git submodule update --init --recursive

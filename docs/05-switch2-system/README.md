@@ -6,3 +6,4 @@ What is specific to the Switch 2 firmware (on top of the shared Horizon base).
 | :--- | :--- |
 | [firmware-versions.md](firmware-versions.md) | Firmware timeline, system title list |
 | [compatibility-mode.md](compatibility-mode.md) | How Switch 1 games run: nnCompat modules, tick rate 31.25 MHz, hooks |
+| [native-games.md](native-games.md) | What native Switch 2 games need (CPU, kernel, services, graphics system, Ampere GPU) and NeXo's status |

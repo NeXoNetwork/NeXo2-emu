@@ -1,12 +1,24 @@
 # Build Guide - NeXo 2
 
-Instructions to build the emulator using the MSVC v143 toolset.
+Instructions to build the emulator using the MSVC x64 toolset.
 
 ## 1. Requirements
-* Visual Studio 2022/2026 with the "Desktop development with C++" workload.
-* MSVC v143 build tools installed.
-* CMake 3.25 or higher.
-* Python 3 (only for the optional tools in `tools/`).
+* Visual Studio 2022 or Visual Studio 2026 with the **Desktop development with C++** workload.
+* MSVC x64/x86 build tools and a Windows 10 or 11 SDK. Visual Studio 2022 uses v143;
+  Visual Studio 2026 uses v145.
+* CMake 3.25 or newer for Visual Studio 2022; CMake 4.2 or newer for Visual Studio 2026
+  (the VS-bundled version is fine).
+* Git for Windows, with the required SDL3 and ImGui submodules initialized.
+* Python 3 is optional. `build.bat` uses it with `aqtinstall` to fetch Qt 6 for the optional Qt frontend.
+
+`build.bat` checks these requirements before compiling and prints installation guidance for missing
+items. Components marked optional in its output (JIT, Vulkan, TLS and Qt) can be omitted; the emulator
+will build with reduced functionality. To skip Qt and its download attempt, run:
+
+```cmd
+set NEXO2_NO_QT=1
+build.bat
+```
 
 ## 2. File Structure
 * `src/main.cpp`
@@ -29,12 +41,12 @@ Instructions to build the emulator using the MSVC v143 toolset.
 Run from the project root:
 
 ```cmd
-if exist build rd /s /q build
-mkdir build
-cd build
-cmake .. -G "Visual Studio 17 2022" -T v143 -A x64
-cmake --build . --config Release
+build.bat
 ```
+
+The script selects the Visual Studio 2022 or 2026 generator and matching MSVC toolset. On VS 2026,
+it uses a separate `build-vs2026` directory and prefers Windows SDK 10.0.26100 when installed.
+To run the tests after a successful build, use `build.bat test`.
 
 ## 4. Run the CPU tests
 

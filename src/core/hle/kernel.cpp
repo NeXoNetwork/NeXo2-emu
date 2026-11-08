@@ -124,6 +124,7 @@ void Kernel::Reset() {
     m_imageSize = 0;
     m_mainStackSize = Layout::MAIN_STACK_SIZE;
     m_systemResourceSize = 0;
+    m_totalMemory = Layout::TOTAL_MEMORY;
     m_physicalSize = 0;
     m_isApplication = false;
     m_programId = 0x0100000000001000ULL;
@@ -236,6 +237,7 @@ void Kernel::SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 
     using namespace Layout;
     m_imageSize = image_size;
     m_systemResourceSize = system_resource_size;
+    m_totalMemory = (program_id >> 48) == 0x0400 ? Layout::TOTAL_MEMORY_SWITCH2 : Layout::TOTAL_MEMORY;
     if (system_resource_size)
         Logger::Log(Logger::Level::Info, "[HLE] Memoria del sistema para el proceso (main.npdm): " +
                     std::to_string(system_resource_size / 1024) + " KB");
@@ -523,7 +525,7 @@ void Kernel::SvcMapPhysicalMemory(CPUState& s, bool map) {
     }
     if (map) {
         const u64 used = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize;
-        if (used + free_bytes > TOTAL_MEMORY - m_systemResourceSize) { SetResult(s, 0xD801 /* LimitReached */); return; }
+        if (used + free_bytes > m_totalMemory - m_systemResourceSize) { SetResult(s, 0xD801 /* LimitReached */); return; }
         for (const auto& p : parts) {
             if (p.state != MemoryState::Free) continue;
             m_memory.ZeroPages(p.base, p.size);
@@ -668,7 +670,7 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 3:  value = ALIAS_REGION_SIZE; break;
         case 4:  value = HEAP_REGION_BASE;  break;
         case 5:  value = HEAP_REGION_SIZE;  break;
-        case 6:  value = TOTAL_MEMORY;      break;             // TotalMemorySize
+        case 6:  value = m_totalMemory;     break;             // TotalMemorySize
         case 7:  value = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize; break; // UsedMemorySize
         case 8:  value = 0; break;                             // DebuggerAttached
         case 11: value = 0x4E65586F32ULL ^ (id1 * 0x9E3779B97F4A7C15ULL); break; // RandomEntropy (fijo)
@@ -681,10 +683,17 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 18: value = m_programId; break;                   // ProgramId (el del main.npdm; inventado en homebrew)
         case 19: value = 0; break;                             // InitialProcessIdRange (solo 1 proceso)
         case 20: value = 0; break;                             // UserExceptionContextAddress
-        case 21: value = TOTAL_MEMORY - m_systemResourceSize; break; // TotalNonSystemMemorySize
+        case 21: value = m_totalMemory - m_systemResourceSize; break; // TotalNonSystemMemorySize
         case 22: value = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize; break;
         case 23: value = 1; break;                             // IsApplication
         case 28: value = 0; break;                             // AliasRegionExtraSize [18.0.0+]
+        // Switch 2: zona vacia justo despues de la de alias (29 = direccion, 30 = tamano), memoria
+        // "remota" de los servicios graficos (31 y 32: no la hay) y tamano de pagina con el que
+        // la memoria virtual de nn::os mapea (33)
+        case 29: value = ALIAS_REGION_BASE + ALIAS_REGION_SIZE; break;
+        case 30: value = 0; break;
+        case 31: case 32: value = 0; break;
+        case 33: value = 0x1000; break;
         default:
             Logger::Log(Logger::Level::Warning, "[HLE] svcGetInfo: id " + std::to_string(id0) + " no implementado");
             SetResult(s, Result::InvalidEnumValue);

@@ -129,7 +129,11 @@ TEST(CpuFuzz_AgainstReferenceArm) {
             if ((long)idx == show && cache) PrintState(r.instr, s);
 
             if (r.result == FUZZ_ILLEGAL) {
-                if (executed) {
+                // El ARM de referencia es ARMv8.2 sin PAC ni MTE. LDRAA/LDRAB (PAC) y STG/STZG/
+                // ST2G/STZ2G (MTE) los usan los juegos de Switch 2: NeXo los ejecuta a proposito.
+                const bool newer = (r.instr & 0xFF200400u) == 0xF8200400u ||
+                                   ((r.instr & 0xFF200000u) == 0xD9200000u && ((r.instr >> 10) & 3) != 0);
+                if (executed && !newer) {
                     ++fs.invalid;
                     if (verbose) std::printf("    acepta no valida #%zu (%s): instr 0x%08X\n", idx, fs.name.c_str(), r.instr);
                 }

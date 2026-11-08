@@ -58,6 +58,10 @@ namespace Layout {
     // heap con esto (malloc, memoria de la GPU...): con 1 GB algunos se quedaban sin memoria.
     // Las paginas del PC solo se reservan al usarlas.
     constexpr u64 TOTAL_MEMORY      = 0x0000'0000'CD50'0000;
+    // Juegos de Switch 2 (id de programa 0x0400...): la consola tiene 12 GB y un juego ve unos
+    // 9,5 GB. Lo reparten entre el heap (unos 3 GB) y la memoria virtual de nn::os en la zona
+    // de alias (unos 6,3 GB): con la de Switch 1 se quedaban sin memoria al arrancar.
+    constexpr u64 TOTAL_MEMORY_SWITCH2 = 0x0000'0002'6000'0000;
 }
 
 // Codigos de resultado del kernel (modulo 1). Formato: (descripcion << 9) | modulo.
@@ -392,7 +396,8 @@ private:
     u64  m_imageSize = 0;
     u64  m_mainStackSize = Layout::MAIN_STACK_SIZE;
     u64  m_systemResourceSize = 0;   // del main.npdm: sin el, no hay svcMapPhysicalMemory
-    u64  m_physicalSize = 0;         // memoria puesta con svcMapPhysicalMemory
+    u64  m_physicalSize = 0;
+    u64  m_totalMemory = Layout::TOTAL_MEMORY;   // memoria del proceso (mas en los de Switch 2)         // memoria puesta con svcMapPhysicalMemory
     bool m_isApplication = false;
     u64  m_programId = 0x0100000000001000ULL;
     Loader::VFilePtr m_romfs;

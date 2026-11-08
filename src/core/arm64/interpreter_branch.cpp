@@ -146,6 +146,20 @@ bool Interpreter::ExecBranchSystem(u32 instr) {
             m_nextPc = m_state.x[30];
             return true;
         }
+        // BRAA/BRAB/BLRAA/BLRAB (modificador en Rm) y sus versiones "Z" (Rm = 11111):
+        // salto con comprobacion PAC. Como no firmamos punteros, saltan a Xn tal cual.
+        // Los usan los juegos de Switch 2 (ARMv8.3).
+        {
+            const u32 masked = instr & 0xFEDFF800u;   // sin Rn, Rm/op4, el bit Z y el de "link"
+            if (masked == 0xD61F0800u) {
+                const bool z = !Bit(instr, 24), link = Bit(instr, 21);
+                if (z && Bits(instr, 0, 5) != 31) return false;   // BRAAZ/BLRAAZ: op4 = 11111
+                const u64 t = X(rn);
+                if (link) m_state.x[30] = pc + 4;
+                m_nextPc = t;
+                return true;
+            }
+        }
     }
 
     return false;

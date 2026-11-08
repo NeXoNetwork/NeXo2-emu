@@ -290,3 +290,34 @@ TEST(CompiledC_HashFnv1a) {
     CHECK_EQ(m.Call(P::c_functions_hash_fnv1a, {DATA_BASE, sizeof(data) - 1}),
              Host::fnv1a(data, sizeof(data) - 1));
 }
+
+// ARMv8.3-8.5 que usan los juegos de Switch 2: saltos y cargas con puntero firmado (PAC, sin
+// firma real), PACGA y STG (MTE, sin etiquetas). Programa ensamblado con llvm-mc.
+TEST(Switch2PointerAuthAndMte) {
+    static const uint32_t program[] = {
+        0x10000061u, 0xD61F083Fu, 0xD4200020u, 0x10000202u, 0xD63F0C5Fu, 0x10000225u, 0xF8202CA4u,
+        0xF8FFF4A6u, 0xD2824688u, 0xD2800AA9u, 0x9AC93107u, 0x9AC9310Au, 0x910003EBu, 0xD104016Bu,
+        0xD9202D6Bu, 0x1000006Cu, 0xD71F0989u, 0xD4200040u, 0xD4200000u, 0xD28000A3u, 0xD65F03C0u,
+        0xD503201Fu, 0x00001111u, 0x00000000u, 0x00002222u, 0x00000000u, 0x00003333u, 0x00000000u,
+        0x00004444u, 0x00000000u,
+    };
+    //     adr x1, 1f ; braaz x1 ; brk #1
+    // 1:  adr x2, 2f ; blrabz x2          -> x3 = 5, vuelve
+    //     adr x5, data ; ldraa x4, [x5, #16]! ; ldrab x6, [x5, #-8]
+    //     pacga x7, x8, x9 ; pacga x10, x8, x9 (con x8 = 0x1234, x9 = 0x55)
+    //     x11 = sp - 0x100 ; stg x11, [x11, #32]!
+    //     adr x12, 3f ; braa x12, x9 ; brk #2
+    // 3:  brk #0
+    Machine m(program);
+    m.RunToBreak();
+    const u64 data = CODE_BASE + 22 * 4;
+    CHECK_EQ(m.cpu.GetState().pc, CODE_BASE + 18 * 4);   // el brk #0 (no el #1 ni el #2)
+    CHECK_EQ(m.x(3), 5);                                  // BLRABZ llamo a la funcion
+    CHECK_EQ(m.x(30), CODE_BASE + 5 * 4);                 // ...y guardo la vuelta
+    CHECK_EQ(m.x(4), 0x3333);
+    CHECK_EQ(m.x(5), data + 16);                          // LDRAA con "!" escribe Xn
+    CHECK_EQ(m.x(6), 0x2222);
+    CHECK(m.x(7) != 0 && (m.x(7) & 0xFFFFFFFF) == 0);     // PACGA: firma en los 32 bits altos
+    CHECK_EQ(m.x(7), m.x(10));                            // ...la misma para la misma entrada
+    CHECK_EQ(m.x(11), STACK_TOP - 0x100 + 32);            // STG con "!" escribe Xn
+}

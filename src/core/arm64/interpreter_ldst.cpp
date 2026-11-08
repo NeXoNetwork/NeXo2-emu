@@ -48,6 +48,34 @@ bool Interpreter::ExecLoadStore(u32 instr) {
     if (Bits(instr, 24, 6) == 0b001000) return ExecLoadStoreExclusive(instr);
 
     // ------------------------------------------------------------------
+    // LDRAA / LDRAB (ARMv8.3): LDR Xt de [Xn + simm10 * 8] con un puntero firmado (sin firma
+    // real: la direccion se usa tal cual). W = 1: la direccion se queda en Xn (pre-indice).
+    // ------------------------------------------------------------------
+    if ((instr & 0xFF200400u) == 0xF8200400u) {
+        const u32 imm10 = (Bit(instr, 22) << 9) | Bits(instr, 12, 9);
+        const u64 addr = XorSP(rn) + u64(SignExtend(imm10, 10) * 8);
+        const u64 value = ReadMemory(addr, 8);
+        if (Bit(instr, 11)) SetXorSP(rn, addr);
+        SetX(rt, value);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // STG / STZG / ST2G / STZ2G (MTE): guardan la etiqueta de memoria. Sin MTE las etiquetas
+    // no existen: solo la escritura de Xn (pre/post indice) y, en las "Z", poner a cero.
+    // ------------------------------------------------------------------
+    if ((instr & 0xFF200000u) == 0xD9200000u && Bits(instr, 10, 2) != 0) {
+        const u32 opc = Bits(instr, 22, 2), mode = Bits(instr, 10, 2);
+        const u64 offset = u64(SignExtend(Bits(instr, 12, 9), 9) * 16);
+        const u64 base = XorSP(rn);
+        const u64 addr = mode == 0b01 ? base : base + offset;   // 01 post, 10 offset, 11 pre
+        if (opc == 0b01 || opc == 0b11)                          // STZG / STZ2G: 16 o 32 bytes a cero
+            for (u64 i = 0; i < (opc == 0b11 ? 32u : 16u); i += 8) WriteMemory(addr + i, 0, 8);
+        if (mode != 0b10) SetXorSP(rn, base + offset);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
     // LDR (literal): lee una constante situada cerca del codigo
     // ------------------------------------------------------------------
     if (group == 0b01 && Bits(instr, 24, 2) == 0) {

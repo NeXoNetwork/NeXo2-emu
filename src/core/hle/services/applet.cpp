@@ -141,6 +141,15 @@ constexpr u8  OPERATION_MODE_HANDHELD = 0;  // portatil
 constexpr u8  OPERATION_MODE_DOCKED = 1;    // conectada al dock (TV)
 } // namespace
 
+namespace {
+class GraphicsScaleController final : public LenientService {
+public:
+    GraphicsScaleController() : LenientService("IGraphicsScaleController") {
+        RegisterCommand(10, "GetCurrentGraphicsScale", Reply<u32>(10));
+    }
+};
+} // namespace
+
 AppletOE::AppletOE() : ServiceObject("appletOE") {
     // OpenApplicationProxy(pid, handle del proceso, u64 reservado) -> IApplicationProxy
     RegisterCommand(0, "OpenApplicationProxy", Open<ApplicationProxy>());
@@ -157,6 +166,11 @@ ApplicationProxy::ApplicationProxy() : ServiceObject("IApplicationProxy") {
     RegisterCommand(11,   "GetLibraryAppletCreator", Open<LibraryAppletCreator>());
     RegisterCommand(20,   "GetApplicationFunctions", Open<ApplicationFunctions>());
     RegisterCommand(1000, "GetDebugFunctions",       Open<EmptyInterface>(std::string("IDebugFunctions")));
+    // Switch 2: dos interfaces nuevas. La 60 dice a que escala dibuja el juego (nn::oe::
+    // GetCurrentGraphicsScale): su comando 10 debe dar 10, 20 o 30 (10 = 1x). La 40 aun no se
+    // sabe para que es: acepta todo.
+    RegisterCommand(40, "GetSwitch2Interface40", Open<LenientService>(std::string("IApplicationProxy40")));
+    RegisterCommand(60, "GetGraphicsScaleController", Open<GraphicsScaleController>());
 }
 
 CommonStateGetter::CommonStateGetter() : LenientService("ICommonStateGetter") {

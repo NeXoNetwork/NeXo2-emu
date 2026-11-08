@@ -170,6 +170,14 @@ bool Interpreter::DpSource12(u32 instr) {
     const u32 opcode = Bits(instr, 10, 6);
 
     if (op0 == 0) {
+        // PACGA Xd, Xn, Xm|SP (ARMv8.3): firma "generica" en los 32 bits altos. No usamos el
+        // algoritmo de verdad (QARMA): basta con que la misma entrada de lo mismo siempre.
+        if (sf && opcode == 0b001100) {
+            u64 h = X(rn) * 0x9E3779B97F4A7C15ull ^ XorSP(rm);
+            h ^= h >> 29; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 32;
+            SetX(rd, h & 0xFFFFFFFF00000000ull);
+            return true;
+        }
         const u64 a = X(rn, sf), b = X(rm, sf);
         u64 result;
         switch (opcode) {

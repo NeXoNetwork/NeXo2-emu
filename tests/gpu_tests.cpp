@@ -497,3 +497,29 @@ TEST(Gpu_ShadowRamFirmwareCallAndMsaaClear) {
     CHECK_EQ(r.Reg(0x3EB), 1u);                     // SetCtMrtEnable empieza a 1 (deko3d no lo escribe)
     CHECK_EQ(f.Read32(RT + GPU::BlockLinearOffset(31 * 4, 15, 32 * 4, 0)), 0xFF0000FFu);   // ultima muestra
 }
+
+// Switch 2: un canal que espera un semaforo (SEM_EXECUTE) se para ahi y sigue cuando la CPU lo
+// suelta; lo que viene detras (y el aviso de fin del envio) espera tambien
+TEST(Gpu_ChannelWaitsForSemaphoreAcquire) {
+    Fixture f;
+    f.ch.SetWaitAcquires(true);
+    const u64 sem = BUF, out = BUF + 0x100;
+    Push p;
+    p.Cmd(0, 0x17, {Lo(sem), Hi(sem), 1, 0, 2});            // esperar [sem] >= 1
+    p.Cmd(0, 0x17, {Lo(out), Hi(out), 0x55, 0, 1});         // luego escribir 0x55 en out
+    f.gpu.MemoryManager().WriteBlock(PB, p.w.data(), p.w.size() * 4);
+    bool done = false;
+    f.ch.SubmitGpfifo({PB | (u64(p.w.size()) << 42)}, [&] { done = true; });
+    CHECK(f.ch.IsWaiting());
+    CHECK(f.gpu.HasWaitingChannels());
+    CHECK(!done);
+    CHECK_EQ(f.Read32(out), 0u);
+    f.gpu.ResumeWaitingChannels();                          // sigue sin cumplirse
+    CHECK(f.ch.IsWaiting());
+    f.mem.Write<u32>(CPU_BASE + (sem - GPU_BASE), 1);       // la CPU suelta el semaforo
+    f.gpu.ResumeWaitingChannels();
+    CHECK(!f.ch.IsWaiting());
+    CHECK(!f.gpu.HasWaitingChannels());
+    CHECK(done);
+    CHECK_EQ(f.Read32(out), 0x55u);
+}

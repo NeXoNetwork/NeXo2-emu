@@ -51,6 +51,7 @@ add_library(nexo2_core STATIC
     "${SRC_DIR}/core/hle/services/audio.cpp"
     "${SRC_DIR}/core/hle/services/audren.cpp"
     "${SRC_DIR}/core/hle/services/game.cpp"
+    "${SRC_DIR}/core/hle/services/gsv.cpp"
     "${SRC_DIR}/core/hle/services/bsd.cpp"
     "${SRC_DIR}/core/hle/services/ssl.cpp"
     "${SRC_DIR}/core/hle/net/host_net.cpp"

@@ -67,6 +67,16 @@ struct KEvent final : KObject {
     bool IsSignaled() const override { return signaled; }
 };
 
+// Memoria de transferencia (svcCreateTransferMemory): un trozo de la memoria del proceso
+// que se presta a un servicio. En NeXo la memoria sigue donde estaba; el servicio solo
+// necesita saber donde (el sistema grafico de Switch 2 escribe ahi sus tablas).
+struct KTransferMemory final : KObject {
+    u64 address, size;
+    u32 permission;
+    KTransferMemory(u64 a, u64 sz, u32 perm) : address(a), size(sz), permission(perm) {}
+    const char* TypeName() const override { return "KTransferMemory"; }
+};
+
 // Memoria compartida: un bloque que un servicio entrega al programa (hid: estado
 // de los mandos; time: el reloj). El programa la mapea con svcMapSharedMemory.
 // De momento se copia al mapear (los cambios posteriores del servicio no se ven).

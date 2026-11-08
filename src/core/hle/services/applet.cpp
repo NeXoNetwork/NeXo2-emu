@@ -7,6 +7,7 @@
 #include <cstring>
 #include <deque>
 #include "game.hpp"
+#include "gsv.hpp"
 
 namespace NeXo2::HLE {
 
@@ -235,6 +236,11 @@ SelfController::SelfController() : LenientService("ISelfController") {
     RegisterStub(17, "SetControllerFirmwareUpdateSection");
     RegisterStub(18, "SetRequiresCaptureButtonShortPressedMessage");
     RegisterStub(19, "SetAlbumImageOrientation");
+    // Switch 2: sesion del sistema grafico (gsv), que el juego usa por TIPC. Ver services/gsv.hpp.
+    RegisterCommand(2000, "GetGraphicsSystemSession", [](IpcContext& ctx) {
+        ctx.PushCopyHandle(ctx.GetKernel().CreateSessionHandle(CreateGraphicsSystemSession()));
+        ctx.SetResult(Result::Success);
+    });
     RegisterCommand(40, "CreateManagedDisplayLayer", Reply<u64>(1)); // id de la capa
     // La misma capa y otra para la grabacion de video (que NeXo no usa): ids 1 y 2
     RegisterCommand(44, "CreateManagedDisplaySeparableLayer", [](IpcContext& ctx) {

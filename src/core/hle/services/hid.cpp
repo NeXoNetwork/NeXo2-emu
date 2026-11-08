@@ -67,6 +67,8 @@ HidServer::HidServer() : ServiceObject("hid") {
     RegisterStub(1000, "SetNpadCommunicationMode");
     RegisterCommand(1001, "GetNpadCommunicationMode", [](IpcContext& ctx) { ctx.Push<u64>(0); ctx.SetResult(Result::Success); });
     RegisterStub(1002, "SetTouchScreenConfiguration");
+    RegisterCommand(1003, "IsFirmwareUpdateNeededForNotification", [](IpcContext& ctx) { ctx.Push<u8>(0); ctx.SetResult(Result::Success); });
+    RegisterStub(1004, "SetTouchScreenResolution");   // juegos de Switch 2 (firmware 17+)
 }
 
 ActiveVibrationDeviceList::ActiveVibrationDeviceList() : ServiceObject("hid:IActiveVibrationDeviceList") {

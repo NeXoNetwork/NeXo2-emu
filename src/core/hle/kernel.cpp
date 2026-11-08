@@ -388,11 +388,11 @@ void Kernel::HandleSvcImpl(u32 imm, CPUState& s) {
         case 0x19: SvcCancelSynchronization(s); return;
         case 0x15: {
             // CreateTransferMemory(addr = X1, size = X2, perm = W3) -> W1 = handle.
-            // La memoria sigue en el proceso; el servicio (nvdrv) solo guarda el handle.
+            // La memoria sigue en el proceso; el servicio guarda donde esta.
             if (s.x[1] % Core::Memory::PAGE_SIZE || s.x[2] % Core::Memory::PAGE_SIZE || s.x[2] == 0) {
                 SetResult(s, Result::InvalidAddress); return;
             }
-            s.x[1] = m_handles.Create(std::make_shared<KDummyObject>("transfer memory"));
+            s.x[1] = m_handles.Create(std::make_shared<KTransferMemory>(s.x[1], s.x[2], u32(s.x[3])));
             SetResult(s, Result::Success);
             return;
         }

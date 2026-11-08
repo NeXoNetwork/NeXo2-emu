@@ -203,16 +203,35 @@ public:
 
     // Entradas GPFIFO: cada una apunta a una lista de comandos (pushbuffer).
     // Se ejecuta en el hilo de la GPU (o al momento en modo sincrono): ver Gpu::Enqueue.
-    void SubmitGpfifo(const std::vector<u64>& entries);
+    // 'done' se llama cuando se han ejecutado todas (mas tarde si el canal queda esperando).
+    void SubmitGpfifo(const std::vector<u64>& entries, std::function<void()> done = {});
 
     // Para los tests: procesar un pushbuffer que esta en memoria de la GPU
     void ProcessPushbuffer(u64 va, u32 words);
 
+    // Esperas de semaforo de verdad (Switch 2): si un "acquire" no se cumple, el canal se
+    // para en ese metodo y sigue cuando se cumpla (NVN2 hace que cada lista de comandos espere a
+    // un semaforo que la CPU suelta despues de escribirla). Sin esto (Switch 1) se sigue sin esperar.
+    void SetWaitAcquires(bool on) { m_waitAcquires = on; }
+    // Intenta seguir; true si ha avanzado algo
+    bool Resume();
+    bool IsWaiting() const { return !m_jobs.empty(); }
+
     Maxwell3D& Get3D() { return *m_3d; }
 
 private:
-    void CallMethod(u32 subchannel, u32 method, u32 arg, bool last);
-    void HostMethod(u32 method, u32 arg);
+    // false = el metodo es una espera que no se cumple (solo con m_waitAcquires)
+    bool CallMethod(u32 subchannel, u32 method, u32 arg, bool last);
+    bool HostMethod(u32 method, u32 arg);
+    // Lista de comandos pendiente: se lee de la memoria al ejecutarla (puede escribirse despues
+    // del envio, antes de que se cumpla la espera que la protege)
+    struct Job { u64 va; u32 words; u32 pos = 0; std::function<void()> done; };
+    std::deque<Job> m_jobs;
+    // Paquete a medias: un paquete puede seguir en la siguiente lista de comandos
+    struct Packet { u32 method = 0, subch = 0, remaining = 0, mode = 0, index = 0; } m_packet;
+    bool m_waitAcquires = false;
+    void LogWait(u64 addr, u64 payload, u64 value);
+    u64 m_lastWaitAddr = 0, m_lastWaitPayload = 0;
     void BindSubchannel(u32 subchannel, u32 class_id);
 
     Gpu& m_gpu;
@@ -269,6 +288,10 @@ public:
     Channel* GetChannel(u32 id);
 
     void Reset();
+    // Canales parados en una espera de semaforo (Switch 2): intentar seguir con todos
+    void ResumeWaitingChannels();
+    bool HasWaitingChannels() const { return m_waiting.load(std::memory_order_acquire); }
+    void SetWaitingFlag() { m_waiting.store(true, std::memory_order_release); }
 
     // ---- Hilo de la GPU ------------------------------------------------------
     // Activa/desactiva el hilo propio. Desactivado (por defecto) todo es sincrono.
@@ -316,6 +339,7 @@ private:
     void WorkerLoop();
 
     Core::Memory& m_memory;
+    std::atomic<bool> m_waiting{false};
     GpuMemoryManager m_mm;
     std::unique_ptr<TextureCache> m_textures;
     std::unique_ptr<Vulkan::Device> m_vkDevice;

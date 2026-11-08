@@ -153,6 +153,15 @@ void GpuMemoryManager::Touch(u64 va, u64 size) {
 }
 
 void GpuMemoryManager::WriteBlock(u64 va, const void* src, size_t size) {
+    // NEXO2_GPU_WATCH=direccion: apunta las escrituras de la GPU en esa direccion (+8 KB)
+    static const u64 watch = [] { const char* e = std::getenv("NEXO2_GPU_WATCH"); return e ? std::strtoull(e, nullptr, 16) : 0ull; }();
+    if (watch && va < watch + 0x2000 && va + size > watch && size <= 16) {
+        u64 v = 0;
+        std::memcpy(&v, src, std::min<size_t>(size, 8));
+        char b[96];
+        std::snprintf(b, sizeof(b), "[gpu] escribe [0x%llX] = 0x%llX (%zu bytes)", (unsigned long long)va, (unsigned long long)v, size);
+        Common::Logger::Log(Common::Logger::Level::Debug, b);
+    }
     if (m_hook) m_hook->BeforeAccess(va, size, true);
     NotifyWrite(va, size);
     auto* in = static_cast<const u8*>(src);
@@ -298,7 +307,7 @@ void Channel::BindSubchannel(u32 subchannel, u32 class_id) {
     m_subchannels[subchannel & 7] = e;
 }
 
-void Channel::SubmitGpfifo(const std::vector<u64>& entries) {
+void Channel::SubmitGpfifo(const std::vector<u64>& entries, std::function<void()> done) {
     ++m_gpu.GetStats().submits;
     m_gpu.Textures().NewEpoch();   // la CPU puede haber cambiado texturas desde el envio anterior
 #ifdef NEXO2_HAS_VULKAN
@@ -307,8 +316,15 @@ void Channel::SubmitGpfifo(const std::vector<u64>& entries) {
     for (u64 entry : entries) {
         const u64 va = entry & 0xFF'FFFF'FFFCull;
         const u32 words = u32((entry >> 42) & 0x1FFFFF);
-        if (words) ProcessPushbuffer(va, words);
+        if (words) m_jobs.push_back({va, words});
     }
+    if (done) {
+        if (m_jobs.empty()) done();
+        else m_jobs.back().done = std::move(done);   // (o detras de lo que ya esperaba)
+    }
+    Resume();
+    // Al avanzar este canal, otro que esperaba puede poder seguir
+    if (m_gpu.HasWaitingChannels()) m_gpu.ResumeWaitingChannels();
     // Lo dibujado con Vulkan se queda en la GPU: la imagen se presenta directamente desde alli
     // (Gpu::ReadForPresent) y, si otra parte lee esa memoria, se escribe antes (BeforeAccess).
     // NEXO2_VK_SYNC=1: escribirlo todo en memoria al final de cada envio (mas lento, para comparar).
@@ -317,61 +333,100 @@ void Channel::SubmitGpfifo(const std::vector<u64>& entries) {
 }
 
 void Channel::ProcessPushbuffer(u64 va, u32 words) {
-    std::vector<u32> cmds(words);
-    m_gpu.MemoryManager().ReadBlock(va, cmds.data(), size_t(words) * 4);
-    size_t i = 0;
-    while (i < cmds.size()) {
-        const u32 header = cmds[i++];
-        const u32 method = header & 0x1FFF;
-        const u32 subch = (header >> 13) & 7;
-        const u32 count = (header >> 16) & 0x1FFF;
-        const u32 mode = header >> 29;
-        switch (mode) {
-            case 1:   // incrementar: cada palabra al metodo siguiente
-                for (u32 k = 0; k < count && i < cmds.size(); ++k)
-                    CallMethod(subch, method + k, cmds[i++], k + 1 == count);
-                break;
-            case 3:   // no incrementar: todas al mismo metodo
-                for (u32 k = 0; k < count && i < cmds.size(); ++k)
-                    CallMethod(subch, method, cmds[i++], k + 1 == count);
-                break;
-            case 4:   // inmediato: el dato va en la cabecera
-                CallMethod(subch, method, count, true);
-                break;
-            case 5:   // incrementar una vez: la primera al metodo, las demas al siguiente
-                for (u32 k = 0; k < count && i < cmds.size(); ++k)
-                    CallMethod(subch, method + (k ? 1 : 0), cmds[i++], k + 1 == count);
-                break;
-            case 0:   // "usar tercer opcode" (nop / continuacion): se salta la palabra
-                break;
-            default: {
-                char buf[64];
-                std::snprintf(buf, sizeof(buf), "pushbuffer: modo %u desconocido", mode);
-                m_gpu.Warn("pbmode" + std::to_string(mode), buf);
-                i += count;
-                break;
-            }
-        }
-    }
+    m_jobs.push_back({va, words});
+    Resume();
 }
 
-void Channel::CallMethod(u32 subchannel, u32 method, u32 arg, bool last) {
+bool Channel::Resume() {
+    bool progress = false;
+    while (!m_jobs.empty()) {
+        Job& job = m_jobs.front();
+        // Switch 1: cada lista de comandos empieza con paquetes nuevos
+        if (!m_waitAcquires && job.pos == 0) m_packet = {};
+        std::vector<u32> cmds(job.words - job.pos);
+        m_gpu.MemoryManager().ReadBlock(job.va + u64(job.pos) * 4, cmds.data(), cmds.size() * 4);
+        size_t i = 0;
+        auto& p = m_packet;
+        while (i < cmds.size()) {
+            if (p.remaining == 0) {
+                const u32 header = cmds[i];
+                const u32 method = header & 0x1FFF, subch = (header >> 13) & 7;
+                const u32 count = (header >> 16) & 0x1FFF, mode = header >> 29;
+                if (mode == 4) {   // inmediato: el dato va en la cabecera
+                    if (!CallMethod(subch, method, count, true)) break;
+                    ++i;
+                    progress = true;
+                    continue;
+                }
+                ++i;
+                if (mode == 1 || mode == 3 || mode == 5) {
+                    p = {method, subch, count, mode, 0};
+                } else if (mode != 0) {   // 0: "usar tercer opcode" (nop): se salta la palabra
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "pushbuffer: modo %u desconocido", mode);
+                    m_gpu.Warn("pbmode" + std::to_string(mode), buf);
+                    i += count;
+                }
+                continue;
+            }
+            // Dato de un paquete: modo 1 incrementa el metodo con cada palabra, 3 no, 5 solo tras la primera
+            const u32 method = p.mode == 1 ? p.method + p.index : p.mode == 5 ? p.method + (p.index ? 1 : 0) : p.method;
+            if (!CallMethod(p.subch, method, cmds[i], p.remaining == 1)) break;   // esperando: aqui se seguira
+            ++i;
+            ++p.index;
+            --p.remaining;
+            progress = true;
+        }
+        job.pos += u32(i);
+        if (job.pos < job.words) {   // parado en una espera
+            m_gpu.SetWaitingFlag();
+            return progress;
+        }
+        auto done = std::move(job.done);
+        m_jobs.pop_front();
+        if (done) done();
+    }
+    return progress;
+}
+
+bool Channel::CallMethod(u32 subchannel, u32 method, u32 arg, bool last) {
     ++m_gpu.GetStats().methods;
+    // NEXO2_PB_TRACE=1: los primeros metodos que llegan (para ver que usa un juego nuevo)
+    // (sin las palabras de las macros, que son miles; NEXO2_PB_TRACE=n: como mucho n lineas)
+    static const u32 trace = [] { const char* e = std::getenv("NEXO2_PB_TRACE"); return e ? std::max<u32>(u32(std::atoi(e)), 4000) : 0u; }();
+    static std::atomic<u32> traced{0};
+    if (trace && method != 0x118 / 4 && traced.fetch_add(1) < trace) {
+        char b[96];
+        std::snprintf(b, sizeof(b), "[gpu] canal %u subcanal %u metodo 0x%X = 0x%X", m_id, subchannel, method * 4, arg);
+        Common::Logger::Log(Common::Logger::Level::Debug, b);
+    }
     if (method < 0x40) {   // metodos del propio canal (iguales en todas las subcanales)
-        if (method == 0x00) BindSubchannel(subchannel, arg);
-        else HostMethod(method, arg);
-        return;
+        if (method == 0x00) { BindSubchannel(subchannel, arg); return true; }
+        return HostMethod(method, arg);
     }
     Engine* e = m_subchannels[subchannel & 7];
     if (!e) {
         ++m_gpu.GetStats().unknown_methods;
         m_gpu.Warn("nosubch" + std::to_string(subchannel), "metodo para una subcanal sin motor asignado");
-        return;
+        return true;
     }
     e->CallMethod(method, arg, last);
+    return true;
 }
 
-void Channel::HostMethod(u32 method, u32 arg) {
+// NEXO2_GPU_WAIT_LOG=1: cada vez que un canal se para esperando un semaforo
+void Channel::LogWait(u64 addr, u64 payload, u64 value) {
+    static const bool on = std::getenv("NEXO2_GPU_WAIT_LOG") != nullptr;
+    if (!on || (addr == m_lastWaitAddr && payload == m_lastWaitPayload)) return;
+    m_lastWaitAddr = addr;
+    m_lastWaitPayload = payload;
+    char b[128];
+    std::snprintf(b, sizeof(b), "[gpu] canal %u espera: [0x%llX] = 0x%llX, quiere 0x%llX", m_id,
+                  (unsigned long long)addr, (unsigned long long)value, (unsigned long long)payload);
+    Common::Logger::Log(Common::Logger::Level::Debug, b);
+}
+
+bool Channel::HostMethod(u32 method, u32 arg) {
     m_host[method] = arg;
     switch (method) {
         case 0x07: {   // SEMAPHORE_D: ejecutar operacion de semaforo
@@ -388,9 +443,38 @@ void Channel::HostMethod(u32 method, u32 arg) {
             } else if (op == 1 || op == 4 || op == 8) {   // acquire: esperar a que se cumpla
                 const u32 v = mm.Read<u32>(addr);
                 const bool ok = op == 1 ? v == payload : op == 4 ? s32(v - payload) >= 0 : (v & payload) != 0;
+                if (!ok && m_waitAcquires) { LogWait(addr, payload, v); return false; }
                 if (!ok) m_gpu.Warn("semacq", "semaforo no cumplido (se sigue: la GPU es sincrona)");
             } else if (op == 16) {     // reduccion (suma...): poco usado
                 m_gpu.Warn("semred", "semaforo con reduccion no implementado");
+            }
+            break;
+        }
+        // Semaforos de Volta en adelante (canal C56F de Switch 2): direccion (0x17, 0x18),
+        // valor de 64 bits (0x19, 0x1A) y la operacion (0x1B): bits 0-2 = 0 esperar igual,
+        // 1 escribir, 2 esperar >=, 3 esperar >= circular, 4 esperar AND, 6 reduccion; bit 24 = 64 bits.
+        case 0x1B: {   // SEM_EXECUTE
+            const u64 addr = (u64(m_host[0x18] & 0x1FFFFFF) << 32) | (m_host[0x17] & ~3u);
+            const u64 payload = (u64(m_host[0x1A]) << 32) | m_host[0x19];
+            const bool wide = (arg >> 24) & 1;
+            auto& mm = m_gpu.MemoryManager();
+            switch (arg & 7) {
+                case 1:   // escribir (con marca de tiempo si el bit 25)
+                    if (wide) mm.Write<u64>(addr, payload); else mm.Write<u32>(addr, u32(payload));
+                    if ((arg >> 25) & 1) mm.Write<u64>(addr + 8, 0);
+                    break;
+                case 0: case 2: case 3: case 4: {   // esperar
+                    const u64 v = wide ? mm.Read<u64>(addr) : mm.Read<u32>(addr);
+                    const u32 op = arg & 7;
+                    const bool ok = op == 0 ? v == payload : op == 4 ? (v & payload) != 0
+                                  : wide ? s64(v - payload) >= 0 : s32(u32(v) - u32(payload)) >= 0;
+                    if (!ok && m_waitAcquires) { LogWait(addr, payload, v); return false; }
+                    if (!ok) m_gpu.Warn("semexec", "espera de semaforo (SEM_EXECUTE) no cumplida (se sigue)");
+                    break;
+                }
+                default:
+                    m_gpu.Warn("semexec" + std::to_string(arg & 7), "SEM_EXECUTE: operacion no implementada");
+                    break;
             }
             break;
         }
@@ -404,6 +488,7 @@ void Channel::HostMethod(u32 method, u32 arg) {
         default:
             break;   // referencias, interrupciones, vaciados de cache...: nada que hacer
     }
+    return true;
 }
 
 // ============================================================================
@@ -597,6 +682,21 @@ void Gpu::WaitProgress(std::chrono::microseconds max) {
     m_doneCv.wait_for(lock, max, [&] { return m_completed.load(std::memory_order_acquire) != now; });
 }
 
+void Gpu::ResumeWaitingChannels() {
+    // Un canal puede soltar lo que espera otro: repetir mientras alguno avance
+    for (int round = 0; round < 64; ++round) {
+        bool progress = false, waiting = false;
+        m_waiting.store(false, std::memory_order_release);
+        for (auto& ch : m_channels) {
+            if (!ch->IsWaiting()) continue;
+            progress |= ch->Resume();
+            waiting |= ch->IsWaiting();
+        }
+        if (waiting) m_waiting.store(true, std::memory_order_release);
+        if (!progress) break;
+    }
+}
+
 Channel& Gpu::CreateChannel() {
     m_channels.push_back(std::make_unique<Channel>(*this, u32(m_channels.size())));
     return *m_channels.back();
@@ -609,6 +709,7 @@ Channel* Gpu::GetChannel(u32 id) {
 void Gpu::Reset() {
     WaitIdle();
     m_channels.clear();
+    m_waiting.store(false, std::memory_order_release);
 #ifdef NEXO2_HAS_VULKAN
     if (m_hw) m_hw->Reset();
 #endif

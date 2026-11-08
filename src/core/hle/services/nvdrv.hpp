@@ -17,10 +17,13 @@ namespace NeXo2::HLE {
 
 class NvDrv final : public ServiceObject {
 public:
-    explicit NvDrv(std::string name);
+    // 'tipc': la misma interfaz por TIPC (la sesion nvsrv del sistema grafico de Switch 2)
+    explicit NvDrv(std::string name, bool tipc = false);
+    bool SupportsTipc() const override { return m_tipc; }
 
 private:
-    enum class Device { NvMap, Ctrl, CtrlGpu, AsGpu, Gpu };
+    bool m_tipc = false;
+    enum class Device { NvMap, Ctrl, CtrlGpu, AsGpu, Gpu, Other };
     struct File {
         Device device;
         std::string path;
@@ -32,6 +35,9 @@ private:
     void Ioctl(IpcContext& ctx, int version);
     void Close(IpcContext& ctx);
     void QueryEvent(IpcContext& ctx);
+    u32 UnknownIoctl(IpcContext& ctx, const std::string& device, u32 request, std::vector<u8>& d);
+    std::vector<u8> m_inline;      // Ioctl3: segundo buffer de salida
+    bool m_inlineUsed = false;
 
     // Cada ioctl recibe sus datos (entrada y salida en el mismo buffer) y devuelve
     // el codigo de error de NVIDIA (0 = bien). 'extra' = buffer adicional de Ioctl2/3.

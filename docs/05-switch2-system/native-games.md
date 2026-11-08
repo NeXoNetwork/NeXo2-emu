@@ -75,14 +75,31 @@ The GPU is Ampere (T239, chip 0x17E). It differs from the Switch 1 Maxwell GPU i
 
 | What | Status |
 | :--- | :--- |
-| Ampere characteristics in `nvhost-ctrl-gpu` | Done |
-| Graphics system session and sub-sessions | To do |
+| Ampere characteristics in `nvhost-ctrl-gpu` (chip 0x17E, SM 0x808, TSG with 64 subcontexts, engine list, VSM mapping) | Done |
+| Graphics system session (`ISelfController` 2000) and its gpu, syncpt, vi2 and nvsrv sessions | Partial (boot commands; unknown commands answer zeros and are logged) |
+| GPU-accessible memory mapped at the same GPU and CPU address | Done |
+| Command buffers gated by semaphores the CPU releases later (the channel stops and resumes) | Done |
 | Ampere classes, MME64, QMD 3.0 | To do |
 | SM 8.6 shader translation | To do |
+| Showing the presented images | To do |
+
+The graphics system code is in `src/core/hle/services/gsv.cpp`. Debug switches:
+
+- `NEXO2_LOG_IPC=1`: every call, also the unknown graphics system commands.
+- `NEXO2_GPU_WAIT_LOG=1`: when a GPU channel stops on a semaphore, and the syncpoint waits.
+- `NEXO2_GPU_WATCH=<address>`: GPU writes to that address (and the next 8 KB).
+- `NEXO2_PB_TRACE=<n>`: the first n GPU methods (without macro upload words).
+
+### Where Mario Kart World stops
+
+It boots the graphics system, opens the GPU, creates its window images (2560x1440) and starts its
+worker threads. Then the second GPU queue waits for a semaphore that a compute job of the first
+queue should release. That job is described with an Ampere compute "QMD" (inline QMD methods of
+class `0xC7C0`), which NeXo does not run yet. Next step: QMD 3.0 and its release semaphores.
 
 ## Order of work
 
 1. CPU and kernel (done) → the game reaches the graphics system.
-2. Graphics system sessions, with stubs that log every command → the game starts its first GPU work.
+2. Graphics system sessions, with stubs that log every command → the game starts its first GPU work (done).
 3. MME64 and Ampere classes → draws reach the rasterizer.
 4. SM 8.6 shaders → pixels.

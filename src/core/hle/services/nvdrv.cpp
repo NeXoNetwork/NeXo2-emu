@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 namespace NeXo2::HLE {
 
@@ -37,7 +38,7 @@ template <typename T> void Put(std::vector<u8>& d, size_t off, T v) {
 std::string Hex(u32 v) { char b[16]; std::snprintf(b, sizeof(b), "0x%08X", v); return b; }
 } // namespace
 
-NvDrv::NvDrv(std::string name) : ServiceObject(std::move(name)) {
+NvDrv::NvDrv(std::string name, bool tipc) : ServiceObject(std::move(name)), m_tipc(tipc) {
     RegisterCommand(0, "Open",  [this](IpcContext& ctx) { Open(ctx); });
     RegisterCommand(1, "Ioctl", [this](IpcContext& ctx) { Ioctl(ctx, 1); });
     RegisterCommand(2, "Close", [this](IpcContext& ctx) { Close(ctx); });
@@ -50,6 +51,21 @@ NvDrv::NvDrv(std::string name) : ServiceObject(std::move(name)) {
     RegisterStub(13, "SetGraphicsFirmwareMemoryMarginEnabled");
 }
 
+// Ioctl que NeXo no conoce. En la sesion nvsrv de Switch 2 (NvRm usa ioctls nuevos) contesta OK
+// con ceros y se apunta una vez; en nvdrv de Switch 1 para la CPU con el detalle.
+u32 NvDrv::UnknownIoctl(IpcContext& ctx, const std::string& device, u32 request, std::vector<u8>& d) {
+    if (!m_tipc) {
+        ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de " + device + " no implementado");
+        return NV_NOT_SUPPORTED;
+    }
+    static std::set<std::string> warned;
+    if (warned.insert(device + Hex(request)).second)
+        Logger::Log(Logger::Level::Warning, "[nvdrv] Switch 2: ioctl " + Hex(request) + " de " + device +
+                    " desconocido; OK con ceros");
+    std::fill(d.begin(), d.end(), u8(0));
+    return NV_SUCCESS;
+}
+
 // Open(ruta en buffer A) -> u32 fd, u32 error
 void NvDrv::Open(IpcContext& ctx) {
     const std::vector<u8> raw = ctx.ReadBuffer(0);
@@ -60,13 +76,19 @@ void NvDrv::Open(IpcContext& ctx) {
         {"/dev/nvhost-gpu", Device::Gpu},
     };
     auto it = devices.find(path);
-    if (it == devices.end()) {
+    if (it == devices.end() && !m_tipc) {
         ctx.Unsupported("nvdrv: el dispositivo " + path + " no esta implementado");
         return;
     }
     const u32 fd = m_nextFd++;
-    File file{it->second, path};
-    if (file.device == Device::Gpu) file.channel = ctx.GetKernel().GetGpu().CreateChannel().Id();
+    // Switch 2 abre dispositivos que Switch 1 no tenia (/dev/nvhost-tsg-gpu...): se aceptan
+    // y sus ioctls contestan OK con ceros (se apuntan en el registro)
+    File file{it != devices.end() ? it->second : Device::Other, path};
+    if (file.device == Device::Gpu) {
+        auto& channel = ctx.GetKernel().GetGpu().CreateChannel();
+        channel.SetWaitAcquires(m_tipc);   // Switch 2 (nvsrv): esperas de semaforo de verdad
+        file.channel = channel.Id();
+    }
     m_fds[fd] = file;
     Logger::Log(Logger::Level::Info, "[nvdrv] Open(\"" + path + "\") -> fd " + std::to_string(fd));
     ctx.Push<u32>(fd);
@@ -89,6 +111,9 @@ void NvDrv::Ioctl(IpcContext& ctx, int version) {
     data.resize(std::max<size_t>(data.size(), IocSize(request)), 0);
     std::vector<u8> extra;
     if (version == 2) extra = ctx.ReadBuffer(1);   // Ioctl2: datos extra de entrada (p. ej. entradas GPFIFO)
+    // Ioctl3: segundo buffer de salida. Los ioctls que lo rellenan ponen m_inlineUsed.
+    m_inline.assign(version == 3 ? size_t(ctx.GetWriteBufferSize(1)) : 0, 0);
+    m_inlineUsed = false;
 
     File& file = it->second;
     u32 error = NV_NOT_SUPPORTED;
@@ -98,6 +123,7 @@ void NvDrv::Ioctl(IpcContext& ctx, int version) {
         case Device::CtrlGpu: error = IoctlCtrlGpu(ctx, request, data); break;
         case Device::AsGpu:   error = IoctlAsGpu(ctx, request, data); break;
         case Device::Gpu:     error = IoctlGpu(ctx, file, request, data, extra); break;
+        case Device::Other:   error = UnknownIoctl(ctx, file.path, request, data); break;
     }
     if (!ctx.IsHandled()) return;
 
@@ -114,6 +140,7 @@ void NvDrv::Ioctl(IpcContext& ctx, int version) {
     // Ioctl3: GET_CHARACTERISTICS y GET_TPC_MASKS dejan la estructura en el segundo buffer de
     // salida (con Ioctl, en la direccion que pasa el programa). El SDK nuevo usa Ioctl3: sin esto
     // veia una GPU vacia, cerraba nvhost-ctrl-gpu y NVN se quedaba sin dispositivo.
+    if (m_inlineUsed && !m_inline.empty()) ctx.WriteBuffer(m_inline.data(), m_inline.size(), 1);
     const u32 nr = request & 0xFF, magic = (request >> 8) & 0xFF;
     if (file.device == Device::CtrlGpu && magic == 0x47 && (nr == 0x05 || nr == 0x06) && error == NV_SUCCESS &&
         data.size() > 16) {
@@ -206,8 +233,7 @@ u32 NvDrv::IoctlNvMap(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             return NV_SUCCESS;
         }
         default:
-            ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de /dev/nvmap no implementado");
-            return NV_NOT_SUPPORTED;
+            return UnknownIoctl(ctx, "/dev/nvmap", request, d);
     }
 }
 
@@ -217,8 +243,7 @@ u32 NvDrv::IoctlNvMap(IpcContext& ctx, u32 request, std::vector<u8>& d) {
 // ----------------------------------------------------------------------------
 u32 NvDrv::IoctlCtrl(IpcContext& ctx, u32 request, std::vector<u8>& d) {
     if (IocType(request) != 0x00) {
-        ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de /dev/nvhost-ctrl no implementado");
-        return NV_NOT_SUPPORTED;
+        return UnknownIoctl(ctx, "/dev/nvhost-ctrl", request, d);
     }
     Kernel& k = ctx.GetKernel();
     GPU::Syncpoints& sp = k.GetGpu().GetSyncpoints();
@@ -254,8 +279,7 @@ u32 NvDrv::IoctlCtrl(IpcContext& ctx, u32 request, std::vector<u8>& d) {
         case 0x21: // EVENT_KILL
             return NV_SUCCESS;
         default:
-            ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de /dev/nvhost-ctrl no implementado");
-            return NV_NOT_SUPPORTED;
+            return UnknownIoctl(ctx, "/dev/nvhost-ctrl", request, d);
     }
 }
 
@@ -285,28 +309,33 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             Put<u64>(d, 0, characteristics_size);
             const size_t o = 16;
             Put<u32>(d, o + 0, switch2 ? 0x170 : 0x120); // Ampere / GM200
-            Put<u32>(d, o + 4, switch2 ? 0x17E : 0xB);   // T239 Ampere / GM20B
+            Put<u32>(d, o + 4, switch2 ? 0xE : 0xB);     // implementacion: chip 0x17E (T239) / GM20B
             Put<u32>(d, o + 8, 0xA1);           // revision A1
             Put<u32>(d, o + 12, 1);             // GPCs
             Put<u64>(d, o + 16, 0x40000);       // cache L2
             Put<u64>(d, o + 24, 0);
-            Put<u32>(d, o + 32, 2);             // TPCs por GPC
+            Put<u32>(d, o + 32, switch2 ? 6 : 2); // TPCs por GPC
             Put<u32>(d, o + 36, 0x20);          // bus AXI
             Put<u32>(d, o + 40, 0x20000);       // pagina grande
             Put<u32>(d, o + 44, 0x20000);
             Put<u32>(d, o + 48, 0x1B);
             Put<u32>(d, o + 52, 0x30000);
             Put<u32>(d, o + 56, 1);             // mascara de GPCs
-            Put<u32>(d, o + 60, switch2 ? 0x806 : 0x503); // SM 8.6 / SM 5.3
-            Put<u32>(d, o + 64, switch2 ? 0x806 : 0x503);
+            // NVN de Switch 2 solo acepta la version de SM 0x808
+            Put<u32>(d, o + 60, switch2 ? 0x808 : 0x503);
+            Put<u32>(d, o + 64, switch2 ? 0x808 : 0x503);
             Put<u32>(d, o + 68, 0x80);          // warps
             Put<u32>(d, o + 72, 0x28);          // 40 bits de direccion
             Put<u32>(d, o + 76, 0);
-            Put<u64>(d, o + 80, 0x55);
+            // Funciones: en Switch 2 ademas TSG (8) con subcontextos (22), direccion de syncpoints (26),
+            // cambiar el tipo de un mapeo (34), remapear (35) y los motores 2D/3D/compute/inline/ZBC (40-44)
+            Put<u64>(d, o + 80, switch2 ? 0x55ull | (1ull << 8) | (1ull << 22) | (1ull << 26) | (1ull << 34) |
+                                              (1ull << 35) | (0x1Full << 40)
+                                        : 0x55ull);
             Put<u32>(d, o + 88, 0x902D);        // clases: 2D, 3D, compute, GPFIFO, inline, DMA
             Put<u32>(d, o + 92, switch2 ? 0xC797 : 0xB197);
             Put<u32>(d, o + 96, switch2 ? 0xC7C0 : 0xB1C0);
-            Put<u32>(d, o + 100, 0xB06F);
+            Put<u32>(d, o + 100, switch2 ? 0xC56F : 0xB06F); // GPFIFO
             Put<u32>(d, o + 104, 0xA140);
             Put<u32>(d, o + 108, switch2 ? 0xC7B5 : 0xB0B5);
             Put<u32>(d, o + 112, 1);
@@ -317,19 +346,34 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             Put<u32>(d, o + 132, 1);
             Put<u32>(d, o + 136, 0x21D70);
             Put<u32>(d, o + 140, 0);
-            Put<u64>(d, o + 144, switch2 ? 0x6230316167ull : 0x6230326D67ull); // "ga10b" / "gm20b"
+            Put<u64>(d, o + 144, switch2 ? 0x6631306167ull : 0x6230326D67ull); // "ga10f" / "gm20b"
             Put<u64>(d, o + 152, 0);
             if (switch2) {
                 // Newer NvRm interfaces require version 6 or later. Advertise the
                 // interface level supported by Switch 2's NVN path.
                 for (size_t offset = 0x70; offset <= 0x80; offset += 2)
                     Put<u16>(d, o + offset, 0x40);
+                // Subcontextos por TSG (sin esto cada TSG tiene uno y la segunda cola de NVN falla)
+                Put<u32>(d, o + 0xB4, 64);
             }
             return NV_SUCCESS;
         }
         case 0x06: // GET_TPC_MASKS -> mascara de TPCs (2 TPCs)
             Put<u32>(d, 16, 0x3);
             return NV_SUCCESS;
+        case 0x13: // VSMS_MAPPING (Ioctl3): un par {GPC, TPC} por SM virtual. Dos SMs por TPC.
+            for (size_t i = 0; i + 1 < m_inline.size(); i += 2) { m_inline[i] = 0; m_inline[i + 1] = u8(i / 4); }
+            m_inlineUsed = true;
+            return NV_SUCCESS;
+        case 0x1F: { // GET_ENGINE_INFO: {id, instancia, runlist, 0}: grafico (runlist 0) y copia (1)
+            const u32 items[8] = {0, 0, 0, 0, 2, 0, 1, 0};
+            if (Get<u32>(d, 0) >= sizeof(items) && m_inline.size() >= sizeof(items)) {
+                std::memcpy(m_inline.data(), items, sizeof(items));
+                m_inlineUsed = true;
+            }
+            Put<u32>(d, 0, sizeof(items));
+            return NV_SUCCESS;
+        }
         case 0x14: // ZBC_GET_ACTIVE_SLOT_MASK
             Put<u32>(d, 0, 0x7);
             Put<u32>(d, 4, 0);
@@ -341,8 +385,7 @@ u32 NvDrv::IoctlCtrlGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             return NV_SUCCESS;
         }
         default:
-            ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de /dev/nvhost-ctrl-gpu no implementado");
-            return NV_NOT_SUPPORTED;
+            return UnknownIoctl(ctx, "/dev/nvhost-ctrl-gpu", request, d);
     }
 }
 
@@ -411,8 +454,7 @@ u32 NvDrv::IoctlAsGpu(IpcContext& ctx, u32 request, std::vector<u8>& d) {
             return NV_SUCCESS;
         }
         default:
-            ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de /dev/nvhost-as-gpu no implementado");
-            return NV_NOT_SUPPORTED;
+            return UnknownIoctl(ctx, "/dev/nvhost-as-gpu", request, d);
     }
 }
 
@@ -442,10 +484,13 @@ u32 NvDrv::IoctlGpu(IpcContext& ctx, File& file, u32 request, std::vector<u8>& d
         const bool driver_incr = (flags & 0x2) != 0;
         const u32 count = (driver_incr ? 2u : 0u) + ((flags & 0x100) ? Get<u32>(d, 20) : 0u);
         const u32 target = sp.Reserve(sp_id, count);
+        // El syncpoint sube al terminar estas entradas (en Switch 2 puede ser mas tarde: el canal
+        // espera a semaforos que suelta la CPU)
         gpu.Enqueue([ch, &sp, sp_id, target, driver_incr, entries = std::move(entries)] {
-            ch->SubmitGpfifo(entries);
-            if (driver_incr) { sp.Increment(sp_id); sp.Increment(sp_id); }
-            sp.RaiseTo(sp_id, target);
+            ch->SubmitGpfifo(entries, [&sp, sp_id, target, driver_incr] {
+                if (driver_incr) { sp.Increment(sp_id); sp.Increment(sp_id); }
+                sp.RaiseTo(sp_id, target);
+            });
         });
         put_fence(16, target);
     };
@@ -495,8 +540,7 @@ u32 NvDrv::IoctlGpu(IpcContext& ctx, File& file, u32 request, std::vector<u8>& d
         if (nr == 0x02) Put<u32>(d, 4, ch->SyncpointId());
         return NV_SUCCESS;
     }
-    ctx.Unsupported("nvdrv: ioctl " + Hex(request) + " de /dev/nvhost-gpu no implementado");
-    return NV_NOT_SUPPORTED;
+    return UnknownIoctl(ctx, "/dev/nvhost-gpu", request, d);
 }
 
 } // namespace NeXo2::HLE

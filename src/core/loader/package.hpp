@@ -53,6 +53,10 @@ bool ParsePartition(VFilePtr file, std::map<std::string, VFilePtr>& out);
 
 // RomFS: un archivo por su ruta ("/control.nacp"); nullptr si no esta
 VFilePtr OpenRomfsFile(VFilePtr romfs, const std::string& path);
+// RomFS hecha a partir de una carpeta del PC (juego extraido con la RomFS en archivos sueltos).
+// Solo se guardan en memoria las tablas; los datos se leen de cada archivo al pedirlos.
+// nullptr si la carpeta no existe.
+VFilePtr BuildRomfsFromDirectory(const std::filesystem::path& dir);
 
 struct Nca {
     bool ok = false;

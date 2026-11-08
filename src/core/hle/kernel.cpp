@@ -125,6 +125,8 @@ void Kernel::Reset() {
     m_mainStackSize = Layout::MAIN_STACK_SIZE;
     m_systemResourceSize = 0;
     m_totalMemory = Layout::TOTAL_MEMORY;
+    m_heapBase = Layout::HEAP_REGION_BASE;
+    m_heapRegionSize = Layout::HEAP_REGION_SIZE;
     m_physicalSize = 0;
     m_isApplication = false;
     m_programId = 0x0100000000001000ULL;
@@ -237,7 +239,10 @@ void Kernel::SetupApplicationProcess(u64 entry, u64 image_size, u8 priority, u8 
     using namespace Layout;
     m_imageSize = image_size;
     m_systemResourceSize = system_resource_size;
-    m_totalMemory = (program_id >> 48) == 0x0400 ? Layout::TOTAL_MEMORY_SWITCH2 : Layout::TOTAL_MEMORY;
+    const bool switch2 = (program_id >> 48) == 0x0400;
+    m_totalMemory = switch2 ? Layout::TOTAL_MEMORY_SWITCH2 : Layout::TOTAL_MEMORY;
+    m_heapBase = switch2 ? Layout::HEAP_REGION_BASE_SWITCH2 : Layout::HEAP_REGION_BASE;
+    m_heapRegionSize = switch2 ? Layout::HEAP_REGION_SIZE_SWITCH2 : Layout::HEAP_REGION_SIZE;
     if (system_resource_size)
         Logger::Log(Logger::Level::Info, "[HLE] Memoria del sistema para el proceso (main.npdm): " +
                     std::to_string(system_resource_size / 1024) + " KB");
@@ -422,15 +427,15 @@ void Kernel::HandleSvcImpl(u32 imm, CPUState& s) {
 void Kernel::SvcSetHeapSize(CPUState& s) {
     const u64 size = s.x[1];
     if (size % 0x200000 != 0)                 { SetResult(s, Result::InvalidSize); return; }
-    if (size > Layout::HEAP_REGION_SIZE)      { SetResult(s, Result::OutOfMemory); return; }
+    if (size > m_heapRegionSize)              { SetResult(s, Result::OutOfMemory); return; }
 
-    m_memory.UnmapRegion(Layout::HEAP_REGION_BASE, Layout::HEAP_REGION_SIZE);
+    m_memory.UnmapRegion(m_heapBase, m_heapRegionSize);
     if (size > 0)
-        m_memory.MapRegion(Layout::HEAP_REGION_BASE, size, MemoryState::Normal,
+        m_memory.MapRegion(m_heapBase, size, MemoryState::Normal,
                            MemoryPermission::ReadWrite, "heap");
     m_heapSize = size;
     SetResult(s, Result::Success);
-    s.x[1] = Layout::HEAP_REGION_BASE;
+    s.x[1] = m_heapBase;
 }
 
 // svcSetMemoryPermission(addr = X0, size = X1, permisos = W2)
@@ -668,8 +673,8 @@ void Kernel::SvcGetInfo(CPUState& s) {
         case 1:  value = ~0ULL; break;                         // PriorityMask
         case 2:  value = ALIAS_REGION_BASE; break;
         case 3:  value = ALIAS_REGION_SIZE; break;
-        case 4:  value = HEAP_REGION_BASE;  break;
-        case 5:  value = HEAP_REGION_SIZE;  break;
+        case 4:  value = m_heapBase;        break;
+        case 5:  value = m_heapRegionSize;  break;
         case 6:  value = m_totalMemory;     break;             // TotalMemorySize
         case 7:  value = m_imageSize + m_mainStackSize + m_heapSize + m_physicalSize; break; // UsedMemorySize
         case 8:  value = 0; break;                             // DebuggerAttached
@@ -956,7 +961,7 @@ void Kernel::SvcMapSharedMemory(CPUState& s) {
     if (size > shmem->data.size()) { SetResult(s, Result::InvalidSize); return; }
     // Como en la consola: ni en la zona del heap ni en la de alias (el juego elige otra direccion)
     auto overlaps = [&](u64 base, u64 len) { return addr < base + len && base < addr + size; };
-    if (overlaps(Layout::HEAP_REGION_BASE, Layout::HEAP_REGION_SIZE) || overlaps(Layout::ALIAS_REGION_BASE, Layout::ALIAS_REGION_SIZE)) {
+    if (overlaps(m_heapBase, m_heapRegionSize) || overlaps(Layout::ALIAS_REGION_BASE, Layout::ALIAS_REGION_SIZE)) {
         SetResult(s, 0xDC01);   // InvalidMemoryRegion
         return;
     }

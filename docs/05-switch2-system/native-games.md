@@ -26,11 +26,18 @@ The JIT (dynarmic) does not know pointer authentication: it hands those instruct
 | :--- | :--- | :--- |
 | NPDM | 39-bit address space, cores 0-5, priorities 28-59. The ACID signature area is 0x300 bytes (Switch 1: 0x200). NeXo only reads META and ACI0. | Done |
 | Six cores | Games create threads on cores 4 and 5. | Done |
-| Memory | The console has 12 GB and a game is told about 9.5 GB (GetInfo 6/21). It takes about 3 GB of heap and reserves about 6.3 GB more through nn::os virtual memory in the alias region. | Done (9.5 GB, 8 GB alias region) |
+| Memory | The console has 12 GB and a game is told about 9.5 GB (GetInfo 6/21). Some games put most of it in the heap: Mario Kart World asks `svcSetHeapSize` for about 7.9 GB at once. The rest goes through nn::os virtual memory in the alias region. | Done (9.5 GB; 16 GB heap region at `0x4'0000'0000`, 8 GB alias region; 64 GB address space) |
 | `svcGetInfo` 29/30 | Region right after the alias region (address, size 0) | Done |
 | `svcGetInfo` 31/32 | Remote memory used by graphics services (0) | Done |
 | `svcGetInfo` 33 | Page granule of nn::os virtual memory (0x1000) | Done |
 | `svc 0x80` | SetGpuMemoryAttribute | Partial (accepted) |
+
+## Game files
+
+Dumps of Switch 2 games are often extracted: an `exefs` folder (`main`, `main.npdm`, `rtld`, `sdk`,
+`subsdk*`) next to a `romfs` folder with the game data as loose files (Mario Kart World: about
+200,000 files). NeXo builds the RomFS tables in memory from that folder and reads each file only
+when the game asks for it. Open `exefs/main.npdm` (or `main`) to start the game.
 
 ## Services
 

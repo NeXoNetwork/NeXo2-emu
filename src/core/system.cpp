@@ -175,6 +175,10 @@ bool System::LoadGame(const std::string& path) {
             if (e.is_regular_file(ec)) exefs[e.path().filename().string()] = Loader::OpenHostFile(e.path());
         for (const fs::path& r : {dir / "romfs.bin", dir_exefs / "romfs.bin"})
             if (fs::is_regular_file(r, ec)) { romfs = Loader::OpenHostFile(r); break; }
+        // RomFS extraida en archivos sueltos (carpeta romfs junto a exefs)
+        if (!romfs)
+            for (const fs::path& r : {dir / "romfs", dir / "RomFS"})
+                if (fs::is_directory(r, ec)) { romfs = Loader::BuildRomfsFromDirectory(r); break; }
         std::vector<u8> d;
         if (ReadWholeFile(dir / "control.nacp", d)) nacp = std::move(d);
         fallback_name = dir.filename().string();

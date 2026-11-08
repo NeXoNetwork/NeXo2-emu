@@ -227,6 +227,168 @@ bool ParsePartition(VFilePtr file, std::map<std::string, VFilePtr>& out) {
     return true;
 }
 
+namespace {
+// --- RomFS desde una carpeta ---
+// Formato (el mismo que lee OpenRomfsFile y el nn::fs del juego):
+//   cabecera de 0x50 bytes: tamano y luego (posicion, tamano) de la tabla hash de carpetas,
+//   las carpetas, la tabla hash de archivos y los archivos; y donde empiezan los datos.
+//   Carpeta: padre, hermano, primer hijo, primer archivo, siguiente en el hash, largo del nombre, nombre.
+//   Archivo: padre, hermano, posicion y tamano de los datos, siguiente en el hash, largo, nombre.
+//   Las posiciones de las entradas son bytes dentro de su tabla. 0xFFFFFFFF = ninguna.
+// El hash de una entrada mezcla la posicion de su carpeta padre con su nombre: nn::fs busca asi.
+constexpr u32 ROMFS_NONE = 0xFFFFFFFF;
+
+u32 RomfsHash(u32 parent, const std::string& name) {
+    u32 h = parent ^ 123456789u;
+    for (unsigned char c : name) { h = (h >> 5) | (h << 27); h ^= c; }
+    return h;
+}
+u32 RomfsBuckets(size_t n) {   // numero de huecos de la tabla hash (como lo calcula el SDK)
+    if (n < 3) return 3;
+    if (n < 19) return u32(n | 1);
+    size_t c = n;
+    auto small_factor = [](size_t v) { for (size_t d : {2, 3, 5, 7, 11, 13, 17}) if (v % d == 0) return true; return false; };
+    while (small_factor(c)) ++c;
+    return u32(c);
+}
+void Put32(std::vector<u8>& v, size_t at, u32 x) { std::memcpy(&v[at], &x, 4); }
+void Put64(std::vector<u8>& v, size_t at, u64 x) { std::memcpy(&v[at], &x, 8); }
+
+// Archivo hecho de trozos: las tablas (en memoria) y luego los datos de cada archivo del PC.
+// Los archivos del PC se abren al leerlos (puede haber miles: no se dejan todos abiertos).
+class RomfsDirFile final : public VFile {
+public:
+    struct Part { u64 offset, size; fs::path host; };   // host vacio = relleno de ceros
+    RomfsDirFile(std::vector<u8> head, std::vector<Part> parts, u64 total)
+        : m_head(std::move(head)), m_parts(std::move(parts)), m_size(total) {}
+    u64 Size() const override { return m_size; }
+    size_t Read(u64 offset, void* dst, size_t size) override {
+        if (offset >= m_size) return 0;
+        size = size_t(std::min<u64>(size, m_size - offset));
+        u8* out = static_cast<u8*>(dst);
+        std::memset(out, 0, size);
+        const u64 end = offset + size;
+        if (offset < m_head.size())
+            std::memcpy(out, m_head.data() + offset, size_t(std::min<u64>(end, m_head.size()) - offset));
+        // Primer trozo que acaba despues de 'offset' (estan ordenados)
+        auto it = std::upper_bound(m_parts.begin(), m_parts.end(), offset,
+                                   [](u64 o, const Part& p) { return o < p.offset + p.size; });
+        std::lock_guard l(m_mutex);
+        for (; it != m_parts.end() && it->offset < end; ++it) {
+            const u64 from = std::max(offset, it->offset), to = std::min(end, it->offset + it->size);
+            if (m_openPath != it->host) {
+                m_open.close();
+                m_open.clear();
+                m_open.open(it->host, std::ios::binary);
+                m_openPath = it->host;
+            }
+            m_open.clear();
+            m_open.seekg(std::streamoff(from - it->offset));
+            m_open.read(reinterpret_cast<char*>(out + (from - offset)), std::streamsize(to - from));
+        }
+        return size;
+    }
+private:
+    std::vector<u8> m_head;
+    std::vector<Part> m_parts;
+    u64 m_size;
+    std::mutex m_mutex;
+    std::ifstream m_open;      // ultimo archivo leido (se suele leer seguido)
+    fs::path m_openPath;
+};
+} // namespace
+
+VFilePtr BuildRomfsFromDirectory(const fs::path& root) {
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return nullptr;
+    struct Dir { u32 parent; std::string name; fs::path host; std::vector<u32> dirs, files; u32 off = 0; };
+    struct File { u32 parent; std::string name; fs::path host; u64 size; u32 off = 0; u64 data = 0; };
+    std::vector<Dir> dirs{{0, "", root, {}, {}}};
+    std::vector<File> files;
+    // Recorrer carpeta a carpeta (en orden de nombre, para que siempre salga igual)
+    for (size_t d = 0; d < dirs.size(); ++d) {
+        std::vector<fs::directory_entry> entries;
+        for (const auto& e : fs::directory_iterator(dirs[d].host, ec)) entries.push_back(e);
+        std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.path().filename() < b.path().filename(); });
+        for (const auto& e : entries) {
+            const auto utf8 = e.path().filename().u8string();
+            std::string name(utf8.begin(), utf8.end());
+            if (e.is_directory(ec)) {
+                dirs[d].dirs.push_back(u32(dirs.size()));
+                dirs.push_back({u32(d), name, e.path(), {}, {}});
+            } else if (e.is_regular_file(ec)) {
+                dirs[d].files.push_back(u32(files.size()));
+                files.push_back({u32(d), name, e.path(), u64(e.file_size(ec))});
+            }
+        }
+    }
+    auto entry_size = [](size_t fixed, const std::string& n) { return u32(fixed + ((n.size() + 3) & ~size_t(3))); };
+    u32 dir_meta = 0, file_meta = 0;
+    for (auto& d : dirs) { d.off = dir_meta; dir_meta += entry_size(0x18, d.name); }
+    for (auto& f : files) { f.off = file_meta; file_meta += entry_size(0x20, f.name); }
+    u64 data = 0;
+    for (auto& f : files) { data = (data + 0xF) & ~u64(0xF); f.data = data; data += f.size; }
+
+    const u32 dir_buckets = RomfsBuckets(dirs.size()), file_buckets = RomfsBuckets(files.size());
+    // Orden en el archivo: cabecera, tablas, datos (alineados a 0x200)
+    const u64 dir_hash_off = 0x50, dir_meta_off = dir_hash_off + dir_buckets * 4ull;
+    const u64 file_hash_off = dir_meta_off + dir_meta, file_meta_off = file_hash_off + file_buckets * 4ull;
+    const u64 data_off = (file_meta_off + file_meta + 0x1FF) & ~u64(0x1FF);
+    std::vector<u8> head(size_t(file_meta_off + file_meta), 0);
+    Put64(head, 0x00, 0x50);
+    Put64(head, 0x08, dir_hash_off);  Put64(head, 0x10, dir_buckets * 4ull);
+    Put64(head, 0x18, dir_meta_off);  Put64(head, 0x20, dir_meta);
+    Put64(head, 0x28, file_hash_off); Put64(head, 0x30, file_buckets * 4ull);
+    Put64(head, 0x38, file_meta_off); Put64(head, 0x40, file_meta);
+    Put64(head, 0x48, data_off);
+    for (u32 i = 0; i < dir_buckets; ++i) Put32(head, size_t(dir_hash_off + i * 4), ROMFS_NONE);
+    for (u32 i = 0; i < file_buckets; ++i) Put32(head, size_t(file_hash_off + i * 4), ROMFS_NONE);
+
+    for (size_t i = 0; i < dirs.size(); ++i) {
+        const Dir& d = dirs[i];
+        const size_t at = size_t(dir_meta_off + d.off);
+        const u32 parent_off = dirs[d.parent].off;
+        // Hermano: el siguiente hijo de la misma carpeta
+        u32 sibling = ROMFS_NONE;
+        if (i != 0) {
+            const auto& sib = dirs[d.parent].dirs;
+            auto it = std::find(sib.begin(), sib.end(), u32(i));
+            if (it + 1 != sib.end()) sibling = dirs[*(it + 1)].off;
+        }
+        const u32 hash = RomfsHash(parent_off, d.name);
+        const size_t bucket = size_t(dir_hash_off + (hash % dir_buckets) * 4);
+        Put32(head, at + 0x00, parent_off);
+        Put32(head, at + 0x04, sibling);
+        Put32(head, at + 0x08, d.dirs.empty() ? ROMFS_NONE : dirs[d.dirs[0]].off);
+        Put32(head, at + 0x0C, d.files.empty() ? ROMFS_NONE : files[d.files[0]].off);
+        Put32(head, at + 0x10, Get<u32>(&head[bucket]));   // se encadena delante de los del mismo hueco
+        Put32(head, at + 0x14, u32(d.name.size()));
+        std::memcpy(&head[at + 0x18], d.name.data(), d.name.size());
+        Put32(head, bucket, d.off);
+    }
+    for (const Dir& d : dirs) {
+        for (size_t k = 0; k < d.files.size(); ++k) {
+            const File& f = files[d.files[k]];
+            const size_t at = size_t(file_meta_off + f.off);
+            const u32 hash = RomfsHash(d.off, f.name);
+            const size_t bucket = size_t(file_hash_off + (hash % file_buckets) * 4);
+            Put32(head, at + 0x00, d.off);
+            Put32(head, at + 0x04, k + 1 < d.files.size() ? files[d.files[k + 1]].off : ROMFS_NONE);
+            Put64(head, at + 0x08, f.data);
+            Put64(head, at + 0x10, f.size);
+            Put32(head, at + 0x18, Get<u32>(&head[bucket]));
+            Put32(head, at + 0x1C, u32(f.name.size()));
+            std::memcpy(&head[at + 0x20], f.name.data(), f.name.size());
+            Put32(head, bucket, f.off);
+        }
+    }
+    std::vector<RomfsDirFile::Part> parts;
+    parts.reserve(files.size());
+    for (const File& f : files)
+        if (f.size) parts.push_back({data_off + f.data, f.size, f.host});
+    return std::make_shared<RomfsDirFile>(std::move(head), std::move(parts), data_off + data);
+}
+
 VFilePtr OpenRomfsFile(VFilePtr romfs, const std::string& path) {
     if (!romfs) return nullptr;
     u8 h[0x50];

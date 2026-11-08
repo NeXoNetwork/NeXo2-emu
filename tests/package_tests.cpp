@@ -310,3 +310,61 @@ TEST(Package_NspLoadsAndRuns) {
     sys_holder.reset();
     fs::remove_all(dir, ec);
 }
+
+// RomFS en archivos sueltos (carpeta romfs de un juego extraido)
+TEST(Package_RomfsFromDirectory) {
+    const fs::path dir = fs::temp_directory_path() / "nexo2_test_romfs_dir";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "Data" / "Sub", ec);
+    auto write = [](const fs::path& p, const std::string& text) { std::ofstream(p, std::ios::binary) << text; };
+    write(dir / "top.txt", "arriba");
+    write(dir / "Data" / "a.bin", "AAAA");
+    write(dir / "Data" / "b.bin", "");
+    write(dir / "Data" / "Sub" / "deep.txt", "muy dentro");
+    {
+        auto romfs = Loader::BuildRomfsFromDirectory(dir);
+        CHECK(romfs != nullptr);
+        auto text = [&](const std::string& path) {
+            auto f = Loader::OpenRomfsFile(romfs, path);
+            if (!f) return std::string("<no>");
+            auto d = f->ReadAll();
+            return std::string(d.begin(), d.end());
+        };
+        CHECK(text("/top.txt") == std::string("arriba"));
+        CHECK(text("/Data/a.bin") == std::string("AAAA"));
+        CHECK(text("/Data/b.bin") == std::string(""));
+        CHECK(text("/Data/Sub/deep.txt") == std::string("muy dentro"));
+        CHECK(text("/Data/none.txt") == std::string("<no>"));
+        // Buscar como nn::fs: por la tabla hash (padre + nombre), no recorriendo hijos
+        const auto all = romfs->ReadAll();
+        auto get32 = [&](u64 at) { u32 v; std::memcpy(&v, &all[size_t(at)], 4); return v; };
+        auto get64 = [&](u64 at) { u64 v; std::memcpy(&v, &all[size_t(at)], 8); return v; };
+        auto hash = [](u32 parent, const std::string& n) {
+            u32 x = parent ^ 123456789u;
+            for (unsigned char c : n) { x = (x >> 5) | (x << 27); x ^= c; }
+            return x;
+        };
+        auto find = [&](u64 hash_off, u64 hash_size, u64 meta_off, u32 name_at, u32 next_at, u32 parent, const std::string& n) {
+            u32 e = get32(hash_off + (hash(parent, n) % (hash_size / 4)) * 4);
+            while (e != 0xFFFFFFFF) {
+                const u64 at = meta_off + e;
+                if (get32(at) == parent && get32(at + name_at - 4) == n.size() &&
+                    std::memcmp(&all[size_t(at + name_at)], n.data(), n.size()) == 0) return e;
+                e = get32(at + next_at);
+            }
+            return e;
+        };
+        const u32 data_dir = find(get64(0x08), get64(0x10), get64(0x18), 0x18, 0x10, 0, "Data");
+        CHECK(data_dir != 0xFFFFFFFF);
+        const u32 a_file = find(get64(0x28), get64(0x30), get64(0x38), 0x20, 0x18, data_dir, "a.bin");
+        CHECK(a_file != 0xFFFFFFFF);
+        if (a_file != 0xFFFFFFFF) {
+            const u64 at = get64(0x38) + a_file;
+            const size_t d = size_t(get64(0x48) + get64(at + 8));
+            CHECK(std::string(all.begin() + d, all.begin() + d + 4) == "AAAA");
+        }
+    }
+    CHECK(Loader::BuildRomfsFromDirectory(dir / "no_existe") == nullptr);
+    fs::remove_all(dir, ec);
+}

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <map>
@@ -47,7 +48,7 @@ struct MemoryRegion {
 };
 
 // Gestor de memoria por paginación (VMM básico).
-// En vez de reservar 12 GB de golpe (lo que petaría en muchos PCs), las
+// En vez de reservar 64 GB de golpe (lo que petaría en muchos PCs), las
 // páginas de 4 KB se crean bajo demanda la primera vez que se escriben.
 //
 // Varios hilos: la CPU emulada y la GPU (en su propio hilo) leen y escriben a la vez.
@@ -55,7 +56,7 @@ struct MemoryRegion {
 // Clear() y el mapa de zonas solo se usan con la GPU parada.
 class Memory {
 public:
-    static constexpr u64 ADDRESS_SPACE = 16ULL * 1024 * 1024 * 1024; // 16 GB (lo que cubre la tabla plana del JIT)
+    static constexpr u64 ADDRESS_SPACE = 64ULL * 1024 * 1024 * 1024; // 64 GB (lo que cubre la tabla plana del JIT)
     static constexpr u64 PAGE_SIZE     = 0x1000;                     // 4 KB
 
     Memory() = default;
@@ -63,10 +64,15 @@ public:
     // Borra todo (paginas y zonas). Se usa al cargar un programa nuevo.
     void Clear() {
         std::scoped_lock lock(m_pageMutex, m_codeMutex);
-        for (auto& l2 : m_table) l2.store(nullptr, std::memory_order_relaxed);
+        // La tabla plana solo tiene punteros de paginas que existen: se borran esos
+        // (recorrerla entera serian 128 MB de escrituras).
+        for (u64 l1 = 0; l1 < L1_SIZE; ++l1) {
+            if (m_flat && m_table[l1].load(std::memory_order_relaxed))
+                std::fill_n(m_flat.get() + (l1 << L2_BITS), L2_SIZE, nullptr);
+            m_table[l1].store(nullptr, std::memory_order_relaxed);
+        }
         m_l2Tables.clear();
         m_pages.clear();
-        if (m_flat) std::fill_n(m_flat.get(), FLAT_ENTRIES, nullptr);
         m_regions.clear();
         m_codeWrites = 0;
         ++m_generation;
@@ -94,17 +100,19 @@ public:
 
     // ---------------------------------------------------------------------
     // Tabla de paginas "plana" para el JIT: un puntero por pagina de 4 KB
-    // (2^22 entradas = 16 GB de direcciones). El codigo generado por el JIT la
+    // (2^24 entradas = 64 GB de direcciones). El codigo generado por el JIT la
     // consulta directamente: si la entrada no es nullptr, lee/escribe la memoria
     // sin llamar a ninguna funcion. Entradas a nullptr (pagina que no existe, o
     // pagina con codigo ya traducido) -> el JIT llama a Read()/Write().
     // ---------------------------------------------------------------------
-    static constexpr unsigned FLAT_BITS = 34;                       // bits de direccion cubiertos
+    static constexpr unsigned FLAT_BITS = 36;                       // bits de direccion cubiertos
     static constexpr u64 FLAT_ENTRIES = 1ull << (FLAT_BITS - 12);
     void** EnableFlatPageTable() {
         std::lock_guard lock(m_pageMutex);
         if (!m_flat) {
-            m_flat = std::make_unique<void*[]>(FLAT_ENTRIES);      // todo a nullptr
+            // calloc: el sistema da paginas a cero y solo las reserva al escribirlas
+            // (los 128 MB de la tabla no se gastan si casi no se usan)
+            m_flat.reset(static_cast<void**>(std::calloc(FLAT_ENTRIES, sizeof(void*))));
             for (u64 l1 = 0; l1 < L1_SIZE; ++l1) {
                 L2Table* l2 = m_table[l1].load(std::memory_order_acquire);
                 if (!l2) continue;
@@ -397,7 +405,7 @@ private:
     }
 
     // Tabla de paginas de dos niveles (como la de una CPU real):
-    //   nivel 1: un hueco por cada 2 MB  (12 GB / 2 MB = 6144 huecos)
+    //   nivel 1: un hueco por cada 2 MB  (64 GB / 2 MB = 32768 huecos)
     //   nivel 2: 512 punteros a paginas de 4 KB, creado solo si hace falta
     // Buscar una pagina son dos accesos a array, mucho mas rapido que un unordered_map.
     static constexpr u64 L2_BITS = 9;                       // 512 paginas = 2 MB
@@ -436,13 +444,15 @@ private:
     std::mutex m_codeMutex;                     // apuntar escrituras en codigo
     std::vector<std::unique_ptr<Page>> m_pages;                      // duenas de las paginas
     std::vector<std::unique_ptr<L2Table>> m_l2Tables;                // duenas de las tablas de nivel 2
-    std::array<std::atomic<L2Table*>, L1_SIZE> m_table{};
+    // En el heap: con 64 GB son 256 KB (demasiado para la pila de los tests)
+    std::unique_ptr<std::atomic<L2Table*>[]> m_table{new std::atomic<L2Table*>[L1_SIZE]()};
     u64 m_generation = 0;
     std::atomic<u64> m_codeWrites{0};           // escrituras en paginas de codigo
     std::array<VAddr, 64> m_ring{};             // que paginas eran (las ultimas 64)
     std::vector<std::atomic<bool>*> m_codeWriteFlags;   // una por CPU
     std::mutex m_slowAtomicMutex;
-    std::unique_ptr<void*[]> m_flat;            // tabla plana para el JIT (solo si se pide)
+    struct FreeDeleter { void operator()(void** p) const { std::free(p); } };
+    std::unique_ptr<void*[], FreeDeleter> m_flat;            // tabla plana para el JIT (solo si se pide)
     std::map<VAddr, MemoryRegion> m_regions; // ordenadas por direccion
 };
 

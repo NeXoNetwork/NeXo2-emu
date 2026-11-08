@@ -30,7 +30,7 @@ namespace NeXo2::HLE {
 
 class NetworkState;   // services/bsd.hpp
 
-// Mapa de memoria del proceso. Valores fijos (sin ASLR) y dentro de los 12 GB
+// Mapa de memoria del proceso. Valores fijos (sin ASLR) y dentro de los 64 GB
 // que soporta Core::Memory. Los programas los consultan con svcGetInfo.
 namespace Layout {
     constexpr u64 CODE_BASE        = 0x0000'0000'0800'0000; // donde se carga el NRO
@@ -38,6 +38,10 @@ namespace Layout {
     constexpr u64 ASLR_REGION_SIZE = 0x0000'0003'F800'0000; // hasta 0x4'0000'0000 (16 GB)
     constexpr u64 HEAP_REGION_BASE = 0x0000'0000'8000'0000;
     constexpr u64 HEAP_REGION_SIZE = 0x0000'0001'0000'0000; // 4 GB (hasta 0x1'8000'0000)
+    // Juegos de Switch 2: piden casi 8 GB de heap de una vez. Su heap va despues de la zona
+    // de alias, en 16 GB (hasta 0x8'0000'0000; Core::Memory cubre 64 GB).
+    constexpr u64 HEAP_REGION_BASE_SWITCH2 = 0x0000'0004'0000'0000;
+    constexpr u64 HEAP_REGION_SIZE_SWITCH2 = 0x0000'0004'0000'0000;
     // Alias: donde va la "memoria virtual" de nn::os (svcMapPhysicalMemory). Los juegos de Unity
     // reservan ahi direcciones para toda su memoria: con 1 GB no les cabia. 4 GB, al final.
     constexpr u64 ALIAS_REGION_BASE = 0x0000'0002'0000'0000;
@@ -397,6 +401,8 @@ private:
     u64  m_mainStackSize = Layout::MAIN_STACK_SIZE;
     u64  m_systemResourceSize = 0;   // del main.npdm: sin el, no hay svcMapPhysicalMemory
     u64  m_physicalSize = 0;
+    u64  m_heapBase = Layout::HEAP_REGION_BASE;         // zona del heap (otra en los de Switch 2)
+    u64  m_heapRegionSize = Layout::HEAP_REGION_SIZE;
     u64  m_totalMemory = Layout::TOTAL_MEMORY;   // memoria del proceso (mas en los de Switch 2)         // memoria puesta con svcMapPhysicalMemory
     bool m_isApplication = false;
     u64  m_programId = 0x0100000000001000ULL;

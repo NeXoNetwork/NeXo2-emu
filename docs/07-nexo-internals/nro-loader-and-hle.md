@@ -31,6 +31,7 @@ Interpreter::Run()
 | `0x01FFFE0000` | 4 KB | HLE loader page: exit stub, argv, config entries |
 | `0x01FFFF0000` | 4 KB | TLS of the main thread (`TPIDRRO_EL0`) |
 | `0x0200000000` | 8 GB | Alias region: `svcMapPhysicalMemory` (nn::os virtual memory) |
+| `0x0400000000` | 16 GB | Heap of Switch 2 games (program id `0x0400...`), which ask for almost 8 GB of heap |
 
 The process "has" 3285 MB (`svcGetInfo` TotalMemorySize), like a game on the console. Games
 size their heap from that (malloc, GPU memory...); with 1 GB some ran out of memory.
@@ -46,7 +47,7 @@ games reserve the whole memory (about 3 GB) there, so it moved to the end with 8
 the console. The SDK picks a random address and tries again; before this, the `time` shared memory
 landed in the middle of a range the game had reserved.
 
-All of it fits in the 16 GB that `Core::Memory` supports (the JIT's flat page table covers exactly 16 GB). The values are in
+All of it fits in the 64 GB that `Core::Memory` supports (the JIT's flat page table covers exactly 64 GB). The values are in
 `HLE::Layout` (kernel.hpp) and are reported to programs through `svcGetInfo`.
 
 ## Homebrew ABI (entry)

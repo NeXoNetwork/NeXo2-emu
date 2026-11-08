@@ -39,8 +39,8 @@ While translated code runs, dynarmic calls us back (`UserCallbacks`):
 ## Memory: the page table
 
 Calling a function for every load/store would be slow. `Memory::EnableFlatPageTable()`
-builds a flat table with one host pointer per 4 KB guest page (2^22 entries = 16 GB of
-addresses). Translated code reads it directly: if the entry is not null, the access is a
+builds a flat table with one host pointer per 4 KB guest page (2^24 entries = 64 GB of
+addresses; allocated with `calloc`, so the system only backs the parts that get written). Translated code reads it directly: if the entry is not null, the access is a
 couple of x86 instructions; if it is null (page not created yet, outside the table, or a
 page holding translated code) dynarmic calls `MemoryRead/Write`.
 

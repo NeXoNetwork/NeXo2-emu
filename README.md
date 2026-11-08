@@ -88,3 +88,6 @@ Unzip, put your `.nro` files in `sdmc/switch` and open `NeXo2.exe`.
 NeXo 2 is an independent research and learning project, not affiliated with or endorsed by Nintendo.
 It does not include firmware, keys or games and does not help to obtain them. Use it with homebrew
 or software you legally own. Licensed under the GPLv3 (see [LICENSE](LICENSE)).
+
+> [!IMPORTANT]
+> **Important:**Im using Claude to dev this emulator and learn from it
